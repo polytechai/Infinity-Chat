@@ -1,0 +1,25 @@
+{
+  "short_name": "InfinityChat",
+  "name": "Infinity Chat - Next-Gen Real-Time Messenger",
+  "description": "Enterprise-grade real-time chat with AI summarization, vanish mode, polls, voice notes, and games.",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0a0d14",
+  "theme_color": "#6366f1",
+  "display": "standalone",
+  "orientation": "portrait",
+  "scope": "/"
+}
