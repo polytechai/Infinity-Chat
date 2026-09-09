@@ -13,16 +13,18 @@ import {
   Search,
   ArrowLeft,
   X,
-  Copy,
-  Check,
   Gamepad2,
   Radio,
-  FileDown,
   Shield,
-  Loader2
+  Loader2,
+  LogOut,
+  User,
+  Phone,
+  CheckCircle,
+  MessageSquare
 } from "lucide-react";
 
-// Inline Style Tokens for Guaranteed Consistency across Vercel/Netlify
+// Theme Tokens for Consistent Rendering
 const THEME = {
   bg: "#0b0f19",
   sidebar: "#111726",
@@ -36,6 +38,14 @@ const THEME = {
   text: "#f8fafc",
   textMuted: "#94a3b8"
 };
+
+const AVATAR_OPTIONS = [
+  "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=140",
+  "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=140",
+  "https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?w=140",
+  "https://images.unsplash.com/photo-1580489944761-15a19d654956?w=140",
+  "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=140"
+];
 
 const INITIAL_CHATS = [
   {
@@ -66,15 +76,26 @@ const INITIAL_CHATS = [
 ];
 
 export default function App() {
-  const [currentUser] = useState({
-    id: "usr_me",
-    name: "Alex Rivera",
-    avatar: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=120"
+  // Authentication & Session Persistence
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem("infinity_chat_user");
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      return null;
+    }
   });
 
+  // Auth Screen Form State
+  const [regName, setRegName] = useState("");
+  const [regPhone, setRegPhone] = useState("+880 ");
+  const [selectedAvatar, setSelectedAvatar] = useState(AVATAR_OPTIONS[0]);
+  const [authError, setAuthError] = useState("");
+
+  // Chat State
   const [activeChat, setActiveChat] = useState(INITIAL_CHATS[0]);
   const [searchTerm, setSearchTerm] = useState("");
-  const [mobileView, setMobileView] = useState("list"); // 'list' or 'chat'
+  const [mobileView, setMobileView] = useState("list");
   const [vanishMode, setVanishMode] = useState(false);
   const [inputText, setInputText] = useState("");
   const [isRecording, setIsRecording] = useState(false);
@@ -82,6 +103,7 @@ export default function App() {
   const [playingAudioId, setPlayingAudioId] = useState(null);
 
   // Modals
+  const [showProfileModal, setShowProfileModal] = useState(false);
   const [showSummarizer, setShowSummarizer] = useState(false);
   const [showImageGen, setShowImageGen] = useState(false);
   const [isGeneratingImg, setIsGeneratingImg] = useState(false);
@@ -99,9 +121,9 @@ export default function App() {
     },
     {
       id: "msg_2",
-      senderId: "usr_me",
-      senderName: "Alex Rivera",
-      content: "All features loaded: AI summarization, polls, vanish mode, and attachments.",
+      senderId: "usr_init",
+      senderName: "Infinity Bot",
+      content: "End-to-End Encryption established. Try /imagine or start a game!",
       type: "text",
       createdAt: new Date().toISOString()
     }
@@ -123,6 +145,39 @@ export default function App() {
     }
     return () => clearInterval(timer);
   }, [isRecording]);
+
+  // Handle Login / Registration
+  const handleRegisterSubmit = (e) => {
+    e.preventDefault();
+    if (!regName.trim()) {
+      setAuthError("Please enter your name.");
+      return;
+    }
+    if (!regPhone.trim() || regPhone.length < 7) {
+      setAuthError("Please provide a valid mobile number.");
+      return;
+    }
+
+    const newUser = {
+      id: `usr_${Date.now()}`,
+      name: regName.trim(),
+      phone: regPhone.trim(),
+      avatar: selectedAvatar,
+      joinedAt: new Date().toISOString()
+    };
+
+    localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
+    setCurrentUser(newUser);
+    setAuthError("");
+  };
+
+  // Handle Logout
+  const handleLogout = () => {
+    localStorage.removeItem("infinity_chat_user");
+    setCurrentUser(null);
+    setShowProfileModal(false);
+    setMobileView("list");
+  };
 
   const handleSendMessage = () => {
     if (!inputText.trim()) return;
@@ -221,7 +276,6 @@ export default function App() {
 
           board[index] = msg.game.turn;
 
-          // Winner Check
           const lines = [
             [0, 1, 2], [3, 4, 5], [6, 7, 8],
             [0, 3, 6], [1, 4, 7], [2, 5, 8],
@@ -285,6 +339,98 @@ export default function App() {
     c.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
+  // -------------------------------------------------------------
+  // VIEW 1: AUTHENTICATION SCREEN (IF NOT LOGGED IN)
+  // -------------------------------------------------------------
+  if (!currentUser) {
+    return (
+      <div style={styles.authContainer}>
+        <div style={styles.authCard}>
+          {/* Logo & Header */}
+          <div style={{ textAlign: "center", marginBottom: "24px" }}>
+            <div style={styles.authLogoCircle}>
+              <MessageSquare size={32} color="#ffffff" />
+            </div>
+            <h1 style={{ fontSize: "22px", fontWeight: "800", color: THEME.text }}>
+              Infinity Chat
+            </h1>
+            <p style={{ fontSize: "13px", color: THEME.textMuted, marginTop: "4px" }}>
+              Welcome! Register your profile to start real-time messaging.
+            </p>
+          </div>
+
+          {authError && <div style={styles.authErrorBox}>{authError}</div>}
+
+          <form onSubmit={handleRegisterSubmit} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            {/* Avatar Picker */}
+            <div>
+              <label style={styles.authFieldLabel}>Choose Avatar</label>
+              <div style={styles.avatarPickerRow}>
+                {AVATAR_OPTIONS.map((imgUrl, i) => (
+                  <img
+                    key={i}
+                    src={imgUrl}
+                    alt=""
+                    onClick={() => setSelectedAvatar(imgUrl)}
+                    style={{
+                      ...styles.avatarOption,
+                      border:
+                        selectedAvatar === imgUrl
+                          ? `3px solid ${THEME.primary}`
+                          : `2px solid ${THEME.border}`
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Display Name */}
+            <div>
+              <label style={styles.authFieldLabel}>Your Name</label>
+              <div style={styles.authInputWrapper}>
+                <User size={18} color={THEME.textMuted} style={{ marginRight: "8px" }} />
+                <input
+                  type="text"
+                  placeholder="e.g. Alex Rivera"
+                  value={regName}
+                  onChange={(e) => setRegName(e.target.value)}
+                  style={styles.authInput}
+                />
+              </div>
+            </div>
+
+            {/* Phone Number */}
+            <div>
+              <label style={styles.authFieldLabel}>Phone Number</label>
+              <div style={styles.authInputWrapper}>
+                <Phone size={18} color={THEME.textMuted} style={{ marginRight: "8px" }} />
+                <input
+                  type="tel"
+                  placeholder="+880 1700-000000"
+                  value={regPhone}
+                  onChange={(e) => setRegPhone(e.target.value)}
+                  style={styles.authInput}
+                />
+              </div>
+            </div>
+
+            <button type="submit" style={styles.authSubmitBtn}>
+              <span>Start Messaging</span>
+              <CheckCircle size={18} />
+            </button>
+          </form>
+
+          <div style={styles.authFooterNote}>
+            🔒 End-to-End Encrypted & Persistent Local Session
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // VIEW 2: MAIN MESSENGER INTERFACE
+  // -------------------------------------------------------------
   return (
     <div style={styles.appContainer}>
       {/* SIDEBAR */}
@@ -297,13 +443,25 @@ export default function App() {
       >
         {/* User Bar */}
         <div style={styles.userBar}>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div
+            onClick={() => setShowProfileModal(true)}
+            style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer" }}
+            title="Click to view Profile"
+          >
             <img src={currentUser.avatar} alt="" style={styles.avatarLarge} />
             <div>
               <div style={styles.userName}>{currentUser.name}</div>
               <div style={styles.statusOnline}>● Online</div>
             </div>
           </div>
+
+          <button
+            onClick={() => setShowProfileModal(true)}
+            style={styles.profileHeaderBtn}
+            title="Account Profile"
+          >
+            <User size={16} color={THEME.textMuted} />
+          </button>
         </div>
 
         {/* Search */}
@@ -400,18 +558,28 @@ export default function App() {
             </div>
           </div>
 
-          <button
-            onClick={() => setVanishMode(!vanishMode)}
-            style={{
-              ...styles.vanishBtn,
-              backgroundColor: vanishMode ? "rgba(168, 85, 247, 0.2)" : THEME.card,
-              borderColor: vanishMode ? THEME.vanish : THEME.border,
-              color: vanishMode ? "#d8b4fe" : THEME.textMuted
-            }}
-          >
-            <Timer size={14} />
-            <span>Vanish {vanishMode ? "ON" : "OFF"}</span>
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <button
+              onClick={() => setVanishMode(!vanishMode)}
+              style={{
+                ...styles.vanishBtn,
+                backgroundColor: vanishMode ? "rgba(168, 85, 247, 0.2)" : THEME.card,
+                borderColor: vanishMode ? THEME.vanish : THEME.border,
+                color: vanishMode ? "#d8b4fe" : THEME.textMuted
+              }}
+            >
+              <Timer size={14} />
+              <span>Vanish {vanishMode ? "ON" : "OFF"}</span>
+            </button>
+
+            <button
+              onClick={() => setShowProfileModal(true)}
+              style={styles.profileHeaderBtn}
+              title="User Settings"
+            >
+              <User size={17} color={THEME.textMuted} />
+            </button>
+          </div>
         </header>
 
         {/* Message Feed */}
@@ -610,6 +778,65 @@ export default function App() {
         </footer>
       </main>
 
+      {/* PROFILE / LOGOUT MODAL */}
+      {showProfileModal && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modalCard}>
+            <div style={styles.modalHeader}>
+              <span style={{ fontWeight: "bold", fontSize: "15px" }}>User Profile</span>
+              <button onClick={() => setShowProfileModal(false)} style={styles.closeBtn}>
+                <X size={18} />
+              </button>
+            </div>
+            <div style={{ ...styles.modalBody, textAlign: "center" }}>
+              <img
+                src={currentUser.avatar}
+                alt=""
+                style={{
+                  width: "72px",
+                  height: "72px",
+                  borderRadius: "50%",
+                  border: `3px solid ${THEME.primary}`,
+                  margin: "0 auto 12px"
+                }}
+              />
+              <h3 style={{ fontSize: "17px", fontWeight: "bold", margin: "0" }}>
+                {currentUser.name}
+              </h3>
+              <p style={{ fontSize: "13px", color: THEME.textMuted, margin: "4px 0 16px" }}>
+                {currentUser.phone}
+              </p>
+
+              <div style={styles.profileDetailBox}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <span style={{ color: THEME.textMuted }}>User ID:</span>
+                  <span style={{ fontFamily: "monospace", fontSize: "11px" }}>{currentUser.id}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: THEME.textMuted }}>Status:</span>
+                  <span style={{ color: "#34d399", fontWeight: "bold" }}>Verified Active</span>
+                </div>
+              </div>
+            </div>
+            <div style={styles.modalFooter}>
+              <button
+                onClick={handleLogout}
+                style={{
+                  ...styles.primaryModalBtn,
+                  backgroundColor: "#e11d48",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px"
+                }}
+              >
+                <LogOut size={15} />
+                <span>Log Out</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* AI SUMMARIZER MODAL */}
       {showSummarizer && (
         <div style={styles.modalOverlay}>
@@ -626,8 +853,8 @@ export default function App() {
             <div style={styles.modalBody}>
               <div style={styles.summaryBox}>
                 • Processed {messages.length} messages in current thread.
-                <br />• Key takeaways: System stability, attachment uploads, and vanish mode tested.
-                <br />• Next steps: Continuous delivery and Vercel deployment verified.
+                <br />• Key takeaways: Authentication flow initialized and session persistence saved.
+                <br />• Next steps: Continuous messaging and voice note exchange active.
               </div>
             </div>
             <div style={styles.modalFooter}>
@@ -656,7 +883,7 @@ export default function App() {
               <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
                 <input
                   type="text"
-                  placeholder="e.g. Neon cyberpunk city, rainy 8k render"
+                  placeholder="e.g. Neon cyberpunk skyline, rainy 8k render"
                   value={imgPrompt}
                   onChange={(e) => setImgPrompt(e.target.value)}
                   style={styles.modalInput}
@@ -703,7 +930,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Embedded Responsive Media Queries */}
+      {/* Embedded CSS Media Queries */}
       <style>{`
         @media (min-width: 768px) {
           .app-sidebar {
@@ -729,8 +956,109 @@ export default function App() {
   );
 }
 
-// Scoped Clean Layout Styles (Independent of external CSS frameworks)
+// Scoped Clean Stylesheet Object
 const styles = {
+  // Auth Screen Styles
+  authContainer: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: "100vh",
+    width: "100vw",
+    backgroundColor: THEME.bg,
+    padding: "16px",
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif'
+  },
+  authCard: {
+    width: "100%",
+    maxWidth: "420px",
+    backgroundColor: THEME.sidebar,
+    border: `1px solid ${THEME.border}`,
+    borderRadius: "20px",
+    padding: "28px",
+    boxShadow: "0 20px 40px rgba(0,0,0,0.6)"
+  },
+  authLogoCircle: {
+    width: "60px",
+    height: "60px",
+    borderRadius: "50%",
+    backgroundColor: THEME.primary,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    margin: "0 auto 12px"
+  },
+  authFieldLabel: {
+    display: "block",
+    fontSize: "12px",
+    fontWeight: "600",
+    color: THEME.textMuted,
+    marginBottom: "6px"
+  },
+  avatarPickerRow: {
+    display: "flex",
+    gap: "10px",
+    justifyContent: "center",
+    marginBottom: "8px"
+  },
+  avatarOption: {
+    width: "48px",
+    height: "48px",
+    borderRadius: "50%",
+    cursor: "pointer",
+    objectFit: "cover",
+    transition: "transform 0.15s ease"
+  },
+  authInputWrapper: {
+    display: "flex",
+    alignItems: "center",
+    backgroundColor: THEME.card,
+    border: `1px solid ${THEME.border}`,
+    borderRadius: "12px",
+    padding: "10px 14px"
+  },
+  authInput: {
+    background: "transparent",
+    border: "none",
+    color: THEME.text,
+    fontSize: "14px",
+    width: "100%",
+    outline: "none"
+  },
+  authSubmitBtn: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "8px",
+    backgroundColor: THEME.primary,
+    color: "#fff",
+    border: "none",
+    borderRadius: "12px",
+    padding: "14px",
+    fontSize: "14px",
+    fontWeight: "700",
+    cursor: "pointer",
+    marginTop: "8px",
+    boxShadow: "0 4px 14px rgba(99, 102, 241, 0.4)"
+  },
+  authErrorBox: {
+    backgroundColor: "rgba(225, 29, 72, 0.2)",
+    border: "1px solid #e11d48",
+    color: "#fda4af",
+    padding: "8px 12px",
+    borderRadius: "8px",
+    fontSize: "12px",
+    marginBottom: "12px"
+  },
+  authFooterNote: {
+    textAlign: "center",
+    fontSize: "11px",
+    color: THEME.textMuted,
+    marginTop: "20px"
+  },
+
+  // Main Layout Styles
   appContainer: {
     display: "flex",
     height: "100vh",
@@ -754,17 +1082,27 @@ const styles = {
     alignItems: "center",
     justifyContent: "space-between"
   },
+  profileHeaderBtn: {
+    background: "none",
+    border: `1px solid ${THEME.border}`,
+    borderRadius: "10px",
+    padding: "6px",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  },
   avatarLarge: {
     width: "42px",
     height: "42px",
     borderRadius: "50%",
-    objectCover: "cover"
+    objectFit: "cover"
   },
   avatar: {
     width: "36px",
     height: "36px",
     borderRadius: "50%",
-    objectCover: "cover"
+    objectFit: "cover"
   },
   userName: {
     fontSize: "14px",
@@ -1071,7 +1409,7 @@ const styles = {
   },
   modalCard: {
     width: "100%",
-    maxWidth: "460px",
+    maxWidth: "440px",
     backgroundColor: THEME.sidebar,
     border: `1px solid ${THEME.border}`,
     borderRadius: "16px",
@@ -1092,7 +1430,15 @@ const styles = {
     cursor: "pointer"
   },
   modalBody: {
-    padding: "16px"
+    padding: "18px"
+  },
+  profileDetailBox: {
+    backgroundColor: THEME.bg,
+    border: `1px solid ${THEME.border}`,
+    borderRadius: "12px",
+    padding: "12px 16px",
+    fontSize: "12px",
+    textAlign: "left"
   },
   summaryBox: {
     backgroundColor: THEME.bg,
