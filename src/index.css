@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base Reset & Mobile Touch Optimizations */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html {
+    color-scheme: dark;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background-color: #0a0d14;
+    color: #f8fafc;
+    font-family: 'Plus Jakarta Sans', 'Hind Siliguri', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overscroll-behavior-y: none;
+  }
+
+  /* Allow text selection inside chat bubbles and inputs */
+  p, span, pre, input, textarea {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #29334d;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Custom Component Utilities */
+@layer components {
+  /* Voice note audio wave animation bar */
+  .voice-bar {
+    animation: soundWave 1.2s ease-in-out infinite;
+    transform-origin: bottom;
+  }
+
+  /* Vanish Mode Glowing Effect */
+  .vanish-glow {
+    box-shadow: 0 0 20px rgba(168, 85, 247, 0.25);
+    border-color: rgba(168, 85, 247, 0.5);
+  }
+
+  /* Glassmorphism Surface */
+  .glass-card {
+    background: rgba(18, 24, 38, 0.75);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(41, 51, 77, 0.6);
+  }
+}
+
+/* Animations */
+@keyframes soundWave {
+  0%, 100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
