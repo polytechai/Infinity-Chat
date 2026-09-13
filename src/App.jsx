@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import {
-  getFirestore,
-  collection,
-  doc,
-  setDoc,
-  getDoc,
-  onSnapshot,
-  query,
-  orderBy
-} from "firebase/firestore";
+  getDatabase,
+  ref,
+  set,
+  get,
+  child,
+  onValue,
+  off,
+  update
+} from "firebase/database";
 import {
   Send,
   Paperclip,
@@ -56,11 +56,12 @@ import {
 } from "lucide-react";
 
 // -------------------------------------------------------------
-// 1. FIREBASE INITIALIZATION WITH YOUR EXACT CREDENTIALS
+// 1. FIREBASE REALTIME DATABASE CONFIGURATION (MODULAR SDK v10+)
 // -------------------------------------------------------------
 const firebaseConfig = {
   apiKey: "AIzaSyDyyRhtdPpm_a9dCSW1cvlIQOUdi2vOgxY",
   authDomain: "infinity-chat-922be.firebaseapp.com",
+  databaseURL: "https://infinity-chat-922be-default-rtdb.firebaseio.com",
   projectId: "infinity-chat-922be",
   storageBucket: "infinity-chat-922be.firebasestorage.app",
   messagingSenderId: "547476197740",
@@ -69,9 +70,9 @@ const firebaseConfig = {
 };
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-const db = getFirestore(app);
+const db = getDatabase(app);
 
-// Design Tokens (Standalone dark aesthetic)
+// Dark theme tokens
 const THEME = {
   bg: "#090d16",
   sidebar: "#101624",
@@ -90,7 +91,7 @@ const THEME = {
   tickRead: "#38bdf8"
 };
 
-// SHA-256 Polyfill for secure password storage in Firebase
+// SHA-256 for secure password storage in Realtime Database
 async function hashPassword(str) {
   const encoder = new TextEncoder();
   const data = encoder.encode(str);
@@ -99,9 +100,17 @@ async function hashPassword(str) {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Generate deterministic room ID for 1-to-1 chats so both devices connect to the same stream
+// Generate deterministic room ID for 1-to-1 chats so both devices connect to the same RTDB node
 function getOneToOneRoomId(phoneA, phoneB) {
   return [phoneA, phoneB].sort().join("_");
+}
+
+// Non-hanging promise wrapper with timeout to ensure UI never freezes
+function withTimeout(promise, ms = 8000, errorMsg = "Database request timed out. Please check Realtime Database rules or internet connection.") {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(errorMsg)), ms))
+  ]);
 }
 
 export default function App() {
@@ -130,7 +139,7 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState(false);
 
   // -------------------------------------------------------------
-  // CONTACTS & REALTIME MESSAGES (FIREBASE FIRESTORE SYNCED)
+  // CONTACTS & REALTIME MESSAGES (FIREBASE RTDB SYNCED)
   // -------------------------------------------------------------
   const [contacts, setContacts] = useState([]);
   const [activeChat, setActiveChat] = useState(null);
@@ -178,7 +187,7 @@ export default function App() {
 
   const showToast = (msg) => {
     setAuthToast(msg);
-    setTimeout(() => setAuthToast(""), 3500);
+    setTimeout(() => setAuthToast(""), 4000);
   };
 
   const validateBDNumber = (num) => {
@@ -186,30 +195,43 @@ export default function App() {
   };
 
   // -------------------------------------------------------------
-  // FIREBASE CLOUD LISTENERS: CONTACTS & MESSAGES
+  // FIREBASE REALTIME DATABASE LISTENERS: CONTACTS & MESSAGES
   // -------------------------------------------------------------
   useEffect(() => {
     if (!currentUser?.phone) return;
 
-    // Listen to user's contacts subcollection in Firebase
-    const contactsRef = collection(db, "users", currentUser.phone, "contacts");
-    const unsubscribeContacts = onSnapshot(
-      contactsRef,
-      (snapshot) => {
-        const list = [];
-        snapshot.forEach((d) => list.push({ id: d.id, ...d.data() }));
+    // Listen to user's contacts node in Firebase Realtime Database
+    const contactsNodeRef = ref(db, `users/${currentUser.phone}/contacts`);
+    
+    const handleContacts = (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list = Object.keys(data).map((k) => ({
+          id: k,
+          ...data[k]
+        }));
         setContacts(list);
 
-        if (list.length > 0 && !activeChat) {
-          setActiveChat(list[0]);
-        }
-      },
-      (error) => {
-        console.error("Firebase contacts listener error:", error.message);
+        setActiveChat((prev) => {
+          if (!prev && list.length > 0) return list[0];
+          if (prev) {
+            const match = list.find((c) => c.id === prev.id);
+            return match || prev;
+          }
+          return null;
+        });
+      } else {
+        setContacts([]);
       }
-    );
+    };
 
-    return () => unsubscribeContacts();
+    onValue(contactsNodeRef, handleContacts, (error) => {
+      console.error("Firebase RTDB contacts listener error:", error);
+    });
+
+    return () => {
+      off(contactsNodeRef);
+    };
   }, [currentUser?.phone]);
 
   // Listen to realtime messages for the active conversation
@@ -220,22 +242,30 @@ export default function App() {
       ? activeChat.id
       : activeChat.roomId || getOneToOneRoomId(currentUser.phone, activeChat.phone);
 
-    const msgsRef = collection(db, "conversations", roomId, "messages");
-    const q = query(msgsRef, orderBy("createdAt", "asc"));
+    const msgsNodeRef = ref(db, `conversations/${roomId}/messages`);
 
-    const unsubscribeMessages = onSnapshot(
-      q,
-      (snapshot) => {
-        const msgs = [];
-        snapshot.forEach((d) => msgs.push({ id: d.id, ...d.data() }));
-        setMessagesMap((prev) => ({ ...prev, [activeChat.id]: msgs }));
-      },
-      (error) => {
-        console.error("Firebase messages stream error:", error.message);
+    const handleMessages = (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const list = Object.keys(data).map((k) => ({
+          id: k,
+          ...data[k]
+        }));
+        // Sort chronologically
+        list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        setMessagesMap((prev) => ({ ...prev, [activeChat.id]: list }));
+      } else {
+        setMessagesMap((prev) => ({ ...prev, [activeChat.id]: [] }));
       }
-    );
+    };
 
-    return () => unsubscribeMessages();
+    onValue(msgsNodeRef, handleMessages, (error) => {
+      console.error("Firebase RTDB messages stream error:", error);
+    });
+
+    return () => {
+      off(msgsNodeRef);
+    };
   }, [activeChat?.id, currentUser?.phone]);
 
   // Voice recording timer
@@ -277,7 +307,7 @@ export default function App() {
   }, [activeMessages]);
 
   // -------------------------------------------------------------
-  // REGISTRATION & FIREBASE GLOBAL CLOUD WRITE
+  // REGISTRATION & REALTIME DATABASE GLOBAL WRITE
   // -------------------------------------------------------------
   const handleStartRegistration = (e) => {
     e.preventDefault();
@@ -308,6 +338,8 @@ export default function App() {
     }
 
     setIsSyncing(true);
+    console.log("Starting Firebase RTDB registration for:", phoneInput.trim());
+
     try {
       const hashedPassword = await hashPassword(passwordInput);
       const cleanPhone = phoneInput.trim();
@@ -324,19 +356,22 @@ export default function App() {
         registeredAt: new Date().toISOString()
       };
 
-      // 1. SAVE GLOBALLY TO YOUR FIREBASE FIRESTORE "users" COLLECTION
-      await setDoc(doc(db, "users", cleanPhone), userRecord, { merge: true });
+      // SAVE TO REALTIME DATABASE under users/{cleanPhone}
+      const userRef = ref(db, `users/${cleanPhone}`);
+      await withTimeout(set(userRef, userRecord), 8000, "Registration timed out. Check Realtime Database rules.");
 
-      // 2. Persist session in LocalStorage
+      console.log("Firebase RTDB registration successful:", userRecord);
+
+      // Persist session in LocalStorage
       localStorage.setItem("infinity_auth_user", JSON.stringify(userRecord));
       setCurrentUser(userRecord);
       setProfileName(userRecord.name);
       setProfileAbout(userRecord.about);
-      showToast("Account successfully registered and saved to Firebase! 🇧🇩");
+      showToast("Account successfully registered in Realtime Database! 🇧🇩");
       setAuthMode("register");
     } catch (err) {
-      console.error("Firebase global registration error:", err);
-      showToast(`Firebase Error: ${err.message}`);
+      console.error("Firebase RTDB Registration Error:", err);
+      showToast(`Registration Error: ${err.message || "Failed to write to database"}`);
     } finally {
       setIsSyncing(false);
     }
@@ -351,18 +386,20 @@ export default function App() {
     }
 
     setIsSyncing(true);
-    try {
-      // Query your Firebase Firestore database
-      const userDocRef = doc(db, "users", cleanPhone);
-      const userSnap = await getDoc(userDocRef);
+    console.log("Attempting Firebase RTDB login for:", cleanPhone);
 
-      if (!userSnap.exists()) {
-        showToast("Account not found in Firebase! Please Register.");
+    try {
+      // Query Firebase Realtime Database
+      const userRef = ref(db, `users/${cleanPhone}`);
+      const snapshot = await withTimeout(get(userRef), 8000, "Login timed out. Check database connection.");
+
+      if (!snapshot.exists()) {
+        showToast("Account not found in Realtime Database! Please Register.");
         setIsSyncing(false);
         return;
       }
 
-      const account = userSnap.data();
+      const account = snapshot.val();
       const enteredHash = await hashPassword(passwordInput);
 
       if (account.passwordHash && account.passwordHash !== enteredHash) {
@@ -371,8 +408,12 @@ export default function App() {
         return;
       }
 
-      // Update online status in Firebase
-      await setDoc(userDocRef, { isOnline: true, lastSeen: "Online" }, { merge: true });
+      // Update online status in RTDB
+      try {
+        await update(userRef, { isOnline: true, lastSeen: "Online" });
+      } catch (e) {
+        console.warn("Could not update online status:", e);
+      }
 
       localStorage.setItem("infinity_auth_user", JSON.stringify(account));
       setCurrentUser(account);
@@ -381,14 +422,14 @@ export default function App() {
       showToast(`Welcome back, ${account.name}!`);
     } catch (err) {
       console.error("Firebase Login Error:", err);
-      showToast(`Firebase Login Error: ${err.message}`);
+      showToast(`Login Error: ${err.message || "Database connection error"}`);
     } finally {
       setIsSyncing(false);
     }
   };
 
   // -------------------------------------------------------------
-  // FIREBASE REALTIME CONTACT LOOKUP & ADDING
+  // REALTIME DATABASE CONTACT LOOKUP & ADDING
   // -------------------------------------------------------------
   const handleVerifyAndAddContact = async (e) => {
     e.preventDefault();
@@ -405,12 +446,15 @@ export default function App() {
     }
 
     setIsSyncing(true);
-    try {
-      // 1. QUERY YOUR FIREBASE FIRESTORE DATABASE
-      const targetUserDoc = await getDoc(doc(db, "users", target));
+    console.log("Checking RTDB user directory for:", target);
 
-      if (targetUserDoc.exists()) {
-        const foundUser = targetUserDoc.data();
+    try {
+      // Query Firebase Realtime Database node users/{target}
+      const targetUserRef = ref(db, `users/${target}`);
+      const snapshot = await withTimeout(get(targetUserRef), 7000, "Lookup timed out.");
+
+      if (snapshot.exists()) {
+        const foundUser = snapshot.val();
         const roomId = getOneToOneRoomId(currentUser.phone, foundUser.phone);
 
         const newContact = {
@@ -419,17 +463,17 @@ export default function App() {
           name: foundUser.name,
           avatar: foundUser.avatar,
           about: foundUser.about || "",
-          isOnline: foundUser.isOnline || true,
+          isOnline: foundUser.isOnline ?? true,
           lastSeen: foundUser.lastSeen || "Online",
           roomId: roomId,
           isGroup: false,
           addedAt: new Date().toISOString()
         };
 
-        // Save into current user's contact subcollection in Firebase
-        await setDoc(doc(db, "users", currentUser.phone, "contacts", newContact.id), newContact);
+        // Save into current user's contact list in RTDB
+        await set(ref(db, `users/${currentUser.phone}/contacts/${newContact.id}`), newContact);
 
-        // Reciprocally save into target peer's contact subcollection so both users see each other
+        // Reciprocally save into target peer's contact list so both see each other
         const reciprocalContact = {
           id: `c_${currentUser.phone}`,
           phone: currentUser.phone,
@@ -442,15 +486,15 @@ export default function App() {
           isGroup: false,
           addedAt: new Date().toISOString()
         };
-        await setDoc(doc(db, "users", foundUser.phone, "contacts", reciprocalContact.id), reciprocalContact);
+        await set(ref(db, `users/${foundUser.phone}/contacts/${reciprocalContact.id}`), reciprocalContact);
 
         setActiveChat(newContact);
         setShowAddContactModal(false);
         setContactSearchPhone("");
         setMobileView("chat");
-        showToast(`Contact "${foundUser.name}" verified and added via Firebase! 🎉`);
+        showToast(`Contact "${foundUser.name}" verified and added via RTDB! 🎉`);
       } else {
-        // Not found in Firebase -> Open Invite Alert
+        // Not found in Realtime Database -> Show invite modal
         setShowAddContactModal(false);
         setInviteModalData({
           phone: target,
@@ -459,15 +503,15 @@ export default function App() {
         setContactSearchPhone("");
       }
     } catch (err) {
-      console.error("Firebase directory query error:", err);
-      showToast(`Firebase query error: ${err.message}`);
+      console.error("RTDB directory query error:", err);
+      showToast(`Database Query Error: ${err.message}`);
     } finally {
       setIsSyncing(false);
     }
   };
 
   // -------------------------------------------------------------
-  // SEND MESSAGE TO FIREBASE CONVERSATIONS
+  // SEND MESSAGE TO FIREBASE REALTIME DATABASE
   // -------------------------------------------------------------
   const handleSendMessage = async () => {
     if (!inputText.trim() || !activeChat || !currentUser) return;
@@ -493,22 +537,19 @@ export default function App() {
     setInputText("");
 
     try {
-      // Write persistently to your Firebase Firestore
-      await setDoc(doc(db, "conversations", roomId, "messages", msgId), msgPayload);
+      // Write persistently to Firebase Realtime Database
+      const msgRef = ref(db, `conversations/${roomId}/messages/${msgId}`);
+      await set(msgRef, msgPayload);
 
-      // Update status to read after delivery
+      // Update status to read after delivery simulation
       setTimeout(async () => {
         try {
-          await setDoc(
-            doc(db, "conversations", roomId, "messages", msgId),
-            { status: "read" },
-            { merge: true }
-          );
+          await update(msgRef, { status: "read" });
         } catch (e) {}
       }, 1000);
     } catch (e) {
-      console.error("Firebase message dispatch error:", e);
-      showToast("Message send failed. Check Firebase network permissions.");
+      console.error("Firebase message write error:", e);
+      showToast("Message send failed. Check RTDB rules or connection.");
     }
 
     if (vanishMode) {
@@ -543,7 +584,7 @@ export default function App() {
     };
 
     try {
-      await setDoc(doc(db, "conversations", roomId, "messages", voiceMsgId), voicePayload);
+      await set(ref(db, `conversations/${roomId}/messages/${voiceMsgId}`), voicePayload);
     } catch (e) {
       console.error("Firebase voice save error:", e);
     }
@@ -576,13 +617,13 @@ export default function App() {
     };
 
     try {
-      await setDoc(doc(db, "conversations", roomId, "messages", fileMsgId), filePayload);
+      await set(ref(db, `conversations/${roomId}/messages/${fileMsgId}`), filePayload);
     } catch (err) {
-      console.error("Firebase file record error:", err);
+      console.error("Firebase file write error:", err);
     }
   };
 
-  // Group Creation in Firebase
+  // Group Creation in Firebase RTDB
   const handleCreateGroup = async (e) => {
     e.preventDefault();
     if (!newGroupName.trim()) {
@@ -612,15 +653,15 @@ export default function App() {
     };
 
     try {
-      // Save group into current user's contact subcollection in Firebase
-      await setDoc(doc(db, "users", currentUser.phone, "contacts", grpId), newGroup);
+      // Save group under current user's contacts
+      await set(ref(db, `users/${currentUser.phone}/contacts/${grpId}`), newGroup);
 
-      // Save into each member's contact subcollection so it displays on their devices
+      // Save under each member's contacts node so it syncs to their app
       for (const peerPhone of memberPhones) {
-        await setDoc(doc(db, "users", peerPhone, "contacts", grpId), newGroup);
+        await set(ref(db, `users/${peerPhone}/contacts/${grpId}`), newGroup);
       }
     } catch (err) {
-      console.error("Group creation in Firebase failed:", err);
+      console.error("Group creation in RTDB failed:", err);
     }
 
     setActiveChat(newGroup);
@@ -628,7 +669,7 @@ export default function App() {
     setNewGroupName("");
     setSelectedGroupMembers([]);
     setMobileView("chat");
-    showToast(`Group "${newGroup.name}" created and synced via Firebase!`);
+    showToast(`Group "${newGroup.name}" created and synced via RTDB!`);
   };
 
   // WebRTC Call Initiation
@@ -674,7 +715,7 @@ export default function App() {
   const handleLogout = async () => {
     if (currentUser?.phone) {
       try {
-        await setDoc(doc(db, "users", currentUser.phone), { isOnline: false, lastSeen: "Offline" }, { merge: true });
+        await update(ref(db, `users/${currentUser.phone}`), { isOnline: false, lastSeen: "Offline" });
       } catch (e) {}
     }
     localStorage.removeItem("infinity_auth_user");
@@ -703,7 +744,7 @@ export default function App() {
             </div>
             <h1 style={{ fontSize: "24px", fontWeight: "800", margin: "4px 0 0" }}>Infinity Chat</h1>
             <p style={{ fontSize: "13px", color: THEME.textMuted, margin: "4px 0 0" }}>
-              Connected to Firebase ({firebaseConfig.projectId}) 🇧🇩
+              Firebase Realtime Database ({firebaseConfig.projectId}) 🇧🇩
             </p>
           </div>
 
@@ -762,7 +803,7 @@ export default function App() {
                   />
                 </div>
                 <span style={{ fontSize: "10px", color: THEME.textMuted, marginTop: "2px", display: "block" }}>
-                  Saved in Firebase so contacts on any device find you instantly
+                  Saved in Realtime Database so contacts on any device find you instantly
                 </span>
               </div>
 
@@ -833,7 +874,7 @@ export default function App() {
               </div>
 
               <button onClick={handleVerifyOtp} disabled={isSyncing} style={styles.primaryActionButton}>
-                {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Verify & Save in Firebase</span>}
+                {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Verify & Save in RTDB</span>}
                 <CheckCircle size={18} />
               </button>
 
@@ -876,7 +917,7 @@ export default function App() {
               </div>
 
               <button type="submit" disabled={isSyncing} style={styles.primaryActionButton}>
-                {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Sign In via Firebase</span>}
+                {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Sign In via RTDB</span>}
                 <CheckCircle size={18} />
               </button>
 
@@ -898,7 +939,7 @@ export default function App() {
 
           <div style={styles.authFooterSeal}>
             <ShieldCheck size={14} color={THEME.accent} style={{ marginRight: "5px" }} />
-            <span>Firebase Firestore • Multi-Device Synced</span>
+            <span>Firebase Realtime Database • Multi-Device Synced</span>
           </div>
         </div>
       </div>
@@ -933,7 +974,7 @@ export default function App() {
             <img src={currentUser.avatar} alt="" style={styles.avatarImg} />
             <div>
               <div style={{ fontWeight: "700", fontSize: "14px" }}>{currentUser.name}</div>
-              <div style={{ fontSize: "11px", color: THEME.accent }}>● Firebase Synced ({currentUser.phone})</div>
+              <div style={{ fontSize: "11px", color: THEME.accent }}>● RTDB Synced ({currentUser.phone})</div>
             </div>
           </div>
 
@@ -941,7 +982,7 @@ export default function App() {
             <button
               onClick={() => setShowCreateGroupModal(true)}
               style={styles.circleActionButton}
-              title="Create Firebase Group"
+              title="Create RTDB Group"
             >
               <Users size={16} color={THEME.secondary} />
             </button>
@@ -949,7 +990,7 @@ export default function App() {
             <button
               onClick={() => setShowAddContactModal(true)}
               style={styles.circleActionButton}
-              title="Add BD Contact from Firebase"
+              title="Add BD Contact from RTDB"
             >
               <UserPlus size={16} color={THEME.accent} />
             </button>
@@ -991,7 +1032,7 @@ export default function App() {
             <div style={styles.contactsScrollList}>
               {filteredContacts.length === 0 ? (
                 <div style={{ padding: "24px 16px", textAlign: "center", color: THEME.textMuted, fontSize: "13px" }}>
-                  No contacts found in Firebase. Click <b>+ Add by Number</b> to verify any BD user globally!
+                  No contacts found in Realtime Database. Click <b>+ Add by Number</b> to verify any BD user globally!
                 </div>
               ) : (
                 filteredContacts.map((c) => {
@@ -1108,8 +1149,8 @@ export default function App() {
                     <div style={styles.settingsRowLeft}>
                       <Database size={18} color="#06b6d4" />
                       <div>
-                        <div style={styles.settingsRowTitle}>Firebase Cloud Database</div>
-                        <div style={styles.settingsRowDesc}>{firebaseConfig.projectId}</div>
+                        <div style={styles.settingsRowTitle}>Firebase Realtime Database</div>
+                        <div style={styles.settingsRowDesc}>{firebaseConfig.projectId} (RTDB v10+)</div>
                       </div>
                     </div>
                     <ChevronRight size={16} color={THEME.textMuted} />
@@ -1128,7 +1169,7 @@ export default function App() {
                 <div style={{ textAlign: "center", marginBottom: "16px" }}>
                   <img src={currentUser.avatar} alt="" style={styles.avatarLargeImg} />
                   <div style={{ fontSize: "11px", color: THEME.textMuted, marginTop: "6px" }}>
-                    Visible globally across all Firebase connected devices
+                    Visible globally across all devices connected to Firebase RTDB
                   </div>
                 </div>
 
@@ -1159,15 +1200,20 @@ export default function App() {
 
                   <button
                     onClick={async () => {
-                      const updated = { ...currentUser, name: profileName, about: profileAbout };
-                      await setDoc(doc(db, "users", currentUser.phone), updated, { merge: true });
-                      setCurrentUser(updated);
-                      localStorage.setItem("infinity_auth_user", JSON.stringify(updated));
-                      showToast("Profile synced to Firebase!");
+                      try {
+                        const userRef = ref(db, `users/${currentUser.phone}`);
+                        await update(userRef, { name: profileName, about: profileAbout });
+                        const updated = { ...currentUser, name: profileName, about: profileAbout };
+                        setCurrentUser(updated);
+                        localStorage.setItem("infinity_auth_user", JSON.stringify(updated));
+                        showToast("Profile synced to Realtime Database!");
+                      } catch (err) {
+                        showToast(`Update failed: ${err.message}`);
+                      }
                     }}
                     style={styles.primaryActionButton}
                   >
-                    Save Changes to Firebase
+                    Save Changes to Database
                   </button>
                 </div>
               </div>
@@ -1251,7 +1297,7 @@ export default function App() {
                     No messages yet with {activeChat.name}
                   </div>
                   <p style={{ fontSize: "12px", color: THEME.textMuted, margin: "4px 0 0" }}>
-                    Connected to Firebase Firestore. Send a message!
+                    Connected to Firebase Realtime Database. Send a message!
                   </p>
                 </div>
               ) : (
@@ -1408,20 +1454,20 @@ export default function App() {
             <MessageSquare size={48} color={THEME.textMuted} style={{ marginBottom: "12px" }} />
             <div style={{ fontSize: "16px", fontWeight: "bold" }}>Welcome, {currentUser.name}!</div>
             <p style={{ fontSize: "13px", color: THEME.textMuted }}>
-              Select a conversation or click <b>+ Add by Number</b> to verify any BD user across Firebase.
+              Select a conversation or click <b>+ Add by Number</b> to verify any BD user across Firebase Realtime Database.
             </p>
           </div>
         )}
       </main>
 
-      {/* ----------------- 1. ADD CONTACT MODAL (FIREBASE) ----------------- */}
+      {/* ----------------- 1. ADD CONTACT MODAL (RTDB) ----------------- */}
       {showAddContactModal && (
         <div style={styles.modalBackdrop}>
           <div style={styles.modalContainerCard}>
             <div style={styles.modalTopHeader}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <UserPlus size={18} color={THEME.accent} />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Add BD Contact (Firebase)</span>
+                <span style={{ fontWeight: "700", fontSize: "15px" }}>Add BD Contact (RTDB Lookup)</span>
               </div>
               <button onClick={() => setShowAddContactModal(false)} style={styles.cleanGhostBtn}>
                 <X size={18} />
@@ -1430,7 +1476,7 @@ export default function App() {
 
             <form onSubmit={handleVerifyAndAddContact} style={{ padding: "18px" }}>
               <p style={{ fontSize: "12px", color: THEME.textMuted, margin: "0 0 12px" }}>
-                Enter an 11-digit BD number. Infinity Chat queries your Firebase collection directly.
+                Enter an 11-digit BD number. Infinity Chat queries the Realtime Database at <code>users/[phone]</code>.
               </p>
 
               <label style={styles.labelTitle}>Mobile Number</label>
@@ -1471,7 +1517,7 @@ export default function App() {
             <div style={styles.modalTopHeader}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <Users size={18} color={THEME.secondary} />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Create Firebase Group</span>
+                <span style={{ fontWeight: "700", fontSize: "15px" }}>Create Realtime Database Group</span>
               </div>
               <button onClick={() => setShowCreateGroupModal(false)} style={styles.cleanGhostBtn}>
                 <X size={18} />
@@ -1554,7 +1600,7 @@ export default function App() {
             <div style={{ ...styles.modalTopHeader, borderBottom: "none", paddingBottom: "0" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <Info size={18} color="#f59e0b" />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Not Found in Firebase</span>
+                <span style={{ fontWeight: "700", fontSize: "15px" }}>Not Found in Realtime Database</span>
               </div>
               <button onClick={() => setInviteModalData(null)} style={styles.cleanGhostBtn}>
                 <X size={18} />
@@ -1569,7 +1615,7 @@ export default function App() {
                 {inviteModalData.phone}
               </h3>
               <p style={{ fontSize: "12px", color: THEME.textMuted, lineHeight: "1.5" }}>
-                This BD number has not registered on Infinity Chat yet. Send them an invite link to connect!
+                This BD number is not registered in the Realtime Database yet. Send them an invite link to install and chat!
               </p>
 
               <div style={styles.inviteLinkContainer}>
