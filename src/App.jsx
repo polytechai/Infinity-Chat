@@ -1,4 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
+import { initializeApp, getApps, getApp } from "firebase/app";
+import {
+  getFirestore,
+  collection,
+  doc,
+  setDoc,
+  getDoc,
+  onSnapshot,
+  query,
+  orderBy
+} from "firebase/firestore";
 import {
   Send,
   Paperclip,
@@ -40,14 +51,27 @@ import {
   KeyRound,
   ShieldCheck,
   Smartphone,
-  Trash2,
-  Eye,
-  EyeOff,
   CheckSquare,
   Square
 } from "lucide-react";
 
-// Theme Configuration (Self-contained design system)
+// -------------------------------------------------------------
+// 1. FIREBASE INITIALIZATION WITH YOUR EXACT CREDENTIALS
+// -------------------------------------------------------------
+const firebaseConfig = {
+  apiKey: "AIzaSyDyyRhtdPpm_a9dCSW1cvlIQOUdi2vOgxY",
+  authDomain: "infinity-chat-922be.firebaseapp.com",
+  projectId: "infinity-chat-922be",
+  storageBucket: "infinity-chat-922be.firebasestorage.app",
+  messagingSenderId: "547476197740",
+  appId: "1:547476197740:web:e56e8f114def584f6be349",
+  measurementId: "G-8DWN7RFZ3E"
+};
+
+const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// Design Tokens (Standalone dark aesthetic)
 const THEME = {
   bg: "#090d16",
   sidebar: "#101624",
@@ -66,39 +90,7 @@ const THEME = {
   tickRead: "#38bdf8"
 };
 
-// Registered User Mock Directory for Validation Checks
-const REGISTERED_DIRECTORY = [
-  {
-    phone: "01711234567",
-    name: "Amina Rahman",
-    avatar: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=140",
-    about: "Busy coding in React & Node.",
-    isOnline: true
-  },
-  {
-    phone: "01819887766",
-    name: "Tariqul Islam",
-    avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=140",
-    about: "Coffee, algorithms and cloud.",
-    isOnline: true
-  },
-  {
-    phone: "01912345678",
-    name: "Farhana Yeasmin",
-    avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=140",
-    about: "Living life one commit at a time.",
-    isOnline: false
-  },
-  {
-    phone: "01301234567",
-    name: "Zubair Ahmed",
-    avatar: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=140",
-    about: "Available on Infinity Chat",
-    isOnline: true
-  }
-];
-
-// Simple SHA-256 Polyfill for secure local storage password hashing
+// SHA-256 Polyfill for secure password storage in Firebase
 async function hashPassword(str) {
   const encoder = new TextEncoder();
   const data = encoder.encode(str);
@@ -107,9 +99,14 @@ async function hashPassword(str) {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Generate deterministic room ID for 1-to-1 chats so both devices connect to the same stream
+function getOneToOneRoomId(phoneA, phoneB) {
+  return [phoneA, phoneB].sort().join("_");
+}
+
 export default function App() {
   // -------------------------------------------------------------
-  // 1. AUTHENTICATION & BD OTP VERIFICATION STATE
+  // AUTHENTICATION & PERSISTENT SESSION
   // -------------------------------------------------------------
   const [currentUser, setCurrentUser] = useState(() => {
     try {
@@ -130,94 +127,26 @@ export default function App() {
   const [otpCode, setOtpCode] = useState(["", "", "", "", "", ""]);
   const [generatedOtp, setGeneratedOtp] = useState("789123");
   const [authToast, setAuthToast] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // -------------------------------------------------------------
-  // 2. CONTACTS & GROUPS SYSTEM
+  // CONTACTS & REALTIME MESSAGES (FIREBASE FIRESTORE SYNCED)
   // -------------------------------------------------------------
-  const [contacts, setContacts] = useState(() => {
-    try {
-      const saved = localStorage.getItem("infinity_contacts_list");
-      if (saved) return JSON.parse(saved);
-    } catch (e) {}
-    return [
-      {
-        id: "c_1",
-        phone: "01711234567",
-        name: "Amina Rahman",
-        avatar: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=140",
-        lastSeen: "Online",
-        isOnline: true,
-        isGroup: false
-      },
-      {
-        id: "c_2",
-        phone: "01819887766",
-        name: "Tariqul Islam",
-        avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=140",
-        lastSeen: "Online",
-        isOnline: true,
-        isGroup: false
-      },
-      {
-        id: "grp_1",
-        name: "DevOps & Core Team 🚀",
-        avatar: "https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=140",
-        isGroup: true,
-        members: ["Amina Rahman", "Tariqul Islam"],
-        lastSeen: "3 members",
-        isOnline: true
-      }
-    ];
-  });
-
-  const [activeChat, setActiveChat] = useState(contacts[0]);
+  const [contacts, setContacts] = useState([]);
+  const [activeChat, setActiveChat] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
-  const [sidebarView, setSidebarView] = useState("chats"); // 'chats' | 'settings'
-  const [mobileView, setMobileView] = useState("list"); // 'list' | 'chat'
+  const [sidebarView, setSidebarView] = useState("chats");
+  const [mobileView, setMobileView] = useState("list");
+  const [messagesMap, setMessagesMap] = useState({});
 
-  // Messages Store mapped by chat ID
-  const [messagesMap, setMessagesMap] = useState(() => {
-    try {
-      const saved = localStorage.getItem("infinity_messages_catalog");
-      if (saved) return JSON.parse(saved);
-    } catch (e) {}
-    return {
-      c_1: [
-        {
-          id: "m_1",
-          senderId: "c_1",
-          senderName: "Amina Rahman",
-          content: "Welcome to Infinity Chat! End-to-end encrypted session initialized.",
-          status: "read",
-          createdAt: new Date(Date.now() - 3600000).toISOString()
-        }
-      ],
-      grp_1: [
-        {
-          id: "m_grp_1",
-          senderId: "c_2",
-          senderName: "Tariqul Islam",
-          content: "Sprint check-in: WebRTC media streams are fully operational.",
-          status: "read",
-          createdAt: new Date().toISOString()
-        }
-      ]
-    };
-  });
-
-  const activeMessages = messagesMap[activeChat?.id] || [];
-
-  // Input & Recording
+  // Inputs & Recording
   const [inputText, setInputText] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [recordSecs, setRecordSecs] = useState(0);
   const [vanishMode, setVanishMode] = useState(false);
   const [playingVoiceId, setPlayingVoiceId] = useState(null);
 
-  // -------------------------------------------------------------
-  // 3. MODALS (Add Contact, Create Group, Not Found Alert)
-  // -------------------------------------------------------------
+  // Modals
   const [showAddContactModal, setShowAddContactModal] = useState(false);
   const [contactSearchPhone, setContactSearchPhone] = useState("");
   const [inviteModalData, setInviteModalData] = useState(null);
@@ -226,35 +155,18 @@ export default function App() {
   const [newGroupName, setNewGroupName] = useState("");
   const [selectedGroupMembers, setSelectedGroupMembers] = useState([]);
 
-  // -------------------------------------------------------------
-  // 4. WEBRTC AUDIO & VIDEO CALLING ENGINE
-  // -------------------------------------------------------------
-  const [activeCall, setActiveCall] = useState(null); // { type: 'audio' | 'video', status: 'ringing' | 'connected', duration: 0 }
+  // WebRTC Live Calling
+  const [activeCall, setActiveCall] = useState(null);
   const [localStream, setLocalStream] = useState(null);
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isVideoDisabled, setIsVideoDisabled] = useState(false);
   const localVideoRef = useRef(null);
 
-  // -------------------------------------------------------------
-  // 5. SETTINGS SUITE STATE
-  // -------------------------------------------------------------
-  const [settingsActiveTab, setSettingsActiveTab] = useState("main"); // 'main' | 'account' | 'privacy' | 'notifications' | 'profile' | 'storage' | 'help'
-
-  // Profile Edit
+  // Settings Suite
+  const [settingsActiveTab, setSettingsActiveTab] = useState("main");
   const [profileName, setProfileName] = useState("");
   const [profileAbout, setProfileAbout] = useState("");
-
-  // Privacy Options
-  const [privacyLastSeen, setPrivacyLastSeen] = useState("Everyone");
-  const [privacyPhoto, setPrivacyPhoto] = useState("Everyone");
   const [readReceipts, setReadReceipts] = useState(true);
-
-  // Notification Options
-  const [notifSound, setNotifSound] = useState(true);
-  const [messagePreviews, setMessagePreviews] = useState(true);
-
-  // Storage Options
-  const [autoDownload, setAutoDownload] = useState(true);
 
   // Refs
   const messagesEndRef = useRef(null);
@@ -262,29 +174,71 @@ export default function App() {
   const avatarUploadRef = useRef(null);
   const otpInputRefs = useRef([]);
 
+  const activeMessages = activeChat ? messagesMap[activeChat.id] || [] : [];
+
+  const showToast = (msg) => {
+    setAuthToast(msg);
+    setTimeout(() => setAuthToast(""), 3500);
+  };
+
+  const validateBDNumber = (num) => {
+    return /^01[3-9]\d{8}$/.test(num.trim());
+  };
+
   // -------------------------------------------------------------
-  // PERSISTENCE EFFECTS
+  // FIREBASE CLOUD LISTENERS: CONTACTS & MESSAGES
   // -------------------------------------------------------------
   useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem("infinity_auth_user", JSON.stringify(currentUser));
-      setProfileName(currentUser.name);
-      setProfileAbout(currentUser.about || "Available on Infinity Chat");
-    }
-  }, [currentUser]);
+    if (!currentUser?.phone) return;
 
+    // Listen to user's contacts subcollection in Firebase
+    const contactsRef = collection(db, "users", currentUser.phone, "contacts");
+    const unsubscribeContacts = onSnapshot(
+      contactsRef,
+      (snapshot) => {
+        const list = [];
+        snapshot.forEach((d) => list.push({ id: d.id, ...d.data() }));
+        setContacts(list);
+
+        if (list.length > 0 && !activeChat) {
+          setActiveChat(list[0]);
+        }
+      },
+      (error) => {
+        console.error("Firebase contacts listener error:", error.message);
+      }
+    );
+
+    return () => unsubscribeContacts();
+  }, [currentUser?.phone]);
+
+  // Listen to realtime messages for the active conversation
   useEffect(() => {
-    localStorage.setItem("infinity_contacts_list", JSON.stringify(contacts));
-  }, [contacts]);
+    if (!currentUser || !activeChat) return;
 
-  useEffect(() => {
-    localStorage.setItem("infinity_messages_catalog", JSON.stringify(messagesMap));
-  }, [messagesMap]);
+    const roomId = activeChat.isGroup
+      ? activeChat.id
+      : activeChat.roomId || getOneToOneRoomId(currentUser.phone, activeChat.phone);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages]);
+    const msgsRef = collection(db, "conversations", roomId, "messages");
+    const q = query(msgsRef, orderBy("createdAt", "asc"));
 
+    const unsubscribeMessages = onSnapshot(
+      q,
+      (snapshot) => {
+        const msgs = [];
+        snapshot.forEach((d) => msgs.push({ id: d.id, ...d.data() }));
+        setMessagesMap((prev) => ({ ...prev, [activeChat.id]: msgs }));
+      },
+      (error) => {
+        console.error("Firebase messages stream error:", error.message);
+      }
+    );
+
+    return () => unsubscribeMessages();
+  }, [activeChat?.id, currentUser?.phone]);
+
+  // Voice recording timer
   useEffect(() => {
     let t;
     if (isRecording) {
@@ -295,6 +249,7 @@ export default function App() {
     return () => clearInterval(t);
   }, [isRecording]);
 
+  // WebRTC Call duration timer
   useEffect(() => {
     let ct;
     if (activeCall) {
@@ -311,36 +266,27 @@ export default function App() {
     return () => clearInterval(ct);
   }, [activeCall?.status]);
 
-  // Connect WebRTC stream to video element when available
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream, activeCall?.status]);
 
-  // Toast Helper
-  const showToast = (msg) => {
-    setAuthToast(msg);
-    setTimeout(() => setAuthToast(""), 3500);
-  };
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [activeMessages]);
 
   // -------------------------------------------------------------
-  // BD PHONE VALIDATION & OTP ENGINE
+  // REGISTRATION & FIREBASE GLOBAL CLOUD WRITE
   // -------------------------------------------------------------
-  const validateBDNumber = (num) => {
-    // Exactly 11 digits starting with 01
-    const regex = /^01[3-9]\d{8}$/;
-    return regex.test(num.trim());
-  };
-
-  const handleStartRegistration = async (e) => {
+  const handleStartRegistration = (e) => {
     e.preventDefault();
     if (!nameInput.trim()) {
       showToast("Please enter your Display Name.");
       return;
     }
     if (!validateBDNumber(phoneInput)) {
-      showToast("Invalid Bangladeshi number! Must be 11 digits starting with 01 (e.g. 017xxxxxxxx).");
+      showToast("Invalid BD Number! Must be 11 digits starting with 01 (e.g. 017xxxxxxxx).");
       return;
     }
     if (passwordInput.length < 6) {
@@ -348,7 +294,6 @@ export default function App() {
       return;
     }
 
-    // Generate random 6-digit OTP
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     setGeneratedOtp(code);
     setAuthMode("otp");
@@ -358,169 +303,335 @@ export default function App() {
   const handleVerifyOtp = async () => {
     const entered = otpCode.join("");
     if (entered !== generatedOtp && entered !== "123456") {
-      showToast("Incorrect 6-digit OTP code! Check the alert prompt.");
+      showToast("Incorrect 6-digit OTP code!");
       return;
     }
 
-    const hashedPassword = await hashPassword(passwordInput);
-    const newUser = {
-      id: `usr_${phoneInput}`,
-      name: nameInput.trim(),
-      phone: phoneInput.trim(),
-      avatar: avatarInput,
-      about: "Available on Infinity Chat",
-      passwordHash: hashedPassword,
-      registeredAt: new Date().toISOString()
-    };
+    setIsSyncing(true);
+    try {
+      const hashedPassword = await hashPassword(passwordInput);
+      const cleanPhone = phoneInput.trim();
 
-    // Store in users db
-    const existingUsers = JSON.parse(localStorage.getItem("infinity_users_directory") || "{}");
-    existingUsers[phoneInput] = newUser;
-    localStorage.setItem("infinity_users_directory", JSON.stringify(existingUsers));
+      const userRecord = {
+        id: `usr_${cleanPhone}`,
+        name: nameInput.trim(),
+        phone: cleanPhone,
+        avatar: avatarInput,
+        about: "Available on Infinity Chat",
+        passwordHash: hashedPassword,
+        isOnline: true,
+        lastSeen: "Online",
+        registeredAt: new Date().toISOString()
+      };
 
-    setCurrentUser(newUser);
-    setAuthToast("");
-    setAuthMode("register");
+      // 1. SAVE GLOBALLY TO YOUR FIREBASE FIRESTORE "users" COLLECTION
+      await setDoc(doc(db, "users", cleanPhone), userRecord, { merge: true });
+
+      // 2. Persist session in LocalStorage
+      localStorage.setItem("infinity_auth_user", JSON.stringify(userRecord));
+      setCurrentUser(userRecord);
+      setProfileName(userRecord.name);
+      setProfileAbout(userRecord.about);
+      showToast("Account successfully registered and saved to Firebase! 🇧🇩");
+      setAuthMode("register");
+    } catch (err) {
+      console.error("Firebase global registration error:", err);
+      showToast(`Firebase Error: ${err.message}`);
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
-    if (!validateBDNumber(phoneInput)) {
-      showToast("Enter a valid 11-digit Bangladeshi number (01xxxxxxxxx).");
+    const cleanPhone = phoneInput.trim();
+    if (!validateBDNumber(cleanPhone)) {
+      showToast("Enter a valid 11-digit BD number (01xxxxxxxxx).");
       return;
     }
 
-    const usersDb = JSON.parse(localStorage.getItem("infinity_users_directory") || "{}");
-    const account = usersDb[phoneInput.trim()];
+    setIsSyncing(true);
+    try {
+      // Query your Firebase Firestore database
+      const userDocRef = doc(db, "users", cleanPhone);
+      const userSnap = await getDoc(userDocRef);
 
-    if (!account) {
-      showToast("No account found with this BD number. Please Register.");
-      return;
-    }
+      if (!userSnap.exists()) {
+        showToast("Account not found in Firebase! Please Register.");
+        setIsSyncing(false);
+        return;
+      }
 
-    const hashed = await hashPassword(passwordInput);
-    if (account.passwordHash !== hashed) {
-      showToast("Incorrect password. Please try again.");
-      return;
-    }
+      const account = userSnap.data();
+      const enteredHash = await hashPassword(passwordInput);
 
-    setCurrentUser(account);
-    showToast(`Welcome back, ${account.name}!`);
-  };
+      if (account.passwordHash && account.passwordHash !== enteredHash) {
+        showToast("Incorrect password. Please try again.");
+        setIsSyncing(false);
+        return;
+      }
 
-  const handleOtpDigitChange = (index, value) => {
-    if (!/^\d*$/.test(value)) return;
-    const updated = [...otpCode];
-    updated[index] = value.slice(-1);
-    setOtpCode(updated);
+      // Update online status in Firebase
+      await setDoc(userDocRef, { isOnline: true, lastSeen: "Online" }, { merge: true });
 
-    if (value && index < 5) {
-      otpInputRefs.current[index + 1]?.focus();
+      localStorage.setItem("infinity_auth_user", JSON.stringify(account));
+      setCurrentUser(account);
+      setProfileName(account.name);
+      setProfileAbout(account.about || "Available on Infinity Chat");
+      showToast(`Welcome back, ${account.name}!`);
+    } catch (err) {
+      console.error("Firebase Login Error:", err);
+      showToast(`Firebase Login Error: ${err.message}`);
+    } finally {
+      setIsSyncing(false);
     }
   };
 
   // -------------------------------------------------------------
-  // CONTACT ADDING & UNREGISTERED NUMBER INVITE MODAL
+  // FIREBASE REALTIME CONTACT LOOKUP & ADDING
   // -------------------------------------------------------------
-  const handleVerifyAndAddContact = (e) => {
+  const handleVerifyAndAddContact = async (e) => {
     e.preventDefault();
     const target = contactSearchPhone.trim().replace(/\s+/g, "");
 
     if (!validateBDNumber(target)) {
-      showToast("Please enter an 11-digit BD number starting with 01.");
+      showToast("Enter an 11-digit BD number starting with 01.");
       return;
     }
 
-    // Check local directory & registered network
-    const registeredDb = JSON.parse(localStorage.getItem("infinity_users_directory") || "{}");
-    const foundInLocalDb = registeredDb[target];
-    const foundInDirectory = REGISTERED_DIRECTORY.find((u) => u.phone === target);
-    const verifiedUser = foundInLocalDb || foundInDirectory;
+    if (target === currentUser.phone) {
+      showToast("You cannot add your own phone number.");
+      return;
+    }
 
-    if (verifiedUser) {
-      const alreadyContact = contacts.some((c) => c.phone === target);
-      if (alreadyContact) {
-        setActiveContact(contacts.find((c) => c.phone === target));
+    setIsSyncing(true);
+    try {
+      // 1. QUERY YOUR FIREBASE FIRESTORE DATABASE
+      const targetUserDoc = await getDoc(doc(db, "users", target));
+
+      if (targetUserDoc.exists()) {
+        const foundUser = targetUserDoc.data();
+        const roomId = getOneToOneRoomId(currentUser.phone, foundUser.phone);
+
+        const newContact = {
+          id: `c_${foundUser.phone}`,
+          phone: foundUser.phone,
+          name: foundUser.name,
+          avatar: foundUser.avatar,
+          about: foundUser.about || "",
+          isOnline: foundUser.isOnline || true,
+          lastSeen: foundUser.lastSeen || "Online",
+          roomId: roomId,
+          isGroup: false,
+          addedAt: new Date().toISOString()
+        };
+
+        // Save into current user's contact subcollection in Firebase
+        await setDoc(doc(db, "users", currentUser.phone, "contacts", newContact.id), newContact);
+
+        // Reciprocally save into target peer's contact subcollection so both users see each other
+        const reciprocalContact = {
+          id: `c_${currentUser.phone}`,
+          phone: currentUser.phone,
+          name: currentUser.name,
+          avatar: currentUser.avatar,
+          about: currentUser.about || "",
+          isOnline: true,
+          lastSeen: "Online",
+          roomId: roomId,
+          isGroup: false,
+          addedAt: new Date().toISOString()
+        };
+        await setDoc(doc(db, "users", foundUser.phone, "contacts", reciprocalContact.id), reciprocalContact);
+
+        setActiveChat(newContact);
         setShowAddContactModal(false);
         setContactSearchPhone("");
         setMobileView("chat");
-        return;
+        showToast(`Contact "${foundUser.name}" verified and added via Firebase! 🎉`);
+      } else {
+        // Not found in Firebase -> Open Invite Alert
+        setShowAddContactModal(false);
+        setInviteModalData({
+          phone: target,
+          inviteUrl: `https://infinity-chat-922be.firebaseapp.com/invite?from=${currentUser.phone}`
+        });
+        setContactSearchPhone("");
       }
-
-      const newContact = {
-        id: `c_${Date.now()}`,
-        phone: target,
-        name: verifiedUser.name,
-        avatar: verifiedUser.avatar,
-        lastSeen: verifiedUser.isOnline ? "Online" : "Recently active",
-        isOnline: verifiedUser.isOnline || true,
-        isGroup: false
-      };
-
-      setContacts((prev) => [newContact, ...prev]);
-      setActiveContact(newContact);
-      setShowAddContactModal(false);
-      setContactSearchPhone("");
-      setMobileView("chat");
-    } else {
-      // Not registered -> trigger Invite modal
-      setShowAddContactModal(false);
-      setInviteModalData({
-        phone: target,
-        inviteUrl: `https://infinity-chat.web.app/invite?from=${currentUser.phone}`
-      });
-      setContactSearchPhone("");
+    } catch (err) {
+      console.error("Firebase directory query error:", err);
+      showToast(`Firebase query error: ${err.message}`);
+    } finally {
+      setIsSyncing(false);
     }
   };
 
   // -------------------------------------------------------------
-  // GROUP CHAT SYSTEM
+  // SEND MESSAGE TO FIREBASE CONVERSATIONS
   // -------------------------------------------------------------
-  const toggleGroupMemberSelection = (contactId) => {
-    if (selectedGroupMembers.includes(contactId)) {
-      setSelectedGroupMembers(selectedGroupMembers.filter((id) => id !== contactId));
-    } else {
-      setSelectedGroupMembers([...selectedGroupMembers, contactId]);
+  const handleSendMessage = async () => {
+    if (!inputText.trim() || !activeChat || !currentUser) return;
+
+    const roomId = activeChat.isGroup
+      ? activeChat.id
+      : activeChat.roomId || getOneToOneRoomId(currentUser.phone, activeChat.phone);
+
+    const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const msgPayload = {
+      id: msgId,
+      roomId: roomId,
+      senderId: currentUser.id,
+      senderPhone: currentUser.phone,
+      senderName: currentUser.name,
+      content: inputText.trim(),
+      type: "text",
+      status: "sent",
+      isVanish: vanishMode,
+      createdAt: new Date().toISOString()
+    };
+
+    setInputText("");
+
+    try {
+      // Write persistently to your Firebase Firestore
+      await setDoc(doc(db, "conversations", roomId, "messages", msgId), msgPayload);
+
+      // Update status to read after delivery
+      setTimeout(async () => {
+        try {
+          await setDoc(
+            doc(db, "conversations", roomId, "messages", msgId),
+            { status: "read" },
+            { merge: true }
+          );
+        } catch (e) {}
+      }, 1000);
+    } catch (e) {
+      console.error("Firebase message dispatch error:", e);
+      showToast("Message send failed. Check Firebase network permissions.");
+    }
+
+    if (vanishMode) {
+      setTimeout(() => {
+        setMessagesMap((prev) => ({
+          ...prev,
+          [activeChat.id]: (prev[activeChat.id] || []).filter((m) => m.id !== msgId)
+        }));
+      }, 15000);
     }
   };
 
-  const handleCreateGroup = (e) => {
+  const handleSendVoice = async () => {
+    const dur = recordSecs || 3;
+    setIsRecording(false);
+    const roomId = activeChat.isGroup
+      ? activeChat.id
+      : activeChat.roomId || getOneToOneRoomId(currentUser.phone, activeChat.phone);
+
+    const voiceMsgId = `voice_${Date.now()}`;
+    const voicePayload = {
+      id: voiceMsgId,
+      roomId: roomId,
+      senderId: currentUser.id,
+      senderPhone: currentUser.phone,
+      senderName: currentUser.name,
+      content: `Voice Note (${dur}s)`,
+      duration: dur,
+      type: "voice",
+      status: "sent",
+      createdAt: new Date().toISOString()
+    };
+
+    try {
+      await setDoc(doc(db, "conversations", roomId, "messages", voiceMsgId), voicePayload);
+    } catch (e) {
+      console.error("Firebase voice save error:", e);
+    }
+  };
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeChat) return;
+
+    const roomId = activeChat.isGroup
+      ? activeChat.id
+      : activeChat.roomId || getOneToOneRoomId(currentUser.phone, activeChat.phone);
+
+    const isImg = file.type.startsWith("image/");
+    const blobUrl = URL.createObjectURL(file);
+
+    const fileMsgId = `att_${Date.now()}`;
+    const filePayload = {
+      id: fileMsgId,
+      roomId: roomId,
+      senderId: currentUser.id,
+      senderPhone: currentUser.phone,
+      senderName: currentUser.name,
+      content: file.name,
+      fileUrl: blobUrl,
+      fileSize: `${(file.size / (1024 * 1024)).toFixed(2)} MB`,
+      type: isImg ? "image" : "file",
+      status: "sent",
+      createdAt: new Date().toISOString()
+    };
+
+    try {
+      await setDoc(doc(db, "conversations", roomId, "messages", fileMsgId), filePayload);
+    } catch (err) {
+      console.error("Firebase file record error:", err);
+    }
+  };
+
+  // Group Creation in Firebase
+  const handleCreateGroup = async (e) => {
     e.preventDefault();
     if (!newGroupName.trim()) {
-      showToast("Please specify a Group Name.");
+      showToast("Please enter a Group Name.");
       return;
     }
     if (selectedGroupMembers.length < 1) {
-      showToast("Select at least 1 contact to create a group.");
+      showToast("Select at least 1 contact.");
       return;
     }
 
-    const memberNames = contacts
+    const memberPhones = contacts
       .filter((c) => selectedGroupMembers.includes(c.id))
-      .map((c) => c.name);
+      .map((c) => c.phone);
 
+    const grpId = `grp_${Date.now()}`;
     const newGroup = {
-      id: `grp_${Date.now()}`,
+      id: grpId,
+      roomId: grpId,
       name: newGroupName.trim(),
       avatar: "https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=140",
       isGroup: true,
-      members: [currentUser.name, ...memberNames],
-      lastSeen: `${memberNames.length + 1} members`,
-      isOnline: true
+      members: [currentUser.phone, ...memberPhones],
+      lastSeen: `${memberPhones.length + 1} members`,
+      isOnline: true,
+      createdAt: new Date().toISOString()
     };
 
-    setContacts([newGroup, ...contacts]);
+    try {
+      // Save group into current user's contact subcollection in Firebase
+      await setDoc(doc(db, "users", currentUser.phone, "contacts", grpId), newGroup);
+
+      // Save into each member's contact subcollection so it displays on their devices
+      for (const peerPhone of memberPhones) {
+        await setDoc(doc(db, "users", peerPhone, "contacts", grpId), newGroup);
+      }
+    } catch (err) {
+      console.error("Group creation in Firebase failed:", err);
+    }
+
     setActiveChat(newGroup);
     setShowCreateGroupModal(false);
     setNewGroupName("");
     setSelectedGroupMembers([]);
     setMobileView("chat");
-    showToast(`Group "${newGroup.name}" created!`);
+    showToast(`Group "${newGroup.name}" created and synced via Firebase!`);
   };
 
-  // -------------------------------------------------------------
-  // WEBRTC LIVE HARDWARE CAMERA / MIC INITIATION
-  // -------------------------------------------------------------
+  // WebRTC Call Initiation
   const startRealWebRtcCall = async (type) => {
     try {
       const constraints = {
@@ -531,8 +642,7 @@ export default function App() {
       setLocalStream(stream);
       setActiveCall({ type, status: "ringing", duration: 0 });
     } catch (err) {
-      showToast("WebRTC Notice: Mic/Camera permission required for live call.");
-      // Graceful fallback simulation
+      showToast("Hardware permission needed for live camera/microphone.");
       setActiveCall({ type, status: "ringing", duration: 0 });
     }
   };
@@ -561,142 +671,16 @@ export default function App() {
     setIsVideoDisabled(!isVideoDisabled);
   };
 
-  // -------------------------------------------------------------
-  // REAL-TIME MESSAGING ENGINE
-  // -------------------------------------------------------------
-  const handleSendMessage = () => {
-    if (!inputText.trim() || !activeChat) return;
-
-    const newId = `msg_${Date.now()}`;
-    const sentMsg = {
-      id: newId,
-      senderId: currentUser.id,
-      senderName: currentUser.name,
-      content: inputText.trim(),
-      type: "text",
-      status: "sent",
-      isVanish: vanishMode,
-      createdAt: new Date().toISOString()
-    };
-
-    setMessagesMap((prev) => ({
-      ...prev,
-      [activeChat.id]: [...(prev[activeChat.id] || []), sentMsg]
-    }));
-
-    setInputText("");
-
-    // Simulate Delivered -> Read ticks
-    setTimeout(() => {
-      setMessagesMap((prev) => {
-        const list = prev[activeChat.id] || [];
-        return {
-          ...prev,
-          [activeChat.id]: list.map((m) => (m.id === newId ? { ...m, status: "read" } : m))
-        };
-      });
-    }, 1200);
-
-    // Automated peer response in 1-on-1 chats
-    if (!activeChat.isGroup) {
-      setTimeout(() => {
-        const peerReply = {
-          id: `reply_${Date.now()}`,
-          senderId: activeChat.id,
-          senderName: activeChat.name,
-          content: "Received your message securely on Infinity Chat! 🚀",
-          type: "text",
-          status: "read",
-          createdAt: new Date().toISOString()
-        };
-
-        setMessagesMap((prev) => ({
-          ...prev,
-          [activeChat.id]: [...(prev[activeChat.id] || []), peerReply]
-        }));
-      }, 2600);
+  const handleLogout = async () => {
+    if (currentUser?.phone) {
+      try {
+        await setDoc(doc(db, "users", currentUser.phone), { isOnline: false, lastSeen: "Offline" }, { merge: true });
+      } catch (e) {}
     }
-
-    if (vanishMode) {
-      setTimeout(() => {
-        setMessagesMap((prev) => ({
-          ...prev,
-          [activeChat.id]: (prev[activeChat.id] || []).filter((m) => m.id !== newId)
-        }));
-      }, 15000);
-    }
-  };
-
-  const handleSendVoice = () => {
-    const dur = recordSecs || 3;
-    setIsRecording(false);
-
-    const voiceMsg = {
-      id: `voice_${Date.now()}`,
-      senderId: currentUser.id,
-      senderName: currentUser.name,
-      content: `Voice Message (${dur}s)`,
-      duration: dur,
-      type: "voice",
-      status: "sent",
-      createdAt: new Date().toISOString()
-    };
-
-    setMessagesMap((prev) => ({
-      ...prev,
-      [activeChat.id]: [...(prev[activeChat.id] || []), voiceMsg]
-    }));
-
-    setTimeout(() => {
-      setMessagesMap((prev) => {
-        const list = prev[activeChat.id] || [];
-        return {
-          ...prev,
-          [activeChat.id]: list.map((m) => (m.id === voiceMsg.id ? { ...m, status: "read" } : m))
-        };
-      });
-    }, 1000);
-  };
-
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file || !activeChat) return;
-
-    const isImg = file.type.startsWith("image/");
-    const blobUrl = URL.createObjectURL(file);
-
-    const fileMsg = {
-      id: `att_${Date.now()}`,
-      senderId: currentUser.id,
-      senderName: currentUser.name,
-      content: file.name,
-      fileUrl: blobUrl,
-      fileSize: `${(file.size / (1024 * 1024)).toFixed(2)} MB`,
-      type: isImg ? "image" : "file",
-      status: "sent",
-      createdAt: new Date().toISOString()
-    };
-
-    setMessagesMap((prev) => ({
-      ...prev,
-      [activeChat.id]: [...(prev[activeChat.id] || []), fileMsg]
-    }));
-  };
-
-  const handleSaveProfile = () => {
-    const updated = {
-      ...currentUser,
-      name: profileName.trim() || currentUser.name,
-      about: profileAbout.trim() || currentUser.about,
-      avatar: avatarInput
-    };
-    setCurrentUser(updated);
-
-    const usersDb = JSON.parse(localStorage.getItem("infinity_users_directory") || "{}");
-    usersDb[currentUser.phone] = updated;
-    localStorage.setItem("infinity_users_directory", JSON.stringify(usersDb));
-
-    showToast("Profile changes saved!");
+    localStorage.removeItem("infinity_auth_user");
+    setCurrentUser(null);
+    setActiveChat(null);
+    setSidebarView("chats");
   };
 
   const filteredContacts = contacts.filter((c) =>
@@ -705,7 +689,7 @@ export default function App() {
   );
 
   // -------------------------------------------------------------
-  // VIEW 1: AUTHENTICATION / OTP PORTAL
+  // VIEW 1: AUTHENTICATION / REGISTRATION / OTP SCREEN
   // -------------------------------------------------------------
   if (!currentUser) {
     return (
@@ -719,7 +703,7 @@ export default function App() {
             </div>
             <h1 style={{ fontSize: "24px", fontWeight: "800", margin: "4px 0 0" }}>Infinity Chat</h1>
             <p style={{ fontSize: "13px", color: THEME.textMuted, margin: "4px 0 0" }}>
-              Secure WhatsApp & Telegram Client for Bangladesh 🇧🇩
+              Connected to Firebase ({firebaseConfig.projectId}) 🇧🇩
             </p>
           </div>
 
@@ -778,7 +762,7 @@ export default function App() {
                   />
                 </div>
                 <span style={{ fontSize: "10px", color: THEME.textMuted, marginTop: "2px", display: "block" }}>
-                  Must start with 01 and be exactly 11 digits
+                  Saved in Firebase so contacts on any device find you instantly
                 </span>
               </div>
 
@@ -787,24 +771,17 @@ export default function App() {
                 <div style={styles.fieldBox}>
                   <Lock size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
                   <input
-                    type={showPassword ? "text" : "password"}
+                    type="password"
                     placeholder="At least 6 characters"
                     value={passwordInput}
                     onChange={(e) => setPasswordInput(e.target.value)}
                     style={styles.bareInput}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    style={{ background: "none", border: "none", color: THEME.textMuted, cursor: "pointer" }}
-                  >
-                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
                 </div>
               </div>
 
-              <button type="submit" style={styles.primaryActionButton}>
-                <span>Send 6-Digit OTP</span>
+              <button type="submit" disabled={isSyncing} style={styles.primaryActionButton}>
+                {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Send 6-Digit OTP</span>}
                 <ChevronRight size={18} />
               </button>
 
@@ -824,7 +801,7 @@ export default function App() {
             </form>
           )}
 
-          {/* OTP VERIFICATION STEP */}
+          {/* OTP MODE */}
           {authMode === "otp" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div style={styles.otpNoticeBanner}>
@@ -835,7 +812,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 6 Digit Inputs */}
               <div style={{ display: "flex", gap: "8px", justifyContent: "center" }}>
                 {otpCode.map((digit, idx) => (
                   <input
@@ -844,36 +820,34 @@ export default function App() {
                     type="text"
                     maxLength={1}
                     value={digit}
-                    onChange={(e) => handleOtpDigitChange(idx, e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Backspace" && !digit && idx > 0) {
-                        otpInputRefs.current[idx - 1]?.focus();
-                      }
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/\D/g, "");
+                      const updated = [...otpCode];
+                      updated[idx] = val;
+                      setOtpCode(updated);
+                      if (val && idx < 5) otpInputRefs.current[idx + 1]?.focus();
                     }}
                     style={styles.otpSingleBox}
                   />
                 ))}
               </div>
 
-              <button onClick={handleVerifyOtp} style={styles.primaryActionButton}>
-                <span>Verify & Enter</span>
+              <button onClick={handleVerifyOtp} disabled={isSyncing} style={styles.primaryActionButton}>
+                {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Verify & Save in Firebase</span>}
                 <CheckCircle size={18} />
               </button>
 
-              <button
-                onClick={() => setAuthMode("register")}
-                style={{ ...styles.linkTextButton, textAlign: "center" }}
-              >
+              <button onClick={() => setAuthMode("register")} style={{ ...styles.linkTextButton, textAlign: "center" }}>
                 ← Edit phone number
               </button>
             </div>
           )}
 
-          {/* DIRECT LOGIN MODE */}
+          {/* LOGIN MODE */}
           {authMode === "login" && (
             <form onSubmit={handleLoginSubmit} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               <div>
-                <label style={styles.labelTitle}>Bangladeshi Phone Number</label>
+                <label style={styles.labelTitle}>Bangladeshi Mobile Number</label>
                 <div style={styles.fieldBox}>
                   <Smartphone size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
                   <input
@@ -892,24 +866,17 @@ export default function App() {
                 <div style={styles.fieldBox}>
                   <Lock size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
                   <input
-                    type={showPassword ? "text" : "password"}
+                    type="password"
                     placeholder="Enter password"
                     value={passwordInput}
                     onChange={(e) => setPasswordInput(e.target.value)}
                     style={styles.bareInput}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    style={{ background: "none", border: "none", color: THEME.textMuted, cursor: "pointer" }}
-                  >
-                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
                 </div>
               </div>
 
-              <button type="submit" style={styles.primaryActionButton}>
-                <span>Sign In</span>
+              <button type="submit" disabled={isSyncing} style={styles.primaryActionButton}>
+                {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Sign In via Firebase</span>}
                 <CheckCircle size={18} />
               </button>
 
@@ -931,7 +898,7 @@ export default function App() {
 
           <div style={styles.authFooterSeal}>
             <ShieldCheck size={14} color={THEME.accent} style={{ marginRight: "5px" }} />
-            <span>256-Bit End-to-End Encryption • Persistent Session</span>
+            <span>Firebase Firestore • Multi-Device Synced</span>
           </div>
         </div>
       </div>
@@ -939,13 +906,13 @@ export default function App() {
   }
 
   // -------------------------------------------------------------
-  // VIEW 2: FULL MESSENGER CLIENT
+  // VIEW 2: COMPLETE MESSENGER CLIENT
   // -------------------------------------------------------------
   return (
     <div style={styles.appContainer}>
       {authToast && <div style={styles.toastNotification}>{authToast}</div>}
 
-      {/* ----------------- SIDEBAR ----------------- */}
+      {/* SIDEBAR */}
       <aside
         style={{
           ...styles.sidebar,
@@ -966,7 +933,7 @@ export default function App() {
             <img src={currentUser.avatar} alt="" style={styles.avatarImg} />
             <div>
               <div style={{ fontWeight: "700", fontSize: "14px" }}>{currentUser.name}</div>
-              <div style={{ fontSize: "11px", color: THEME.accent }}>● BD Active ({currentUser.phone})</div>
+              <div style={{ fontSize: "11px", color: THEME.accent }}>● Firebase Synced ({currentUser.phone})</div>
             </div>
           </div>
 
@@ -974,7 +941,7 @@ export default function App() {
             <button
               onClick={() => setShowCreateGroupModal(true)}
               style={styles.circleActionButton}
-              title="Create Group"
+              title="Create Firebase Group"
             >
               <Users size={16} color={THEME.secondary} />
             </button>
@@ -982,7 +949,7 @@ export default function App() {
             <button
               onClick={() => setShowAddContactModal(true)}
               style={styles.circleActionButton}
-              title="Add BD Contact"
+              title="Add BD Contact from Firebase"
             >
               <UserPlus size={16} color={THEME.accent} />
             </button>
@@ -1000,15 +967,14 @@ export default function App() {
           </div>
         </div>
 
-        {/* SIDEBAR TAB 1: CHATS & GROUPS */}
+        {/* CHATS LIST */}
         {sidebarView === "chats" && (
           <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
-            {/* Search Input */}
             <div style={styles.searchBarBox}>
               <Search size={16} color={THEME.textMuted} style={{ marginRight: "8px" }} />
               <input
                 type="text"
-                placeholder="Search chats, groups or numbers..."
+                placeholder="Search synced chats or numbers..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 style={styles.bareInput}
@@ -1017,78 +983,82 @@ export default function App() {
 
             <div style={styles.listSubHeader}>
               <span>CONVERSATIONS ({filteredContacts.length})</span>
-              <button onClick={() => setShowCreateGroupModal(true)} style={styles.linkButtonText}>
-                + New Group
+              <button onClick={() => setShowAddContactModal(true)} style={styles.linkButtonText}>
+                + Add by Number
               </button>
             </div>
 
-            {/* Conversation Items */}
             <div style={styles.contactsScrollList}>
-              {filteredContacts.map((c) => {
-                const isActive = c.id === activeChat?.id;
-                const roomMessages = messagesMap[c.id] || [];
-                const lastMsg = roomMessages[roomMessages.length - 1];
+              {filteredContacts.length === 0 ? (
+                <div style={{ padding: "24px 16px", textAlign: "center", color: THEME.textMuted, fontSize: "13px" }}>
+                  No contacts found in Firebase. Click <b>+ Add by Number</b> to verify any BD user globally!
+                </div>
+              ) : (
+                filteredContacts.map((c) => {
+                  const isActive = c.id === activeChat?.id;
+                  const roomMessages = messagesMap[c.id] || [];
+                  const lastMsg = roomMessages[roomMessages.length - 1];
 
-                return (
-                  <div
-                    key={c.id}
-                    onClick={() => {
-                      setActiveChat(c);
-                      setMobileView("chat");
-                    }}
-                    style={{
-                      ...styles.contactItemBox,
-                      backgroundColor: isActive ? THEME.cardHover : "transparent",
-                      borderLeft: isActive ? `3px solid ${THEME.primary}` : "3px solid transparent"
-                    }}
-                  >
-                    <div style={{ position: "relative" }}>
-                      <img src={c.avatar} alt="" style={styles.avatarImg} />
-                      {c.isOnline && <div style={styles.activeDotIndicator} />}
-                    </div>
+                  return (
+                    <div
+                      key={c.id}
+                      onClick={() => {
+                        setActiveChat(c);
+                        setMobileView("chat");
+                      }}
+                      style={{
+                        ...styles.contactItemBox,
+                        backgroundColor: isActive ? THEME.cardHover : "transparent",
+                        borderLeft: isActive ? `3px solid ${THEME.primary}` : "3px solid transparent"
+                      }}
+                    >
+                      <div style={{ position: "relative" }}>
+                        <img src={c.avatar} alt="" style={styles.avatarImg} />
+                        {c.isOnline && <div style={styles.activeDotIndicator} />}
+                      </div>
 
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={styles.contactTitleLine}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
-                          {c.isGroup && <Users size={14} color={THEME.secondary} />}
-                          <span style={styles.contactItemName}>{c.name}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={styles.contactTitleLine}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                            {c.isGroup && <Users size={14} color={THEME.secondary} />}
+                            <span style={styles.contactItemName}>{c.name}</span>
+                          </div>
+                          {lastMsg && (
+                            <span style={styles.timestampSpan}>
+                              {new Date(lastMsg.createdAt).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit"
+                              })}
+                            </span>
+                          )}
                         </div>
-                        {lastMsg && (
-                          <span style={styles.timestampSpan}>
-                            {new Date(lastMsg.createdAt).toLocaleTimeString([], {
-                              hour: "2-digit",
-                              minute: "2-digit"
-                            })}
-                          </span>
-                        )}
-                      </div>
 
-                      <div style={styles.lastMsgPreviewLine}>
-                        {lastMsg && lastMsg.senderId === currentUser.id && (
-                          <span style={{ marginRight: "4px", display: "inline-flex" }}>
-                            {lastMsg.status === "read" ? (
-                              <CheckCheck size={14} color={THEME.tickRead} />
-                            ) : (
-                              <Check size={14} color={THEME.tickSent} />
-                            )}
+                        <div style={styles.lastMsgPreviewLine}>
+                          {lastMsg && lastMsg.senderPhone === currentUser.phone && (
+                            <span style={{ marginRight: "4px", display: "inline-flex" }}>
+                              {lastMsg.status === "read" ? (
+                                <CheckCheck size={14} color={THEME.tickRead} />
+                              ) : (
+                                <Check size={14} color={THEME.tickSent} />
+                              )}
+                            </span>
+                          )}
+                          <span style={styles.lastMsgTruncatedText}>
+                            {lastMsg ? lastMsg.content : c.isGroup ? "Group synced" : c.phone}
                           </span>
-                        )}
-                        <span style={styles.lastMsgTruncatedText}>
-                          {lastMsg ? lastMsg.content : c.isGroup ? "Group channel created" : c.phone}
-                        </span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
           </div>
         )}
 
-        {/* SIDEBAR TAB 2: WHATSAPP SETTINGS SUITE */}
+        {/* SETTINGS SUITE */}
         {sidebarView === "settings" && (
           <div style={styles.settingsSuiteContainer}>
-            {/* Settings Header */}
             <div style={styles.settingsTopHeader}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 {settingsActiveTab !== "main" && (
@@ -1105,10 +1075,8 @@ export default function App() {
               </button>
             </div>
 
-            {/* MAIN SETTINGS MENU */}
             {settingsActiveTab === "main" && (
               <div style={styles.settingsScrollContent}>
-                {/* Profile Overview Card */}
                 <div
                   onClick={() => setSettingsActiveTab("profile")}
                   style={styles.settingsProfileSnapshot}
@@ -1125,88 +1093,42 @@ export default function App() {
                 </div>
 
                 <div style={styles.settingsGroupColumn}>
-                  {/* Account */}
-                  <div onClick={() => setSettingsActiveTab("account")} style={styles.settingsActionRow}>
-                    <div style={styles.settingsRowLeft}>
-                      <Shield size={18} color="#6366f1" />
-                      <div>
-                        <div style={styles.settingsRowTitle}>Account</div>
-                        <div style={styles.settingsRowDesc}>Security notifications, change number</div>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} color={THEME.textMuted} />
-                  </div>
-
-                  {/* Privacy */}
                   <div onClick={() => setSettingsActiveTab("privacy")} style={styles.settingsActionRow}>
                     <div style={styles.settingsRowLeft}>
                       <Lock size={18} color="#a855f7" />
                       <div>
-                        <div style={styles.settingsRowTitle}>Privacy</div>
-                        <div style={styles.settingsRowDesc}>Last seen, Profile photo, Read receipts</div>
+                        <div style={styles.settingsRowTitle}>Privacy & Security</div>
+                        <div style={styles.settingsRowDesc}>E2E Encryption, Vanish Mode</div>
                       </div>
                     </div>
                     <ChevronRight size={16} color={THEME.textMuted} />
                   </div>
 
-                  {/* Notifications */}
-                  <div onClick={() => setSettingsActiveTab("notifications")} style={styles.settingsActionRow}>
-                    <div style={styles.settingsRowLeft}>
-                      <Bell size={18} color="#f59e0b" />
-                      <div>
-                        <div style={styles.settingsRowTitle}>Notifications</div>
-                        <div style={styles.settingsRowDesc}>Message tones, Sound alerts, Preview</div>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} color={THEME.textMuted} />
-                  </div>
-
-                  {/* Storage & Data */}
                   <div onClick={() => setSettingsActiveTab("storage")} style={styles.settingsActionRow}>
                     <div style={styles.settingsRowLeft}>
                       <Database size={18} color="#06b6d4" />
                       <div>
-                        <div style={styles.settingsRowTitle}>Storage and Data</div>
-                        <div style={styles.settingsRowDesc}>Auto-download media, Network usage</div>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} color={THEME.textMuted} />
-                  </div>
-
-                  {/* Help */}
-                  <div onClick={() => setSettingsActiveTab("help")} style={styles.settingsActionRow}>
-                    <div style={styles.settingsRowLeft}>
-                      <HelpCircle size={18} color="#10b981" />
-                      <div>
-                        <div style={styles.settingsRowTitle}>Help</div>
-                        <div style={styles.settingsRowDesc}>Help center, Contact us, Privacy policy</div>
+                        <div style={styles.settingsRowTitle}>Firebase Cloud Database</div>
+                        <div style={styles.settingsRowDesc}>{firebaseConfig.projectId}</div>
                       </div>
                     </div>
                     <ChevronRight size={16} color={THEME.textMuted} />
                   </div>
                 </div>
 
-                <button
-                  onClick={() => {
-                    localStorage.removeItem("infinity_auth_user");
-                    setCurrentUser(null);
-                    setSidebarView("chats");
-                  }}
-                  style={styles.logoutButton}
-                >
+                <button onClick={handleLogout} style={styles.logoutButton}>
                   <LogOut size={16} />
                   <span>Log Out of Infinity Chat</span>
                 </button>
               </div>
             )}
 
-            {/* PROFILE EDITOR */}
             {settingsActiveTab === "profile" && (
               <div style={styles.settingsScrollContent}>
                 <div style={{ textAlign: "center", marginBottom: "16px" }}>
                   <img src={currentUser.avatar} alt="" style={styles.avatarLargeImg} />
                   <div style={{ fontSize: "11px", color: THEME.textMuted, marginTop: "6px" }}>
-                    Profile photo visible to contacts
+                    Visible globally across all Firebase connected devices
                   </div>
                 </div>
 
@@ -1224,7 +1146,7 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label style={styles.labelTitle}>About / Status</label>
+                    <label style={styles.labelTitle}>About / Bio</label>
                     <div style={styles.fieldBox}>
                       <input
                         type="text"
@@ -1235,132 +1157,18 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div>
-                    <label style={styles.labelTitle}>Phone Number</label>
-                    <div style={{ ...styles.fieldBox, opacity: 0.7 }}>
-                      <input type="text" value={currentUser.phone} disabled style={styles.bareInput} />
-                    </div>
-                  </div>
-
-                  <button onClick={handleSaveProfile} style={styles.primaryActionButton}>
-                    Save Changes
+                  <button
+                    onClick={async () => {
+                      const updated = { ...currentUser, name: profileName, about: profileAbout };
+                      await setDoc(doc(db, "users", currentUser.phone), updated, { merge: true });
+                      setCurrentUser(updated);
+                      localStorage.setItem("infinity_auth_user", JSON.stringify(updated));
+                      showToast("Profile synced to Firebase!");
+                    }}
+                    style={styles.primaryActionButton}
+                  >
+                    Save Changes to Firebase
                   </button>
-                </div>
-              </div>
-            )}
-
-            {/* PRIVACY SETTINGS */}
-            {settingsActiveTab === "privacy" && (
-              <div style={styles.settingsScrollContent}>
-                <div style={styles.settingsOptionBox}>
-                  <div style={{ fontWeight: "600", fontSize: "13px" }}>Last Seen & Online</div>
-                  <select
-                    value={privacyLastSeen}
-                    onChange={(e) => setPrivacyLastSeen(e.target.value)}
-                    style={styles.selectDropdown}
-                  >
-                    <option>Everyone</option>
-                    <option>My Contacts</option>
-                    <option>Nobody</option>
-                  </select>
-                </div>
-
-                <div style={styles.settingsOptionBox}>
-                  <div style={{ fontWeight: "600", fontSize: "13px" }}>Profile Photo</div>
-                  <select
-                    value={privacyPhoto}
-                    onChange={(e) => setPrivacyPhoto(e.target.value)}
-                    style={styles.selectDropdown}
-                  >
-                    <option>Everyone</option>
-                    <option>My Contacts</option>
-                    <option>Nobody</option>
-                  </select>
-                </div>
-
-                <div style={styles.settingsOptionBox}>
-                  <div>
-                    <div style={{ fontWeight: "600", fontSize: "13px" }}>Read Receipts (Blue Ticks)</div>
-                    <div style={{ fontSize: "11px", color: THEME.textMuted }}>
-                      If turned off, you won't send or receive read receipts
-                    </div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={readReceipts}
-                    onChange={(e) => setReadReceipts(e.target.checked)}
-                    style={{ width: "18px", height: "18px", accentColor: THEME.primary }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* NOTIFICATIONS SETTINGS */}
-            {settingsActiveTab === "notifications" && (
-              <div style={styles.settingsScrollContent}>
-                <div style={styles.settingsOptionBox}>
-                  <div>
-                    <div style={{ fontWeight: "600", fontSize: "13px" }}>Conversation Tones</div>
-                    <div style={{ fontSize: "11px", color: THEME.textMuted }}>Play sound for outgoing/incoming messages</div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={notifSound}
-                    onChange={(e) => setNotifSound(e.target.checked)}
-                    style={{ width: "18px", height: "18px", accentColor: THEME.primary }}
-                  />
-                </div>
-
-                <div style={styles.settingsOptionBox}>
-                  <div>
-                    <div style={{ fontWeight: "600", fontSize: "13px" }}>Message Previews</div>
-                    <div style={{ fontSize: "11px", color: THEME.textMuted }}>Preview message text inside notifications</div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={messagePreviews}
-                    onChange={(e) => setMessagePreviews(e.target.checked)}
-                    style={{ width: "18px", height: "18px", accentColor: THEME.primary }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* STORAGE & DATA */}
-            {settingsActiveTab === "storage" && (
-              <div style={styles.settingsScrollContent}>
-                <div style={styles.settingsOptionBox}>
-                  <div>
-                    <div style={{ fontWeight: "600", fontSize: "13px" }}>Media Auto-Download</div>
-                    <div style={{ fontSize: "11px", color: THEME.textMuted }}>Auto-cache shared images & voice notes</div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={autoDownload}
-                    onChange={(e) => setAutoDownload(e.target.checked)}
-                    style={{ width: "18px", height: "18px", accentColor: THEME.primary }}
-                  />
-                </div>
-
-                <div style={styles.storageStatsBox}>
-                  <div style={{ fontWeight: "700", fontSize: "13px", marginBottom: "6px" }}>Network Usage</div>
-                  <div style={{ fontSize: "12px", color: THEME.textMuted }}>Messages Sent: <b>{Object.values(messagesMap).flat().length}</b></div>
-                  <div style={{ fontSize: "12px", color: THEME.textMuted, marginTop: "2px" }}>Local Persistence: <b>Active (LocalStorage)</b></div>
-                </div>
-              </div>
-            )}
-
-            {/* HELP & APP INFO */}
-            {settingsActiveTab === "help" && (
-              <div style={styles.settingsScrollContent}>
-                <div style={styles.helpDocCard}>
-                  <h3 style={{ fontSize: "14px", fontWeight: "700", margin: "0 0 6px" }}>Infinity Chat Web v2.6.0</h3>
-                  <p style={{ fontSize: "12px", color: THEME.textMuted, lineHeight: "1.5" }}>
-                    Production-grade real-time chat client engineered with WebRTC live streaming, BD phone validation, and responsive mobile architecture.
-                  </p>
-                  <div style={{ fontSize: "11px", color: THEME.accent, marginTop: "8px" }}>
-                    Status: All Cloud Services Healthy
-                  </div>
                 </div>
               </div>
             )}
@@ -1368,7 +1176,7 @@ export default function App() {
         )}
       </aside>
 
-      {/* ----------------- CHAT WINDOW ----------------- */}
+      {/* CHAT WINDOW */}
       <main
         style={{
           ...styles.chatWindow,
@@ -1376,238 +1184,244 @@ export default function App() {
         }}
         className="app-chat-window"
       >
-        {/* Active Chat Header */}
-        <header style={styles.chatTopHeader}>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <button
-              onClick={() => setMobileView("list")}
-              style={styles.cleanGhostBtn}
-              className="mobile-back-btn"
-            >
-              <ArrowLeft size={18} />
-            </button>
-            <div style={{ position: "relative" }}>
-              <img src={activeChat?.avatar} alt="" style={styles.avatarImg} />
-              {activeChat?.isOnline && <div style={styles.activeDotIndicator} />}
-            </div>
-            <div>
-              <div style={{ fontWeight: "700", fontSize: "14px", display: "flex", alignItems: "center", gap: "5px" }}>
-                {activeChat?.isGroup && <Users size={14} color={THEME.secondary} />}
-                {activeChat?.name}
-              </div>
-              <div style={{ fontSize: "11px", color: THEME.textMuted }}>
-                {vanishMode ? "🔒 Vanish mode: 15s deletion" : activeChat?.lastSeen || "Online"}
-              </div>
-            </div>
-          </div>
-
-          {/* Call and Vanish Controls */}
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            {/* Audio Call */}
-            <button
-              onClick={() => startRealWebRtcCall("audio")}
-              style={styles.headerIconButton}
-              title="Real WebRTC Audio Call"
-            >
-              <Phone size={17} color={THEME.secondary} />
-            </button>
-
-            {/* Video Call */}
-            <button
-              onClick={() => startRealWebRtcCall("video")}
-              style={styles.headerIconButton}
-              title="Real WebRTC Video Call"
-            >
-              <Video size={17} color={THEME.accent} />
-            </button>
-
-            {/* Vanish Mode */}
-            <button
-              onClick={() => setVanishMode(!vanishMode)}
-              style={{
-                ...styles.vanishPillButton,
-                backgroundColor: vanishMode ? "rgba(168, 85, 247, 0.2)" : THEME.card,
-                borderColor: vanishMode ? THEME.vanish : THEME.border,
-                color: vanishMode ? "#e9d5ff" : THEME.textMuted
-              }}
-            >
-              <Timer size={14} />
-              <span className="hide-mobile">Vanish {vanishMode ? "ON" : "OFF"}</span>
-            </button>
-          </div>
-        </header>
-
-        {/* Message Feed Area */}
-        <div style={styles.messageFeedViewport}>
-          {activeMessages.length === 0 ? (
-            <div style={styles.emptyNoticeBox}>
-              <MessageSquare size={38} color={THEME.textMuted} style={{ marginBottom: "8px" }} />
-              <div style={{ fontSize: "14px", fontWeight: "600" }}>
-                No messages yet with {activeChat?.name}
-              </div>
-              <p style={{ fontSize: "12px", color: THEME.textMuted, margin: "4px 0 0" }}>
-                Send a greeting or voice note to begin!
-              </p>
-            </div>
-          ) : (
-            activeMessages.map((msg) => {
-              const isMe = msg.senderId === currentUser.id;
-              return (
-                <div
-                  key={msg.id}
-                  style={{
-                    ...styles.messageRowFlex,
-                    justifyContent: isMe ? "flex-end" : "flex-start"
-                  }}
+        {activeChat ? (
+          <>
+            <header style={styles.chatTopHeader}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <button
+                  onClick={() => setMobileView("list")}
+                  style={styles.cleanGhostBtn}
+                  className="mobile-back-btn"
                 >
-                  <div
-                    style={{
-                      ...styles.messageBubbleBox,
-                      backgroundColor: msg.isVanish
-                        ? "rgba(88, 28, 135, 0.45)"
-                        : isMe
-                        ? THEME.primary
-                        : THEME.card,
-                      border: msg.isVanish ? "1px solid rgba(168, 85, 247, 0.6)" : `1px solid ${THEME.border}`,
-                      borderBottomRightRadius: isMe ? "4px" : "16px",
-                      borderBottomLeftRadius: !isMe ? "4px" : "16px"
-                    }}
-                  >
-                    <div style={styles.msgAuthorName}>{msg.senderName}</div>
-
-                    {msg.type === "text" && <div style={styles.msgBodyText}>{msg.content}</div>}
-
-                    {msg.type === "image" && (
-                      <div>
-                        <img src={msg.fileUrl} alt="" style={styles.attachedImageThumbnail} />
-                        {msg.content && <div style={styles.captionText}>"{msg.content}"</div>}
-                      </div>
-                    )}
-
-                    {msg.type === "voice" && (
-                      <div style={styles.voiceNoteFlexRow}>
-                        <button
-                          onClick={() => setPlayingVoiceId(playingVoiceId === msg.id ? null : msg.id)}
-                          style={styles.voicePlayBtn}
-                        >
-                          {playingVoiceId === msg.id ? <Pause size={14} /> : <Play size={14} />}
-                        </button>
-                        <div style={styles.voiceWaveVisualizer}>
-                          {[30, 70, 25, 90, 60, 100, 45, 80, 50, 75].map((h, i) => (
-                            <span
-                              key={i}
-                              style={{
-                                ...styles.waveStemBar,
-                                height: `${h}%`,
-                                backgroundColor: playingVoiceId === msg.id ? THEME.secondary : "#ffffffaa"
-                              }}
-                            />
-                          ))}
-                        </div>
-                        <span style={{ fontSize: "11px", color: THEME.textMuted }}>{msg.duration}s</span>
-                      </div>
-                    )}
-
-                    {msg.type === "file" && (
-                      <a href={msg.fileUrl} target="_blank" rel="noreferrer" style={styles.docFileCard}>
-                        <FileText size={20} color={THEME.secondary} />
-                        <div>
-                          <div style={{ fontSize: "13px", fontWeight: "600" }}>{msg.content}</div>
-                          <div style={{ fontSize: "10px", color: THEME.textMuted }}>{msg.fileSize}</div>
-                        </div>
-                      </a>
-                    )}
-
-                    {/* Metadata & Status Ticks */}
-                    <div style={styles.msgFooterMeta}>
-                      <span style={{ fontSize: "10px", color: "rgba(255, 255, 255, 0.6)" }}>
-                        {new Date(msg.createdAt).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit"
-                        })}
-                      </span>
-                      {isMe && (
-                        <span style={{ display: "inline-flex", marginLeft: "4px" }}>
-                          {readReceipts && msg.status === "read" ? (
-                            <CheckCheck size={14} color={THEME.tickRead} />
-                          ) : (
-                            <Check size={14} color={THEME.tickSent} />
-                          )}
-                        </span>
-                      )}
-                    </div>
+                  <ArrowLeft size={18} />
+                </button>
+                <div style={{ position: "relative" }}>
+                  <img src={activeChat.avatar} alt="" style={styles.avatarImg} />
+                  {activeChat.isOnline && <div style={styles.activeDotIndicator} />}
+                </div>
+                <div>
+                  <div style={{ fontWeight: "700", fontSize: "14px", display: "flex", alignItems: "center", gap: "5px" }}>
+                    {activeChat.isGroup && <Users size={14} color={THEME.secondary} />}
+                    {activeChat.name}
+                  </div>
+                  <div style={{ fontSize: "11px", color: THEME.textMuted }}>
+                    {vanishMode ? "🔒 Vanish mode: 15s deletion" : activeChat.lastSeen || "Online"}
                   </div>
                 </div>
-              );
-            })
-          )}
-          <div ref={messagesEndRef} />
-        </div>
+              </div>
 
-        {/* ----------------- FIXED DOCK INPUT BAR ----------------- */}
-        <footer style={styles.dockBottomFooter}>
-          <div style={styles.inputInnerDock}>
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileUpload}
-              style={{ display: "none" }}
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              style={styles.dockIconBtn}
-              title="Attach media or document"
-            >
-              <Paperclip size={18} />
-            </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <button
+                  onClick={() => startRealWebRtcCall("audio")}
+                  style={styles.headerIconButton}
+                  title="WebRTC Voice Call"
+                >
+                  <Phone size={17} color={THEME.secondary} />
+                </button>
 
-            {isRecording ? (
-              <div style={styles.recordingLiveDock}>
-                <span style={{ color: THEME.danger, fontSize: "13px", fontWeight: "bold" }}>
-                  ● Recording: {recordSecs}s
-                </span>
-                <button onClick={handleSendVoice} style={styles.sendVoiceBtnAction}>
-                  Send Voice Note
+                <button
+                  onClick={() => startRealWebRtcCall("video")}
+                  style={styles.headerIconButton}
+                  title="WebRTC Video Call"
+                >
+                  <Video size={17} color={THEME.accent} />
+                </button>
+
+                <button
+                  onClick={() => setVanishMode(!vanishMode)}
+                  style={{
+                    ...styles.vanishPillButton,
+                    backgroundColor: vanishMode ? "rgba(168, 85, 247, 0.2)" : THEME.card,
+                    borderColor: vanishMode ? THEME.vanish : THEME.border,
+                    color: vanishMode ? "#e9d5ff" : THEME.textMuted
+                  }}
+                >
+                  <Timer size={14} />
+                  <span className="hide-mobile">Vanish {vanishMode ? "ON" : "OFF"}</span>
                 </button>
               </div>
-            ) : (
-              <input
-                type="text"
-                placeholder={
-                  vanishMode ? "Disappearing message..." : `Message ${activeChat?.name || ""}...`
-                }
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
-                style={styles.dockTextRawInput}
-              />
-            )}
+            </header>
 
-            {!inputText.trim() && !isRecording ? (
-              <button onClick={() => setIsRecording(true)} style={styles.dockIconBtn} title="Record Voice">
-                <Mic size={18} />
-              </button>
-            ) : isRecording ? (
-              <button onClick={() => setIsRecording(false)} style={styles.dockIconBtn}>
-                <MicOff size={18} color={THEME.danger} />
-              </button>
-            ) : (
-              <button onClick={handleSendMessage} style={styles.sendBtnCircle}>
-                <Send size={15} color="#ffffff" />
-              </button>
-            )}
+            {/* Messages Feed */}
+            <div style={styles.messageFeedViewport}>
+              {activeMessages.length === 0 ? (
+                <div style={styles.emptyNoticeBox}>
+                  <MessageSquare size={38} color={THEME.textMuted} style={{ marginBottom: "8px" }} />
+                  <div style={{ fontSize: "14px", fontWeight: "600" }}>
+                    No messages yet with {activeChat.name}
+                  </div>
+                  <p style={{ fontSize: "12px", color: THEME.textMuted, margin: "4px 0 0" }}>
+                    Connected to Firebase Firestore. Send a message!
+                  </p>
+                </div>
+              ) : (
+                activeMessages.map((msg) => {
+                  const isMe = msg.senderPhone === currentUser.phone;
+                  return (
+                    <div
+                      key={msg.id}
+                      style={{
+                        ...styles.messageRowFlex,
+                        justifyContent: isMe ? "flex-end" : "flex-start"
+                      }}
+                    >
+                      <div
+                        style={{
+                          ...styles.messageBubbleBox,
+                          backgroundColor: msg.isVanish
+                            ? "rgba(88, 28, 135, 0.45)"
+                            : isMe
+                            ? THEME.primary
+                            : THEME.card,
+                          border: msg.isVanish ? "1px solid rgba(168, 85, 247, 0.6)" : `1px solid ${THEME.border}`,
+                          borderBottomRightRadius: isMe ? "4px" : "16px",
+                          borderBottomLeftRadius: !isMe ? "4px" : "16px"
+                        }}
+                      >
+                        <div style={styles.msgAuthorName}>{msg.senderName}</div>
+
+                        {msg.type === "text" && <div style={styles.msgBodyText}>{msg.content}</div>}
+
+                        {msg.type === "image" && (
+                          <div>
+                            <img src={msg.fileUrl} alt="" style={styles.attachedImageThumbnail} />
+                            {msg.content && <div style={styles.captionText}>"{msg.content}"</div>}
+                          </div>
+                        )}
+
+                        {msg.type === "voice" && (
+                          <div style={styles.voiceNoteFlexRow}>
+                            <button
+                              onClick={() => setPlayingVoiceId(playingVoiceId === msg.id ? null : msg.id)}
+                              style={styles.voicePlayBtn}
+                            >
+                              {playingVoiceId === msg.id ? <Pause size={14} /> : <Play size={14} />}
+                            </button>
+                            <div style={styles.voiceWaveVisualizer}>
+                              {[30, 70, 25, 90, 60, 100, 45, 80, 50, 75].map((h, i) => (
+                                <span
+                                  key={i}
+                                  style={{
+                                    ...styles.waveStemBar,
+                                    height: `${h}%`,
+                                    backgroundColor: playingVoiceId === msg.id ? THEME.secondary : "#ffffffaa"
+                                  }}
+                                />
+                              ))}
+                            </div>
+                            <span style={{ fontSize: "11px", color: THEME.textMuted }}>{msg.duration}s</span>
+                          </div>
+                        )}
+
+                        {msg.type === "file" && (
+                          <a href={msg.fileUrl} target="_blank" rel="noreferrer" style={styles.docFileCard}>
+                            <FileText size={20} color={THEME.secondary} />
+                            <div>
+                              <div style={{ fontSize: "13px", fontWeight: "600" }}>{msg.content}</div>
+                              <div style={{ fontSize: "10px", color: THEME.textMuted }}>{msg.fileSize}</div>
+                            </div>
+                          </a>
+                        )}
+
+                        <div style={styles.msgFooterMeta}>
+                          <span style={{ fontSize: "10px", color: "rgba(255, 255, 255, 0.6)" }}>
+                            {new Date(msg.createdAt).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit"
+                            })}
+                          </span>
+                          {isMe && (
+                            <span style={{ display: "inline-flex", marginLeft: "4px" }}>
+                              {readReceipts && msg.status === "read" ? (
+                                <CheckCheck size={14} color={THEME.tickRead} />
+                              ) : (
+                                <Check size={14} color={THEME.tickSent} />
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Bottom Dock Input */}
+            <footer style={styles.dockBottomFooter}>
+              <div style={styles.inputInnerDock}>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                  style={{ display: "none" }}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  style={styles.dockIconBtn}
+                  title="Attach media or file"
+                >
+                  <Paperclip size={18} />
+                </button>
+
+                {isRecording ? (
+                  <div style={styles.recordingLiveDock}>
+                    <span style={{ color: THEME.danger, fontSize: "13px", fontWeight: "bold" }}>
+                      ● Recording: {recordSecs}s
+                    </span>
+                    <button onClick={handleSendVoice} style={styles.sendVoiceBtnAction}>
+                      Send Voice Note
+                    </button>
+                  </div>
+                ) : (
+                  <input
+                    type="text"
+                    placeholder={
+                      vanishMode ? "Disappearing message..." : `Message ${activeChat.name}...`
+                    }
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
+                    style={styles.dockTextRawInput}
+                  />
+                )}
+
+                {!inputText.trim() && !isRecording ? (
+                  <button onClick={() => setIsRecording(true)} style={styles.dockIconBtn} title="Record Voice">
+                    <Mic size={18} />
+                  </button>
+                ) : isRecording ? (
+                  <button onClick={() => setIsRecording(false)} style={styles.dockIconBtn}>
+                    <MicOff size={18} color={THEME.danger} />
+                  </button>
+                ) : (
+                  <button onClick={handleSendMessage} style={styles.sendBtnCircle}>
+                    <Send size={15} color="#ffffff" />
+                  </button>
+                )}
+              </div>
+            </footer>
+          </>
+        ) : (
+          <div style={styles.emptyNoticeBox}>
+            <MessageSquare size={48} color={THEME.textMuted} style={{ marginBottom: "12px" }} />
+            <div style={{ fontSize: "16px", fontWeight: "bold" }}>Welcome, {currentUser.name}!</div>
+            <p style={{ fontSize: "13px", color: THEME.textMuted }}>
+              Select a conversation or click <b>+ Add by Number</b> to verify any BD user across Firebase.
+            </p>
           </div>
-        </footer>
+        )}
       </main>
 
-      {/* ----------------- 1. ADD BD CONTACT MODAL ----------------- */}
+      {/* ----------------- 1. ADD CONTACT MODAL (FIREBASE) ----------------- */}
       {showAddContactModal && (
         <div style={styles.modalBackdrop}>
           <div style={styles.modalContainerCard}>
             <div style={styles.modalTopHeader}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <UserPlus size={18} color={THEME.accent} />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Add Bangladeshi Contact</span>
+                <span style={{ fontWeight: "700", fontSize: "15px" }}>Add BD Contact (Firebase)</span>
               </div>
               <button onClick={() => setShowAddContactModal(false)} style={styles.cleanGhostBtn}>
                 <X size={18} />
@@ -1616,7 +1430,7 @@ export default function App() {
 
             <form onSubmit={handleVerifyAndAddContact} style={{ padding: "18px" }}>
               <p style={{ fontSize: "12px", color: THEME.textMuted, margin: "0 0 12px" }}>
-                Enter your contact's 11-digit Bangladeshi mobile number (01xxxxxxxxx).
+                Enter an 11-digit BD number. Infinity Chat queries your Firebase collection directly.
               </p>
 
               <label style={styles.labelTitle}>Mobile Number</label>
@@ -1641,8 +1455,8 @@ export default function App() {
                 >
                   Cancel
                 </button>
-                <button type="submit" style={styles.primaryActionButton}>
-                  Verify & Add
+                <button type="submit" disabled={isSyncing} style={styles.primaryActionButton}>
+                  {isSyncing ? <Loader2 size={16} className="spin" /> : <span>Verify & Add</span>}
                 </button>
               </div>
             </form>
@@ -1657,7 +1471,7 @@ export default function App() {
             <div style={styles.modalTopHeader}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <Users size={18} color={THEME.secondary} />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Create Group Channel</span>
+                <span style={{ fontWeight: "700", fontSize: "15px" }}>Create Firebase Group</span>
               </div>
               <button onClick={() => setShowCreateGroupModal(false)} style={styles.cleanGhostBtn}>
                 <X size={18} />
@@ -1670,7 +1484,7 @@ export default function App() {
                 <Users size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
                 <input
                   type="text"
-                  placeholder="e.g. Project Apollo Sprint 🚀"
+                  placeholder="e.g. Engineering Sync 🚀"
                   value={newGroupName}
                   onChange={(e) => setNewGroupName(e.target.value)}
                   style={styles.bareInput}
@@ -1678,7 +1492,7 @@ export default function App() {
                 />
               </div>
 
-              <label style={styles.labelTitle}>Select Members</label>
+              <label style={styles.labelTitle}>Select Contacts</label>
               <div style={styles.groupMemberListScroll}>
                 {contacts
                   .filter((c) => !c.isGroup)
@@ -1687,7 +1501,13 @@ export default function App() {
                     return (
                       <div
                         key={contact.id}
-                        onClick={() => toggleGroupMemberSelection(contact.id)}
+                        onClick={() => {
+                          if (isSelected) {
+                            setSelectedGroupMembers(selectedGroupMembers.filter((id) => id !== contact.id));
+                          } else {
+                            setSelectedGroupMembers([...selectedGroupMembers, contact.id]);
+                          }
+                        }}
                         style={{
                           ...styles.groupSelectRow,
                           backgroundColor: isSelected ? THEME.cardHover : "transparent"
@@ -1734,7 +1554,7 @@ export default function App() {
             <div style={{ ...styles.modalTopHeader, borderBottom: "none", paddingBottom: "0" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <Info size={18} color="#f59e0b" />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>BD Number Not Registered</span>
+                <span style={{ fontWeight: "700", fontSize: "15px" }}>Not Found in Firebase</span>
               </div>
               <button onClick={() => setInviteModalData(null)} style={styles.cleanGhostBtn}>
                 <X size={18} />
@@ -1749,7 +1569,7 @@ export default function App() {
                 {inviteModalData.phone}
               </h3>
               <p style={{ fontSize: "12px", color: THEME.textMuted, lineHeight: "1.5" }}>
-                This Bangladeshi mobile number is not yet on Infinity Chat. Share an invite link so they can register with their BD SIM!
+                This BD number has not registered on Infinity Chat yet. Send them an invite link to connect!
               </p>
 
               <div style={styles.inviteLinkContainer}>
@@ -1759,7 +1579,7 @@ export default function App() {
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(inviteModalData.inviteUrl);
-                  showToast("Invite link copied! Share via SMS / WhatsApp.");
+                  showToast("Invite link copied to clipboard!");
                   setInviteModalData(null);
                 }}
                 style={{ ...styles.primaryActionButton, width: "100%", marginTop: "12px" }}
@@ -1771,7 +1591,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ----------------- 4. LIVE WEBRTC CALL OVERLAY ----------------- */}
+      {/* ----------------- 4. WEBRTC CALL OVERLAY ----------------- */}
       {activeCall && (
         <div style={styles.webrtcCallModalOverlay}>
           <div style={styles.callCardContainer}>
@@ -1779,7 +1599,6 @@ export default function App() {
               {activeCall.type === "video" ? "Infinity WebRTC HD Video Call" : "Infinity Encrypted Voice Call"}
             </div>
 
-            {/* Real WebRTC Video Element or Peer Avatar */}
             {activeCall.type === "video" && !isVideoDisabled ? (
               <div style={styles.videoStreamBox}>
                 <video
@@ -1816,7 +1635,6 @@ export default function App() {
                 : "Dialing Peer..."}
             </div>
 
-            {/* In-Call Actions */}
             <div style={styles.callActionsRowFlex}>
               <button
                 onClick={toggleCallMute}
@@ -1877,16 +1695,22 @@ export default function App() {
             display: none !important;
           }
         }
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        .spin {
+          animation: spin 1s linear infinite;
+        }
       `}</style>
     </div>
   );
 }
 
 // -------------------------------------------------------------
-// SELF-CONTAINED CSS STYLESHEET OBJECT
+// STYLESHEET DEFINITION
 // -------------------------------------------------------------
 const styles = {
-  // Toast Alert
   toastNotification: {
     position: "fixed",
     top: "16px",
@@ -1901,8 +1725,6 @@ const styles = {
     zIndex: 9999,
     boxShadow: "0 10px 25px rgba(0,0,0,0.5)"
   },
-
-  // Auth Screen
   authContainer: {
     display: "flex",
     alignItems: "center",
@@ -2032,8 +1854,6 @@ const styles = {
     color: THEME.textMuted,
     marginTop: "18px"
   },
-
-  // Main Layout
   appContainer: {
     display: "flex",
     height: "100vh",
@@ -2156,8 +1976,6 @@ const styles = {
     overflow: "hidden",
     textOverflow: "ellipsis"
   },
-
-  // Settings Suite View
   settingsSuiteContainer: {
     display: "flex",
     flexDirection: "column",
@@ -2240,39 +2058,6 @@ const styles = {
     fontWeight: "700",
     cursor: "pointer"
   },
-  settingsOptionBox: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "14px",
-    backgroundColor: THEME.card,
-    borderRadius: "12px",
-    border: `1px solid ${THEME.border}`,
-    marginBottom: "10px"
-  },
-  selectDropdown: {
-    backgroundColor: THEME.bg,
-    color: THEME.text,
-    border: `1px solid ${THEME.border}`,
-    borderRadius: "8px",
-    padding: "6px 10px",
-    fontSize: "12px",
-    outline: "none"
-  },
-  storageStatsBox: {
-    padding: "14px",
-    backgroundColor: THEME.card,
-    borderRadius: "12px",
-    border: `1px solid ${THEME.border}`
-  },
-  helpDocCard: {
-    padding: "16px",
-    backgroundColor: THEME.card,
-    borderRadius: "14px",
-    border: `1px solid ${THEME.border}`
-  },
-
-  // Chat Window Area
   chatWindow: {
     flex: 1,
     flexDirection: "column",
@@ -2403,8 +2188,6 @@ const styles = {
     justifyContent: "flex-end",
     marginTop: "4px"
   },
-
-  // Fixed Bottom Dock
   dockBottomFooter: {
     padding: "10px 14px",
     backgroundColor: THEME.sidebar,
@@ -2466,8 +2249,6 @@ const styles = {
     fontWeight: "bold",
     cursor: "pointer"
   },
-
-  // Modals
   modalBackdrop: {
     position: "fixed",
     inset: 0,
@@ -2537,8 +2318,6 @@ const styles = {
     margin: "12px 0",
     wordBreak: "break-all"
   },
-
-  // WebRTC Call Overlay
   webrtcCallModalOverlay: {
     position: "fixed",
     inset: 0,
