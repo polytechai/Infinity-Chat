@@ -9,7 +9,8 @@ import {
   onSnapshot,
   query,
   orderBy,
-  updateDoc
+  updateDoc,
+  addDoc
 } from "firebase/firestore";
 import {
   Send, Paperclip, Mic, MicOff, Timer, Play, Pause, Image as ImageIcon,
@@ -18,7 +19,7 @@ import {
   Lock, Camera, Share2, Check, CheckCheck, ChevronRight, Info, KeyRound,
   ShieldCheck, Smartphone, CheckSquare, Square, Bell, BellOff, Volume2,
   VolumeX, Moon, Sun, Globe, RefreshCw, Radio, Trash2, Download, Eye,
-  EyeOff, Music, Copy, ExternalLink, HelpCircle
+  EyeOff, Music, Copy, ExternalLink, HelpCircle, Film
 } from "lucide-react";
 
 // --- FIREBASE CONFIGURATION ---
@@ -35,6 +36,7 @@ const firebaseConfig = {
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+// STUN configuration for WebRTC
 const RTC_CONFIG = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -133,6 +135,7 @@ const TRANSLATIONS = {
     lastSeen: "সর্বশেষ দেখা",
     calling: "কল হচ্ছে...",
     ringing: "রিং হচ্ছে...",
+    incomingCall: "ইনকামিং কল আসছে...",
     profile: "প্রোফাইল",
     privacySettings: "অ্যাকাউন্ট ও প্রাইভেসী",
     notifications: "নোটিফিকেশন",
@@ -150,6 +153,9 @@ const TRANSLATIONS = {
     cancel: "বাতিল",
     save: "সংরক্ষণ",
     send: "পাঠান",
+    accept: "গ্রহণ করুন",
+    decline: "কেটে দিন",
+    attachFile: "মিডিয়া বা ফাইল যুক্ত করুন",
     termsText: "Infinity Chat আপনার গোপনীয়তাকে গুরুত্ব দেয়। আমরা শুধুমাত্র অ্যাপ পরিচালনা, অ্যাকাউন্ট নিরাপত্তা এবং সেবা উন্নত করার জন্য প্রয়োজনীয় তথ্য সংগ্রহ করি। আপনার ব্যক্তিগত তথ্য আপনার অনুমতি ছাড়া তৃতীয় পক্ষের কাছে বিক্রি বা শেয়ার করা হয় না। সকল ব্যবহারকারীকে নিরাপদ, সম্মানজনক এবং আইনসম্মতভাবে প্ল্যাটফর্ম ব্যবহার করতে হবে। Infinity Chat ব্যবহার করার মাধ্যমে আপনি আমাদের Privacy Policy এবং Terms of Service মেনে নিতে সম্মত হচ্ছেন।"
   },
   en: {
@@ -167,6 +173,7 @@ const TRANSLATIONS = {
     lastSeen: "Last seen",
     calling: "Calling...",
     ringing: "Ringing...",
+    incomingCall: "Incoming Call...",
     profile: "Profile",
     privacySettings: "Account & Privacy",
     notifications: "Notifications",
@@ -184,6 +191,9 @@ const TRANSLATIONS = {
     cancel: "Cancel",
     save: "Save",
     send: "Send",
+    accept: "Accept",
+    decline: "Decline",
+    attachFile: "Attach Media or File",
     termsText: "Infinity Chat values your privacy. We only collect the necessary information required for operating the app, securing accounts, and enhancing services. Your personal data is never sold or shared with third parties without your permission. All users must use the platform safely, respectfully, and lawfully. By using Infinity Chat, you agree to comply with our Privacy Policy and Terms of Service."
   }
 };
@@ -226,14 +236,9 @@ export default function App() {
   const [vanishMode, setVanishMode] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordSecs, setRecordSecs] = useState(0);
-  const [playingVoiceId, setPlayingVoiceId] = useState(null);
 
   // Modals & Creation States
   const [contactSearchInput, setContactSearchInput] = useState("");
-  const [newGroupName, setNewGroupName] = useState("");
-  const [selectedGroupMembers, setSelectedGroupMembers] = useState([]);
-  const [newChannelName, setNewChannelName] = useState("");
-  const [newChannelDesc, setNewChannelDesc] = useState("");
 
   // Auth States
   const [authMode, setAuthMode] = useState("register"); // "register" | "login" | "otp"
@@ -246,9 +251,11 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
 
-  // WebRTC Audio/Video Calls
-  const [activeCall, setActiveCall] = useState(null); // { type: "audio"|"video", status: "ringing"|"connected", duration: 0 }
+  // WebRTC Audio/Video Calls State
+  const [activeCall, setActiveCall] = useState(null); // { callId, type: "audio"|"video", isCaller: boolean, peerPhone, peerName, peerAvatar, status: "calling"|"ringing"|"connected", duration: 0 }
+  const [incomingCall, setIncomingCall] = useState(null); // { callId, callerPhone, callerName, callerAvatar, type }
   const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoDisabled, setIsVideoDisabled] = useState(false);
 
@@ -257,7 +264,10 @@ export default function App() {
   const fileInputRef = useRef(null);
   const avatarUploadRef = useRef(null);
   const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
   const peerConnectionRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
 
   const showToast = (msg) => {
     setToastMessage(msg);
@@ -306,11 +316,16 @@ export default function App() {
     };
   }, [darkMode]);
 
-  // --- 1. BACK BUTTON NAVIGATION FIX (Prevent Direct App Exit) ---
+  // --- 1. ANDROID BACK BUTTON NAVIGATION FIX (Prevent Direct App Exit) ---
   useEffect(() => {
     window.history.pushState({ page: "root" }, "");
 
     const handlePopState = () => {
+      if (incomingCall) {
+        rejectIncomingCall();
+        window.history.pushState({ page: "root" }, "");
+        return;
+      }
       if (activeCall) {
         endCall();
         window.history.pushState({ page: "root" }, "");
@@ -331,7 +346,7 @@ export default function App() {
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [activeModal, mobileView, activeCall]);
+  }, [activeModal, mobileView, activeCall, incomingCall]);
 
   const openViewOrModal = (modalName) => {
     window.history.pushState({ modal: modalName }, "");
@@ -479,65 +494,285 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messagesMap[activeChat?.id]?.length]);
 
-  // Call timer and ringing status
+  // --- 4. WEBRTC FIRESTORE SIGNALING & INCOMING CALL LISTENER ---
+  useEffect(() => {
+    if (!currentUser?.phone) return;
+    const myNorm = normalizePhone(currentUser.phone);
+
+    // Listen to calls targeting my phone
+    const incomingCallRef = doc(db, "calls", myNorm);
+    const unsub = onSnapshot(incomingCallRef, async (snap) => {
+      if (!snap.exists()) {
+        if (incomingCall) {
+          soundEngine.stopRing();
+          setIncomingCall(null);
+        }
+        return;
+      }
+      const data = snap.data();
+      if (!data) return;
+
+      // New call offered to me
+      if (data.status === "offering" && data.receiverPhone === myNorm) {
+        if (!activeCall && !incomingCall) {
+          setIncomingCall(data);
+          soundEngine.startRing(selectedRingtone);
+        }
+      } else if (data.status === "declined" || data.status === "ended") {
+        if (incomingCall) {
+          soundEngine.stopRing();
+          setIncomingCall(null);
+        }
+        if (activeCall && activeCall.callId === data.callId) {
+          endCall();
+        }
+      }
+    });
+
+    return () => unsub();
+  }, [currentUser?.phone, activeCall, incomingCall, selectedRingtone]);
+
+  // Active call peer status listener & timer
   useEffect(() => {
     let t;
     if (activeCall) {
-      if (activeCall.status === "ringing") {
+      if (activeCall.status === "ringing" || activeCall.status === "calling") {
         soundEngine.startRing(selectedRingtone);
       } else {
         soundEngine.stopRing();
       }
+
+      // Listen to call doc changes if call is active
+      const callDocRef = doc(db, "calls", activeCall.receiverPhone || activeCall.peerPhone);
+      const unsubCallDoc = onSnapshot(callDocRef, (snap) => {
+        if (snap.exists()) {
+          const cData = snap.data();
+          if (cData.status === "accepted" && activeCall.status !== "connected") {
+            soundEngine.stopRing();
+            setActiveCall((prev) => prev ? { ...prev, status: "connected" } : null);
+          } else if (cData.status === "declined" || cData.status === "ended") {
+            endCall();
+          }
+        }
+      });
+
       t = setInterval(() => {
         setActiveCall((prev) => {
           if (!prev) return null;
-          if (prev.status === "ringing") {
-            soundEngine.stopRing();
-            return { ...prev, status: "connected", duration: 1 };
+          if (prev.status === "connected") {
+            return { ...prev, duration: (prev.duration || 0) + 1 };
           }
-          return { ...prev, duration: (prev.duration || 0) + 1 };
+          return prev;
         });
       }, 1000);
+
+      return () => {
+        clearInterval(t);
+        unsubCallDoc();
+        soundEngine.stopRing();
+      };
     } else {
       soundEngine.stopRing();
     }
-    return () => {
-      clearInterval(t);
-      soundEngine.stopRing();
-    };
-  }, [activeCall?.status, selectedRingtone]);
+  }, [activeCall?.status, activeCall?.callId, selectedRingtone]);
 
-  // Local camera binding
+  // Local/Remote video attachment
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream, activeCall]);
 
-  // --- SENDING MESSAGES (OPTIMISTIC 0ms LATENCY) ---
-  const handleSendMessage = async () => {
-    if (!inputText.trim() || !activeChat || !currentUser) return;
-    const text = inputText.trim();
-    setInputText("");
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, activeCall]);
 
+  // --- WEBRTC START, ANSWER, END ACTIONS ---
+  const startCall = async (type) => {
+    if (!activeChat) return;
+    const myNorm = normalizePhone(currentUser.phone);
+    const peerNorm = normalizePhone(activeChat.phone);
+    const callId = `call_${Date.now()}_${myNorm}`;
+
+    try {
+      // Explicit media stream request
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: type === "video",
+        audio: true
+      });
+      setLocalStream(stream);
+
+      const pc = new RTCPeerConnection(RTC_CONFIG);
+      peerConnectionRef.current = pc;
+
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+      const remStream = new MediaStream();
+      pc.ontrack = (event) => {
+        event.streams[0].getTracks().forEach((track) => remStream.addTrack(track));
+      };
+      setRemoteStream(remStream);
+
+      // Create call document in Firestore
+      const callData = {
+        callId,
+        callerPhone: myNorm,
+        callerName: currentUser.name || myNorm,
+        callerAvatar: currentUser.avatar || "",
+        receiverPhone: peerNorm,
+        receiverName: activeChat.name || peerNorm,
+        receiverAvatar: activeChat.avatar || "",
+        type,
+        status: "offering",
+        createdAt: new Date().toISOString()
+      };
+
+      await setDoc(doc(db, "calls", peerNorm), callData);
+
+      setActiveCall({
+        callId,
+        type,
+        isCaller: true,
+        peerPhone: peerNorm,
+        peerName: activeChat.name,
+        peerAvatar: activeChat.avatar,
+        status: peerPresence.isOnline ? "ringing" : "calling",
+        duration: 0
+      });
+
+      // Timeout fallback for answer
+      setTimeout(async () => {
+        const check = await getDoc(doc(db, "calls", peerNorm));
+        if (check.exists() && check.data()?.status === "offering") {
+          showToast("No answer from user");
+          endCall();
+        }
+      }, 30000);
+    } catch (err) {
+      console.error(err);
+      showToast("Media permission failed or unsupported: " + err.message);
+    }
+  };
+
+  const acceptIncomingCall = async () => {
+    if (!incomingCall) return;
+    soundEngine.stopRing();
+    const myNorm = normalizePhone(currentUser.phone);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: incomingCall.type === "video",
+        audio: true
+      });
+      setLocalStream(stream);
+
+      const pc = new RTCPeerConnection(RTC_CONFIG);
+      peerConnectionRef.current = pc;
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+      const remStream = new MediaStream();
+      pc.ontrack = (event) => {
+        event.streams[0].getTracks().forEach((track) => remStream.addTrack(track));
+      };
+      setRemoteStream(remStream);
+
+      await updateDoc(doc(db, "calls", myNorm), {
+        status: "accepted"
+      });
+
+      setActiveCall({
+        callId: incomingCall.callId,
+        type: incomingCall.type,
+        isCaller: false,
+        peerPhone: incomingCall.callerPhone,
+        peerName: incomingCall.callerName,
+        peerAvatar: incomingCall.callerAvatar,
+        status: "connected",
+        duration: 0
+      });
+
+      setIncomingCall(null);
+    } catch (err) {
+      console.error(err);
+      showToast("Could not access camera/microphone: " + err.message);
+      rejectIncomingCall();
+    }
+  };
+
+  const rejectIncomingCall = async () => {
+    soundEngine.stopRing();
+    if (incomingCall) {
+      const myNorm = normalizePhone(currentUser.phone);
+      try {
+        await updateDoc(doc(db, "calls", myNorm), { status: "declined" });
+      } catch (e) {}
+      setIncomingCall(null);
+    }
+  };
+
+  const endCall = async () => {
+    soundEngine.stopRing();
+    if (localStream) {
+      localStream.getTracks().forEach((t) => t.stop());
+      setLocalStream(null);
+    }
+    if (peerConnectionRef.current) {
+      try { peerConnectionRef.current.close(); } catch (e) {}
+      peerConnectionRef.current = null;
+    }
+    setRemoteStream(null);
+
+    if (activeCall) {
+      try {
+        const targetDoc = activeCall.isCaller ? activeCall.peerPhone : normalizePhone(currentUser.phone);
+        await updateDoc(doc(db, "calls", targetDoc), { status: "ended" });
+      } catch (e) {}
+    }
+    setActiveCall(null);
+  };
+
+  // --- SENDING MESSAGES (OPTIMISTIC 0ms LATENCY) ---
+  const handleSendMessage = async (customPayload = null) => {
+    if (!activeChat || !currentUser) return;
     const myNorm = normalizePhone(currentUser.phone);
     const peerNorm = normalizePhone(activeChat.phone);
     const roomId = activeChat.isGroup ? activeChat.id : activeChat.roomId || getRoomId(myNorm, peerNorm);
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
-    const optimisticMsg = {
-      id: msgId,
-      roomId,
-      senderId: currentUser.id || myNorm,
-      senderPhone: myNorm,
-      senderName: currentUser.name,
-      content: text,
-      type: "text",
-      status: "sending",
-      isVanish: vanishMode,
-      createdAt: now
-    };
+    let optimisticMsg;
+    if (customPayload) {
+      optimisticMsg = {
+        id: msgId,
+        roomId,
+        senderId: currentUser.id || myNorm,
+        senderPhone: myNorm,
+        senderName: currentUser.name,
+        status: "sending",
+        isVanish: vanishMode,
+        createdAt: now,
+        ...customPayload
+      };
+    } else {
+      if (!inputText.trim()) return;
+      const text = inputText.trim();
+      setInputText("");
+
+      optimisticMsg = {
+        id: msgId,
+        roomId,
+        senderId: currentUser.id || myNorm,
+        senderPhone: myNorm,
+        senderName: currentUser.name,
+        content: text,
+        type: "text",
+        status: "sending",
+        isVanish: vanishMode,
+        createdAt: now
+      };
+    }
 
     // Optimistic UI state
     setMessagesMap((prev) => ({
@@ -570,6 +805,41 @@ export default function App() {
         }));
       }, 15000);
     }
+  };
+
+  // --- COMPRESSED BASE64 ATTACHMENT SHARING (Images, Videos, PDFs, Docs) ---
+  const handleAttachmentUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Check size limit: keep base64 strings reasonable (< 800KB)
+    if (file.size > 2 * 1024 * 1024) {
+      showToast("Please choose files under 2MB for fast delivery.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64Data = reader.result;
+      const isImg = file.type.startsWith("image/");
+      const isVid = file.type.startsWith("video/");
+      const isPdf = file.type === "application/pdf";
+
+      const type = isImg ? "image" : isVid ? "video" : isPdf ? "pdf" : "file";
+      const payload = {
+        type,
+        fileUrl: base64Data,
+        fileName: file.name,
+        fileSize: (file.size / 1024).toFixed(1) + " KB",
+        content: isImg ? "Photo" : isVid ? "Video clip" : file.name
+      };
+
+      await handleSendMessage(payload);
+      showToast(`${file.name} sent!`);
+    };
+    reader.readAsDataURL(file);
+    // Reset file input
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   // Profile Picture Upload to Base64
@@ -640,40 +910,6 @@ export default function App() {
     } finally {
       setIsProcessing(false);
     }
-  };
-
-  // Start WebRTC Call with Dynamic Status
-  const startCall = async (type) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: type === "video"
-      });
-      setLocalStream(stream);
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-      peerConnectionRef.current = pc;
-    } catch (e) {
-      console.warn(e);
-    }
-    setActiveCall({
-      type,
-      status: "ringing",
-      duration: 0
-    });
-  };
-
-  const endCall = () => {
-    soundEngine.stopRing();
-    if (localStream) {
-      localStream.getTracks().forEach((t) => t.stop());
-      setLocalStream(null);
-    }
-    if (peerConnectionRef.current) {
-      try { peerConnectionRef.current.close(); } catch (e) {}
-      peerConnectionRef.current = null;
-    }
-    setActiveCall(null);
   };
 
   // Auth Submit Handlers
@@ -766,7 +1002,7 @@ export default function App() {
 
   const activeMessages = activeChat ? messagesMap[activeChat.id] || [] : [];
   const sharedMediaFiles = useMemo(() => {
-    return activeMessages.filter((m) => m.type === "image" || m.type === "file");
+    return activeMessages.filter((m) => m.type === "image" || m.type === "video" || m.type === "pdf" || m.type === "file");
   }, [activeMessages]);
 
   // -------------------------------------------------------------
@@ -776,7 +1012,7 @@ export default function App() {
     return (
       <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg, color: THEME.text }}>
         {toastMessage && <div style={{ ...styles.toast, backgroundColor: THEME.primary }}>{toastMessage}</div>}
-        <div style={{ ...styles.card, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+        <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
           <div style={{ textAlign: "center", marginBottom: "20px" }}>
             <div style={{ ...styles.logoCircle, backgroundColor: THEME.primary }}>
               <MessageSquare size={32} color="#fff" />
@@ -894,13 +1130,13 @@ export default function App() {
   }
 
   // -------------------------------------------------------------
-  // VIEW: MAIN MESSENGER INTERFACE
+  // VIEW: MAIN MESSENGER INTERFACE (100% FULL SCREEN)
   // -------------------------------------------------------------
   return (
     <div style={{ ...styles.appWrap, backgroundColor: THEME.bg, color: THEME.text }}>
       {toastMessage && <div style={{ ...styles.toast, backgroundColor: THEME.primary }}>{toastMessage}</div>}
 
-      {/* --- SIDEBAR --- */}
+      {/* --- SIDEBAR (FULL SCREEN ON MOBILE, RESPONSIVE DESKTOP) --- */}
       <aside style={{
         ...styles.sidebar,
         backgroundColor: THEME.sidebar,
@@ -984,7 +1220,7 @@ export default function App() {
                       )}
                     </div>
                     <div style={{ fontSize: "12px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {last ? last.content : c.phone}
+                      {last ? (last.type === "image" ? "📷 Photo" : last.type === "video" ? "🎥 Video" : last.type === "pdf" ? "📄 PDF" : last.content) : c.phone}
                     </div>
                   </div>
                 </div>
@@ -994,7 +1230,7 @@ export default function App() {
         </div>
       </aside>
 
-      {/* --- ACTIVE CHAT MAIN VIEW --- */}
+      {/* --- ACTIVE CHAT MAIN VIEW (FULL SCREEN WIDTH) --- */}
       <main style={{
         ...styles.chatMain,
         backgroundColor: THEME.bg,
@@ -1065,7 +1301,49 @@ export default function App() {
                         borderBottomRightRadius: isMe ? "2px" : "10px",
                         borderBottomLeftRadius: !isMe ? "2px" : "10px"
                       }}>
-                        <div style={{ fontSize: "13px", lineHeight: "1.4" }}>{m.content}</div>
+                        {/* 1. Image Rendering */}
+                        {m.type === "image" && m.fileUrl && (
+                          <div style={{ marginBottom: "6px", borderRadius: "6px", overflow: "hidden" }}>
+                            <img src={m.fileUrl} alt="shared" style={{ maxWidth: "260px", maxHeight: "240px", width: "100%", objectFit: "contain", borderRadius: "6px" }} />
+                          </div>
+                        )}
+
+                        {/* 2. Video Rendering */}
+                        {m.type === "video" && m.fileUrl && (
+                          <div style={{ marginBottom: "6px", borderRadius: "6px", overflow: "hidden" }}>
+                            <video src={m.fileUrl} controls style={{ maxWidth: "260px", maxHeight: "240px", width: "100%", borderRadius: "6px" }} />
+                          </div>
+                        )}
+
+                        {/* 3. PDF & Documents Rendering with Download */}
+                        {(m.type === "pdf" || m.type === "file") && m.fileUrl && (
+                          <div style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px",
+                            padding: "8px",
+                            borderRadius: "6px",
+                            backgroundColor: isMe ? "rgba(0,0,0,0.06)" : "rgba(255,255,255,0.08)",
+                            marginBottom: "4px"
+                          }}>
+                            <FileText size={24} color={THEME.secondary} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: "12px", fontWeight: "600", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {m.fileName || "Document"}
+                              </div>
+                              <div style={{ fontSize: "10px", opacity: 0.7 }}>{m.fileSize || "File"}</div>
+                            </div>
+                            <a href={m.fileUrl} download={m.fileName || "download"} style={{ ...styles.iconBtn, width: "28px", height: "28px", backgroundColor: THEME.card, color: THEME.text }} title="Download">
+                              <Download size={14} />
+                            </a>
+                          </div>
+                        )}
+
+                        {/* Text Content */}
+                        {m.content && m.type !== "image" && m.type !== "video" && (
+                          <div style={{ fontSize: "13px", lineHeight: "1.4" }}>{m.content}</div>
+                        )}
+
                         <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "4px", marginTop: "3px" }}>
                           <span style={{ fontSize: "9px", opacity: 0.7 }}>
                             {new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -1084,8 +1362,26 @@ export default function App() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input Bar */}
+            {/* Input Bar with Attachment File Picker */}
             <div style={{ ...styles.inputBar, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              {/* Hidden file input supporting images, videos, pdfs, docs */}
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleAttachmentUpload}
+                accept="image/*,video/*,application/pdf,.doc,.docx,.txt"
+                style={{ display: "none" }}
+              />
+
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                style={{ ...styles.iconBtn, backgroundColor: THEME.card }}
+                title={t.attachFile}
+              >
+                <Paperclip size={18} color={THEME.textMuted} />
+              </button>
+
               <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border, flex: 1 }}>
                 <input
                   type="text"
@@ -1096,7 +1392,8 @@ export default function App() {
                   style={{ ...styles.bareInput, color: THEME.text }}
                 />
               </div>
-              <button onClick={handleSendMessage} style={{ ...styles.circleBtn, backgroundColor: THEME.primary }}>
+
+              <button onClick={() => handleSendMessage()} style={{ ...styles.circleBtn, backgroundColor: THEME.primary }}>
                 <Send size={15} color="#fff" />
               </button>
             </div>
@@ -1109,6 +1406,113 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* --- INCOMING CALL MODAL WITH ACCEPT / REJECT --- */}
+      {incomingCall && (
+        <div style={styles.callOverlay}>
+          <div style={{ ...styles.callBox, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ fontSize: "12px", color: THEME.accent, fontWeight: "600" }}>
+              {t.incomingCall}
+            </div>
+            <img
+              src={incomingCall.callerAvatar || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=160"}
+              alt=""
+              style={{ width: "74px", height: "74px", borderRadius: "50%", margin: "14px auto 4px", border: `2px solid ${THEME.primary}` }}
+            />
+            <h3 style={{ margin: "6px 0 2px" }}>{incomingCall.callerName}</h3>
+            <div style={{ fontSize: "12px", color: THEME.textMuted }}>{incomingCall.callerPhone}</div>
+            <div style={{ fontSize: "13px", color: THEME.primary, marginTop: "8px" }}>
+              {incomingCall.type === "video" ? "📹 HD Video Call" : "📞 Voice Call"}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "center", gap: "24px", marginTop: "24px" }}>
+              <button
+                onClick={rejectIncomingCall}
+                style={{ ...styles.circleBtn, backgroundColor: THEME.danger, width: "48px", height: "48px" }}
+                title={t.decline}
+              >
+                <PhoneOff size={22} color="#fff" />
+              </button>
+              <button
+                onClick={acceptIncomingCall}
+                style={{ ...styles.circleBtn, backgroundColor: THEME.primary, width: "48px", height: "48px" }}
+                title={t.accept}
+              >
+                <Phone size={22} color="#fff" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- ACTIVE WEBRTC CALL OVERLAY --- */}
+      {activeCall && (
+        <div style={styles.callOverlay}>
+          <div style={{ ...styles.callBox, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ fontSize: "12px", color: THEME.textMuted }}>
+              {activeCall.type === "video" ? "WebRTC HD Video" : "Encrypted Audio"}
+            </div>
+
+            {/* Video Streams */}
+            {activeCall.type === "video" && (
+              <div style={styles.videoBox}>
+                <video ref={remoteVideoRef} autoPlay playsInline style={styles.fullVideo} />
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  style={{
+                    position: "absolute",
+                    bottom: "10px",
+                    right: "10px",
+                    width: "80px",
+                    height: "100px",
+                    borderRadius: "8px",
+                    objectFit: "cover",
+                    border: `1px solid ${THEME.primary}`
+                  }}
+                />
+              </div>
+            )}
+
+            <img
+              src={activeCall.peerAvatar || activeChat?.avatar || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=160"}
+              alt=""
+              style={{ width: "70px", height: "70px", borderRadius: "50%", margin: "14px auto 4px" }}
+            />
+            <h3 style={{ margin: "4px 0" }}>{activeCall.peerName || activeChat?.name}</h3>
+            {/* Dynamic Ringing Status */}
+            <div style={{ fontSize: "13px", color: THEME.accent }}>
+              {activeCall.status === "connected"
+                ? `Active (${activeCall.duration}s)`
+                : activeCall.status === "ringing"
+                ? t.ringing
+                : t.calling}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "center", gap: "16px", marginTop: "20px" }}>
+              <button
+                onClick={() => {
+                  if (localStream) {
+                    const audioTrack = localStream.getAudioTracks()[0];
+                    if (audioTrack) {
+                      audioTrack.enabled = isMuted;
+                      setIsMuted(!isMuted);
+                    }
+                  }
+                }}
+                style={{ ...styles.circleBtn, backgroundColor: THEME.card }}
+              >
+                {isMuted ? <MicOff size={18} color={THEME.danger} /> : <Mic size={18} color={THEME.text} />}
+              </button>
+              <button onClick={endCall} style={{ ...styles.circleBtn, backgroundColor: THEME.danger }}>
+                <PhoneOff size={20} color="#fff" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* --- MODAL: USER PROFILE & SHARED MEDIA GALLERY --- */}
       {activeModal === "profile_view" && viewedProfile && (
@@ -1142,10 +1546,14 @@ export default function App() {
                       <div key={idx} style={{ borderRadius: "6px", overflow: "hidden", height: "80px", backgroundColor: THEME.card }}>
                         {item.type === "image" ? (
                           <img src={item.fileUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        ) : item.type === "video" ? (
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
+                            <Film size={22} color={THEME.secondary} />
+                          </div>
                         ) : (
-                          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", fontSize: "10px" }}>
+                          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", fontSize: "10px", padding: "4px" }}>
                             <FileText size={20} color={THEME.secondary} />
-                            <span style={{ maxWidth: "80%", overflow: "hidden", textOverflow: "ellipsis" }}>{item.content}</span>
+                            <span style={{ maxWidth: "80%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.fileName || item.content}</span>
                           </div>
                         )}
                       </div>
@@ -1478,41 +1886,9 @@ export default function App() {
         </div>
       )}
 
-      {/* --- WEBRTC CALL OVERLAY WITH DYNAMIC STATUS --- */}
-      {activeCall && (
-        <div style={styles.callOverlay}>
-          <div style={{ ...styles.callBox, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
-            <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-              {activeCall.type === "video" ? "WebRTC HD Video" : "Encrypted Audio"}
-            </div>
-            {activeCall.type === "video" && (
-              <div style={styles.videoBox}>
-                <video ref={localVideoRef} autoPlay playsInline muted style={styles.fullVideo} />
-              </div>
-            )}
-            <img src={activeChat?.avatar} alt="" style={{ width: "70px", height: "70px", borderRadius: "50%", margin: "14px auto 4px" }} />
-            <h3 style={{ margin: "4px 0" }}>{activeChat?.name}</h3>
-            {/* Dynamic Ringing Status: if recipient is online -> Ringing..., else Calling... */}
-            <div style={{ fontSize: "13px", color: THEME.accent }}>
-              {activeCall.status === "connected"
-                ? `Active (${activeCall.duration}s)`
-                : peerPresence.isOnline
-                ? t.ringing
-                : t.calling}
-            </div>
-            <div style={{ display: "flex", justifyContent: "center", gap: "16px", marginTop: "20px" }}>
-              <button onClick={() => setIsMuted(!isMuted)} style={{ ...styles.circleBtn, backgroundColor: THEME.card }}>
-                {isMuted ? <MicOff size={18} color={THEME.danger} /> : <Mic size={18} color={THEME.text} />}
-              </button>
-              <button onClick={endCall} style={{ ...styles.circleBtn, backgroundColor: THEME.danger }}>
-                <PhoneOff size={20} color="#fff" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       <style>{`
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body, html { width: 100%; height: 100%; overflow: hidden; }
         @media (min-width: 768px) {
           .mobile-only { display: none !important; }
         }
@@ -1523,41 +1899,70 @@ export default function App() {
   );
 }
 
-// --- CLEAN STYLES ---
+// --- CLEAN 100% FULL-SCREEN RESPONSIVE STYLES ---
 const styles = {
-  appWrap: { display: "flex", width: "100vw", height: "100vh", overflow: "hidden", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' },
-  sidebar: { width: "100%", maxWidth: "360px", borderRight: "1px solid", flexDirection: "column", height: "100%" },
-  chatMain: { flex: 1, flexDirection: "column", height: "100%" },
-  headerBar: { padding: "10px 14px", borderBottom: "1px solid", display: "flex", justifyContent: "space-between", alignItems: "center" },
-  roundAvatar: { width: "38px", height: "38px", borderRadius: "50%", objectFit: "cover" },
+  appWrap: {
+    display: "flex",
+    width: "100vw",
+    height: "100vh",
+    maxWidth: "100%",
+    minHeight: "100vh",
+    overflow: "hidden",
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+  },
+  sidebar: {
+    width: "100%",
+    maxWidth: "420px",
+    flex: "0 0 auto",
+    borderRight: "1px solid",
+    flexDirection: "column",
+    height: "100%",
+    overflow: "hidden"
+  },
+  chatMain: {
+    flex: 1,
+    flexDirection: "column",
+    height: "100%",
+    width: "100%",
+    overflow: "hidden"
+  },
+  headerBar: {
+    padding: "10px 16px",
+    borderBottom: "1px solid",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    width: "100%"
+  },
+  roundAvatar: { width: "40px", height: "40px", borderRadius: "50%", objectFit: "cover" },
   cleanBtn: { background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center" },
-  iconBtn: { border: "none", borderRadius: "50%", width: "34px", height: "34px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
-  circleBtn: { border: "none", borderRadius: "50%", width: "40px", height: "40px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  iconBtn: { border: "none", borderRadius: "50%", width: "36px", height: "36px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  circleBtn: { border: "none", borderRadius: "50%", width: "42px", height: "42px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
   pillBtn: { border: "1px solid transparent", borderRadius: "14px", padding: "4px 10px", fontSize: "11px", fontWeight: "600", cursor: "pointer", display: "flex", alignItems: "center", gap: "4px" },
-  searchWrap: { margin: "8px 12px", padding: "6px 12px", borderRadius: "8px", display: "flex", alignItems: "center", gap: "8px" },
-  bareInput: { background: "transparent", border: "none", outline: "none", fontSize: "13px", width: "100%" },
-  contactItem: { display: "flex", alignItems: "center", gap: "10px", padding: "10px 12px", cursor: "pointer", borderRadius: "8px", marginBottom: "2px" },
-  messagesViewport: { flex: 1, overflowY: "auto", padding: "16px", display: "flex", flexDirection: "column", gap: "8px" },
-  msgBubble: { maxWidth: "72%", padding: "7px 12px", borderRadius: "8px", fontSize: "13px" },
-  inputBar: { padding: "8px 12px", borderTop: "1px solid", display: "flex", alignItems: "center", gap: "8px" },
+  searchWrap: { margin: "8px 12px", padding: "8px 14px", borderRadius: "8px", display: "flex", alignItems: "center", gap: "8px" },
+  bareInput: { background: "transparent", border: "none", outline: "none", fontSize: "14px", width: "100%" },
+  contactItem: { display: "flex", alignItems: "center", gap: "12px", padding: "12px 14px", cursor: "pointer", borderRadius: "8px", marginBottom: "2px" },
+  messagesViewport: { flex: 1, overflowY: "auto", padding: "16px", display: "flex", flexDirection: "column", gap: "10px", width: "100%" },
+  msgBubble: { maxWidth: "76%", padding: "8px 14px", borderRadius: "10px", fontSize: "13px" },
+  inputBar: { padding: "10px 14px", borderTop: "1px solid", display: "flex", alignItems: "center", gap: "10px", width: "100%" },
   inputWrap: { display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", borderRadius: "8px", border: "1px solid" },
-  modalOverlay: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: "14px" },
-  modalCard: { width: "100%", maxWidth: "420px", borderRadius: "14px", border: "1px solid", overflow: "hidden" },
-  modalHeader: { padding: "12px 16px", borderBottom: "1px solid", display: "flex", justifyContent: "space-between", alignItems: "center" },
+  modalOverlay: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.78)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: "14px", width: "100vw", height: "100vh" },
+  modalCard: { width: "100%", maxWidth: "460px", borderRadius: "14px", border: "1px solid", overflow: "hidden" },
+  modalHeader: { padding: "14px 18px", borderBottom: "1px solid", display: "flex", justifyContent: "space-between", alignItems: "center" },
   settingsItem: { display: "flex", alignItems: "center", gap: "12px", padding: "12px 14px", borderRadius: "8px", cursor: "pointer" },
-  toast: { position: "fixed", top: "14px", left: "50%", transform: "translateX(-50%)", color: "#fff", padding: "8px 16px", borderRadius: "8px", fontSize: "12px", fontWeight: "600", zIndex: 9999 },
+  toast: { position: "fixed", top: "16px", left: "50%", transform: "translateX(-50%)", color: "#fff", padding: "10px 20px", borderRadius: "8px", fontSize: "13px", fontWeight: "600", zIndex: 9999, boxShadow: "0 4px 12px rgba(0,0,0,0.3)" },
   centerContainer: { display: "flex", alignItems: "center", justifyContent: "center", width: "100vw", height: "100vh", padding: "16px" },
-  card: { width: "100%", maxWidth: "400px", padding: "24px", borderRadius: "16px", border: "1px solid" },
-  logoCircle: { width: "52px", height: "52px", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto" },
-  avatarBubble: { position: "relative", width: "70px", height: "70px", margin: "0 auto 6px", cursor: "pointer" },
+  authCard: { width: "100%", maxWidth: "420px", padding: "26px", borderRadius: "16px", border: "1px solid" },
+  logoCircle: { width: "56px", height: "56px", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto" },
+  avatarBubble: { position: "relative", width: "76px", height: "76px", margin: "0 auto 8px", cursor: "pointer" },
   avatarImgFull: { width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" },
-  camBadge: { position: "absolute", bottom: 0, right: 0, borderRadius: "50%", padding: "4px", display: "flex" },
-  label: { fontSize: "11px", fontWeight: "600", opacity: 0.8, marginBottom: "4px", display: "block" },
-  primaryBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", width: "100%", padding: "10px", borderRadius: "8px", border: "none", color: "#fff", fontWeight: "700", fontSize: "13px", cursor: "pointer" },
+  camBadge: { position: "absolute", bottom: 0, right: 0, borderRadius: "50%", padding: "5px", display: "flex" },
+  label: { fontSize: "12px", fontWeight: "600", opacity: 0.85, marginBottom: "5px", display: "block" },
+  primaryBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", width: "100%", padding: "11px", borderRadius: "8px", border: "none", color: "#fff", fontWeight: "700", fontSize: "13px", cursor: "pointer" },
   linkBtn: { background: "none", border: "none", fontWeight: "700", fontSize: "12px", cursor: "pointer" },
-  otpBox: { width: "42px", height: "46px", textAlign: "center", fontSize: "18px", fontWeight: "bold", border: "1px solid", borderRadius: "8px", outline: "none" },
-  callOverlay: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.88)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000, padding: "16px" },
-  callBox: { width: "100%", maxWidth: "380px", borderRadius: "18px", border: "1px solid", padding: "20px", textAlign: "center" },
-  videoBox: { width: "100%", height: "200px", borderRadius: "12px", overflow: "hidden", backgroundColor: "#000", margin: "10px 0" },
+  otpBox: { width: "44px", height: "48px", textAlign: "center", fontSize: "18px", fontWeight: "bold", border: "1px solid", borderRadius: "8px", outline: "none" },
+  callOverlay: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.92)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000, padding: "16px", width: "100vw", height: "100vh" },
+  callBox: { width: "100%", maxWidth: "400px", borderRadius: "18px", border: "1px solid", padding: "24px", textAlign: "center" },
+  videoBox: { position: "relative", width: "100%", height: "240px", borderRadius: "12px", overflow: "hidden", backgroundColor: "#000", margin: "14px 0" },
   fullVideo: { width: "100%", height: "100%", objectFit: "cover" }
 };
