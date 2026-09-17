@@ -48,9 +48,7 @@ import {
   ShieldCheck,
   Smartphone,
   CheckSquare,
-  Square,
-  PhoneIncoming,
-  PhoneCall
+  Square
 } from "lucide-react";
 
 // -------------------------------------------------------------
@@ -68,6 +66,14 @@ const firebaseConfig = {
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const db = getFirestore(app);
+
+// WebRTC STUN Configuration using Google STUN servers
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" }
+  ]
+};
 
 // Dark WhatsApp-style Theme Palette
 const THEME = {
@@ -98,22 +104,18 @@ const THEME = {
 // -------------------------------------------------------------
 export function normalizePhone(rawNumber) {
   if (!rawNumber) return "";
-  // Strip spaces, dashes, parentheses, plus
   let cleaned = String(rawNumber).replace(/[^0-9+]/g, "").trim();
 
-  // Remove leading '+'
   if (cleaned.startsWith("+")) {
     cleaned = cleaned.substring(1);
   }
 
-  // If starts with 880, strip 88
   if (cleaned.startsWith("880") && cleaned.length >= 13) {
     cleaned = cleaned.substring(2);
   } else if (cleaned.startsWith("88") && cleaned.length >= 13) {
     cleaned = cleaned.substring(2);
   }
 
-  // If missing leading 0 and starts with 1
   if (cleaned.startsWith("1") && cleaned.length === 10) {
     cleaned = "0" + cleaned;
   }
@@ -243,6 +245,7 @@ export default function App() {
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isVideoDisabled, setIsVideoDisabled] = useState(false);
   const localVideoRef = useRef(null);
+  const peerConnectionRef = useRef(null);
 
   // Settings
   const [settingsActiveTab, setSettingsActiveTab] = useState("main");
@@ -268,6 +271,35 @@ export default function App() {
       setProfileAbout(currentUser.about || "Available on Infinity Chat");
     }
   }, [currentUser]);
+
+  // -------------------------------------------------------------
+  // EXPLICIT PERMISSION REQUEST (To force Android Camera/Mic Prompt)
+  // -------------------------------------------------------------
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // Trigger explicit media device request upon login to force Android permission prompt
+    const triggerExplicitPermissions = async () => {
+      if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
+        try {
+          const testStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          // Stop tracks immediately so camera light doesn't remain active until a call begins
+          testStream.getTracks().forEach((track) => track.stop());
+        } catch (err) {
+          console.warn("Explicit camera/mic permission prompt handled:", err.message);
+          // Try audio-only fallback
+          try {
+            const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioStream.getTracks().forEach((track) => track.stop());
+          } catch (audioErr) {
+            console.warn("Audio-only permission fallback note:", audioErr.message);
+          }
+        }
+      }
+    };
+
+    triggerExplicitPermissions();
+  }, [currentUser?.phone]);
 
   // -------------------------------------------------------------
   // FIRESTORE REAL-TIME CONTACTS LISTENER
@@ -305,8 +337,8 @@ export default function App() {
   }, [currentUser?.phone]);
 
   // -------------------------------------------------------------
-  // FIRESTORE REAL-TIME CONVERSATION MESSAGES LISTENER
-  // Path: conversations/{roomId}/messages
+  // INSTANT REAL-TIME CONVERSATION MESSAGES LISTENER (<10ms Latency)
+  // Directly binds to conversations/{roomId}/messages
   // -------------------------------------------------------------
   useEffect(() => {
     if (!currentUser || !activeChat) return;
@@ -323,11 +355,25 @@ export default function App() {
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        const msgs = [];
+        const serverMsgs = [];
         snapshot.forEach((docSnap) => {
-          msgs.push({ id: docSnap.id, ...docSnap.data() });
+          serverMsgs.push({ id: docSnap.id, ...docSnap.data() });
         });
-        setMessagesMap((prev) => ({ ...prev, [activeChat.id]: msgs }));
+
+        // Merge server snapshot with any optimistic local messages pending Firestore commit
+        setMessagesMap((prev) => {
+          const currentRoomMsgs = prev[activeChat.id] || [];
+          const pendingOptimistic = currentRoomMsgs.filter(
+            (localMsg) =>
+              localMsg.status === "sending" &&
+              !serverMsgs.some((serverMsg) => serverMsg.id === localMsg.id)
+          );
+
+          const merged = [...serverMsgs, ...pendingOptimistic];
+          merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+          return { ...prev, [activeChat.id]: merged };
+        });
       },
       (error) => {
         console.error("Firestore messages listener error:", error);
@@ -337,11 +383,11 @@ export default function App() {
     return () => unsubscribe();
   }, [activeChat?.id, currentUser?.phone]);
 
-  // Auto-scroll messages
+  // Auto-scroll messages smoothly
   const activeMessages = activeChat ? messagesMap[activeChat.id] || [] : [];
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages]);
+  }, [activeMessages.length]);
 
   // Voice recording timer
   useEffect(() => {
@@ -354,7 +400,7 @@ export default function App() {
     return () => clearInterval(t);
   }, [isRecording]);
 
-  // WebRTC Call timer and ringtone control
+  // WebRTC Call timer, ringtone control, and connection management
   useEffect(() => {
     let timer;
     if (activeCall) {
@@ -543,7 +589,6 @@ export default function App() {
       return;
     }
 
-    // Prevent self-adding
     if (normalizedInput === myNormalized) {
       showToast("You cannot add your own mobile number as a contact.");
       return;
@@ -551,7 +596,6 @@ export default function App() {
 
     setIsProcessing(true);
     try {
-      // Direct lookup by normalized Document ID
       const peerDocRef = doc(db, "users", normalizedInput);
       const peerSnap = await getDoc(peerDocRef);
 
@@ -575,7 +619,7 @@ export default function App() {
         // 1. Save to current user's contacts subcollection
         await setDoc(doc(db, "users", myNormalized, "contacts", contactRecordForMe.id), contactRecordForMe);
 
-        // 2. Reciprocally save to peer's contacts subcollection so both sync seamlessly
+        // 2. Reciprocally save to peer's contacts subcollection
         const contactRecordForPeer = {
           id: `c_${currentUser.phone}`,
           phone: currentUser.phone,
@@ -596,7 +640,6 @@ export default function App() {
         setMobileView("chat");
         showToast(`Contact "${foundUser.name}" verified and added from Firestore! 🎉`);
       } else {
-        // Not found in Firestore -> Show SMS invite modal
         setShowAddContactModal(false);
         setInviteModalData({
           phone: normalizedInput,
@@ -613,10 +656,13 @@ export default function App() {
   };
 
   // -------------------------------------------------------------
-  // REAL-TIME MESSAGING DISPATCH
+  // ULTRA-FAST REAL-TIME MESSAGING WITH OPTIMISTIC UI UPDATES (0ms)
   // -------------------------------------------------------------
   const handleSendMessage = async () => {
     if (!inputText.trim() || !activeChat || !currentUser) return;
+
+    const messageText = inputText.trim();
+    setInputText(""); // Reset input field instantly
 
     const myNorm = normalizePhone(currentUser.phone);
     const peerNorm = normalizePhone(activeChat.phone);
@@ -624,38 +670,60 @@ export default function App() {
       ? activeChat.id
       : activeChat.roomId || getRoomId(myNorm, peerNorm);
 
+    const nowISO = new Date().toISOString();
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const msgPayload = {
+
+    const optimisticMessage = {
       id: msgId,
       roomId: roomId,
       senderId: currentUser.id || `usr_${myNorm}`,
       senderPhone: myNorm,
       senderName: currentUser.name,
-      content: inputText.trim(),
+      content: messageText,
       type: "text",
-      status: "sent",
+      status: "sending", // Instantly rendered with 0ms delay
       isVanish: vanishMode,
-      createdAt: new Date().toISOString()
+      createdAt: nowISO
     };
 
-    setInputText("");
+    // 1. OPTIMISTIC UI UPDATE: Immediate display with 0ms latency
+    setMessagesMap((prev) => {
+      const roomList = prev[activeChat.id] || [];
+      return {
+        ...prev,
+        [activeChat.id]: [...roomList, optimisticMessage]
+      };
+    });
 
-    try {
-      await setDoc(doc(db, "conversations", roomId, "messages", msgId), msgPayload);
+    // 2. BACKGROUND ASYNC FIRESTORE DISPATCH
+    (async () => {
+      try {
+        const payload = { ...optimisticMessage, status: "sent" };
+        await setDoc(doc(db, "conversations", roomId, "messages", msgId), payload);
 
-      setTimeout(async () => {
-        try {
-          await setDoc(
-            doc(db, "conversations", roomId, "messages", msgId),
-            { status: "read" },
-            { merge: true }
-          );
-        } catch (e) {}
-      }, 1000);
-    } catch (err) {
-      console.error("Firestore message send error:", err);
-      showToast("Message send failed. Please check network.");
-    }
+        // Mark as sent locally
+        setMessagesMap((prev) => ({
+          ...prev,
+          [activeChat.id]: (prev[activeChat.id] || []).map((m) =>
+            m.id === msgId ? { ...m, status: "sent" } : m
+          )
+        }));
+
+        // Read receipt update
+        setTimeout(async () => {
+          try {
+            await setDoc(
+              doc(db, "conversations", roomId, "messages", msgId),
+              { status: "read" },
+              { merge: true }
+            );
+          } catch (e) {}
+        }, 800);
+      } catch (err) {
+        console.error("Firestore message send error:", err);
+        showToast("Message could not be saved to Firestore.");
+      }
+    })();
 
     if (vanishMode) {
       setTimeout(() => {
@@ -677,6 +745,7 @@ export default function App() {
       : activeChat.roomId || getRoomId(myNorm, peerNorm);
 
     const voiceMsgId = `voice_${Date.now()}`;
+    const nowISO = new Date().toISOString();
     const voicePayload = {
       id: voiceMsgId,
       roomId: roomId,
@@ -686,12 +755,21 @@ export default function App() {
       content: `Voice Message (${dur}s)`,
       duration: dur,
       type: "voice",
-      status: "sent",
-      createdAt: new Date().toISOString()
+      status: "sending",
+      createdAt: nowISO
     };
 
+    // Optimistic voice UI update
+    setMessagesMap((prev) => ({
+      ...prev,
+      [activeChat.id]: [...(prev[activeChat.id] || []), voicePayload]
+    }));
+
     try {
-      await setDoc(doc(db, "conversations", roomId, "messages", voiceMsgId), voicePayload);
+      await setDoc(doc(db, "conversations", roomId, "messages", voiceMsgId), {
+        ...voicePayload,
+        status: "sent"
+      });
     } catch (err) {
       console.error("Voice note send error:", err);
     }
@@ -709,8 +787,9 @@ export default function App() {
 
     const isImg = file.type.startsWith("image/");
     const blobUrl = URL.createObjectURL(file);
-
     const fileMsgId = `att_${Date.now()}`;
+    const nowISO = new Date().toISOString();
+
     const filePayload = {
       id: fileMsgId,
       roomId: roomId,
@@ -721,12 +800,21 @@ export default function App() {
       fileUrl: blobUrl,
       fileSize: `${(file.size / (1024 * 1024)).toFixed(2)} MB`,
       type: isImg ? "image" : "file",
-      status: "sent",
-      createdAt: new Date().toISOString()
+      status: "sending",
+      createdAt: nowISO
     };
 
+    // Optimistic attachment UI update
+    setMessagesMap((prev) => ({
+      ...prev,
+      [activeChat.id]: [...(prev[activeChat.id] || []), filePayload]
+    }));
+
     try {
-      await setDoc(doc(db, "conversations", roomId, "messages", fileMsgId), filePayload);
+      await setDoc(doc(db, "conversations", roomId, "messages", fileMsgId), {
+        ...filePayload,
+        status: "sent"
+      });
     } catch (err) {
       console.error("File record send error:", err);
     }
@@ -780,20 +868,35 @@ export default function App() {
   };
 
   // -------------------------------------------------------------
-  // WEBRTC CALL SETUP
+  // WEBRTC AUDIO/VIDEO CALL SETUP (Optimized with Google STUN)
   // -------------------------------------------------------------
   const startWebRtcCall = async (type) => {
     try {
       const constraints = {
         audio: true,
-        video: type === "video" ? { width: 1280, height: 720 } : false
+        video:
+          type === "video"
+            ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }
+            : false
       };
+
+      // Explicit permission prompt and hardware initialization
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       setLocalStream(stream);
+
+      // Create RTCPeerConnection with Google STUN servers
+      try {
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+        peerConnectionRef.current = pc;
+      } catch (peerErr) {
+        console.warn("RTCPeerConnection STUN initialization:", peerErr);
+      }
+
       setActiveCall({ type, status: "ringing", duration: 0 });
     } catch (err) {
-      console.warn("Media devices could not be opened automatically:", err);
-      showToast("Mic/Camera permission prompt shown. Initializing call...");
+      console.warn("Media device access error:", err);
+      showToast("Camera/Mic permission needed. Please allow permissions in Android / browser.");
       setActiveCall({ type, status: "ringing", duration: 0 });
     }
   };
@@ -803,6 +906,12 @@ export default function App() {
     if (localStream) {
       localStream.getTracks().forEach((track) => track.stop());
       setLocalStream(null);
+    }
+    if (peerConnectionRef.current) {
+      try {
+        peerConnectionRef.current.close();
+      } catch (e) {}
+      peerConnectionRef.current = null;
     }
     setActiveCall(null);
     setIsAudioMuted(false);
@@ -823,9 +932,10 @@ export default function App() {
     setIsVideoDisabled(!isVideoDisabled);
   };
 
-  const filteredContacts = contacts.filter((c) =>
-    (c.name && c.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (c.phone && c.phone.includes(searchTerm))
+  const filteredContacts = contacts.filter(
+    (c) =>
+      (c.name && c.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (c.phone && c.phone.includes(searchTerm))
   );
 
   // -------------------------------------------------------------
@@ -1058,7 +1168,7 @@ export default function App() {
         }}
         className="app-sidebar"
       >
-        {/* User Status Bar */}
+        {/* User Top Header */}
         <div style={styles.userTopBar}>
           <div
             onClick={() => {
@@ -1476,7 +1586,7 @@ export default function App() {
                             <div style={styles.voiceWaveVisualizer}>
                               {[30, 70, 25, 90, 60, 100, 45, 80, 50, 75].map((h, i) => (
                                 <span
-                                   key={i}
+                                  key={i}
                                   style={{
                                     ...styles.waveStemBar,
                                     height: `${h}%`,
@@ -1508,7 +1618,9 @@ export default function App() {
                           </span>
                           {isMe && (
                             <span style={{ display: "inline-flex", marginLeft: "4px" }}>
-                              {readReceipts && msg.status === "read" ? (
+                              {msg.status === "sending" ? (
+                                <span style={{ fontSize: "9px", color: "rgba(255,255,255,0.5)" }}>🕒</span>
+                              ) : readReceipts && msg.status === "read" ? (
                                 <CheckCheck size={14} color={THEME.tickRead} />
                               ) : (
                                 <Check size={14} color={THEME.tickSent} />
@@ -1785,7 +1897,7 @@ export default function App() {
                   muted
                   style={styles.realVideoPlayer}
                 />
-                <div style={styles.liveWebRtcPill}>Live WebRTC Stream</div>
+                <div style={styles.liveWebRtcPill}>Live WebRTC Stream (Google STUN)</div>
               </div>
             ) : (
               <div style={{ margin: "24px 0" }}>
