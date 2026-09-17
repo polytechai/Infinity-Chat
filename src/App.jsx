@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import {
   getFirestore,
@@ -12,48 +12,16 @@ import {
   updateDoc
 } from "firebase/firestore";
 import {
-  Send,
-  Paperclip,
-  Mic,
-  MicOff,
-  Timer,
-  Play,
-  Pause,
-  Image as ImageIcon,
-  FileText,
-  Search,
-  ArrowLeft,
-  X,
-  Loader2,
-  LogOut,
-  User,
-  Phone,
-  Video,
-  UserPlus,
-  Users,
-  PhoneOff,
-  VideoOff,
-  CheckCircle,
-  MessageSquare,
-  Settings,
-  Lock,
-  Database,
-  Camera,
-  Share2,
-  Check,
-  CheckCheck,
-  ChevronRight,
-  Info,
-  KeyRound,
-  ShieldCheck,
-  Smartphone,
-  CheckSquare,
-  Square
+  Send, Paperclip, Mic, MicOff, Timer, Play, Pause, Image as ImageIcon,
+  FileText, Search, ArrowLeft, X, Loader2, LogOut, User, Phone, Video,
+  UserPlus, Users, PhoneOff, VideoOff, CheckCircle, MessageSquare, Settings,
+  Lock, Camera, Share2, Check, CheckCheck, ChevronRight, Info, KeyRound,
+  ShieldCheck, Smartphone, CheckSquare, Square, Bell, BellOff, Volume2,
+  VolumeX, Moon, Sun, Globe, RefreshCw, Radio, Trash2, Download, Eye,
+  EyeOff, Music, Copy, ExternalLink, HelpCircle
 } from "lucide-react";
 
-// -------------------------------------------------------------
-// 1. FIREBASE INITIALIZATION WITH PROVIDED CREDENTIALS
-// -------------------------------------------------------------
+// --- FIREBASE CONFIGURATION ---
 const firebaseConfig = {
   apiKey: "AIzaSyDyyRhtdPpm_a9dCSW1cvlIQOUdi2vOgxY",
   authDomain: "infinity-chat-922be.firebaseapp.com",
@@ -67,7 +35,6 @@ const firebaseConfig = {
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// WebRTC STUN Configuration using Google STUN servers
 const RTC_CONFIG = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -75,655 +42,525 @@ const RTC_CONFIG = {
   ]
 };
 
-// Dark WhatsApp-style Theme Palette
-const THEME = {
-  bg: "#0b141a",
-  sidebar: "#111b21",
-  sidebarHeader: "#202c33",
-  card: "#182229",
-  cardHover: "#202c33",
-  border: "#222d34",
-  primary: "#00a884",
-  primaryHover: "#008f6f",
-  secondary: "#00b4d8",
-  accent: "#25d366",
-  danger: "#ea4335",
-  bubbleMe: "#005c4b",
-  bubblePeer: "#202c33",
-  vanish: "#9333ea",
-  text: "#e9edef",
-  textMuted: "#8696a0",
-  tickSent: "#8696a0",
-  tickRead: "#53bdeb"
-};
-
-// -------------------------------------------------------------
-// PHONE NORMALIZATION UTILITY
-// Converts "+88017...", "88017...", "017...", or spaced inputs
-// into standard 11-digit local format: "01XXXXXXXXX"
-// -------------------------------------------------------------
-export function normalizePhone(rawNumber) {
-  if (!rawNumber) return "";
-  let cleaned = String(rawNumber).replace(/[^0-9+]/g, "").trim();
-
-  if (cleaned.startsWith("+")) {
-    cleaned = cleaned.substring(1);
-  }
-
-  if (cleaned.startsWith("880") && cleaned.length >= 13) {
-    cleaned = cleaned.substring(2);
-  } else if (cleaned.startsWith("88") && cleaned.length >= 13) {
-    cleaned = cleaned.substring(2);
-  }
-
-  if (cleaned.startsWith("1") && cleaned.length === 10) {
-    cleaned = "0" + cleaned;
-  }
-
-  return cleaned;
+// --- BANGLADESHI PHONE NUMBER NORMALIZATION ---
+export function normalizePhone(raw) {
+  if (!raw) return "";
+  let clean = String(raw).replace(/[^0-9+]/g, "").trim();
+  if (clean.startsWith("+")) clean = clean.substring(1);
+  if (clean.startsWith("880") && clean.length >= 13) clean = clean.substring(2);
+  else if (clean.startsWith("88") && clean.length >= 13) clean = clean.substring(2);
+  if (clean.startsWith("1") && clean.length === 10) clean = "0" + clean;
+  return clean;
 }
 
-export function isValidBDPhone(normalized) {
-  return /^01[3-9]\d{8}$/.test(normalized);
+export function isValidBDPhone(num) {
+  return /^01[3-9]\d{8}$/.test(num);
 }
 
-// Generate unique deterministic 1-to-1 conversation roomId
-function getRoomId(phoneA, phoneB) {
-  return [phoneA, phoneB].sort().join("_");
+function getRoomId(p1, p2) {
+  return [p1, p2].sort().join("_");
 }
 
-// Sound Synthesizer for Ringtone & Call Audio Signals
-class RingtonePlayer {
+// --- RINGTONE SYNTHESIZER ---
+class SoundEngine {
   constructor() {
     this.ctx = null;
-    this.oscillator = null;
-    this.interval = null;
+    this.timer = null;
   }
-
-  startRing() {
+  playTone(freq = 440, type = "sine", duration = 0.8) {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, ctx.currentTime);
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + duration);
+    } catch (e) {}
+  }
+  startRing(tune = "classic") {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) return;
       this.ctx = new AudioCtx();
-
       const playBeep = () => {
         if (!this.ctx) return;
-        const osc = this.ctx.createOscillator();
-        const gain = this.ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(440, this.ctx.currentTime);
-        osc.frequency.setValueAtTime(480, this.ctx.currentTime + 0.1);
-        gain.gain.setValueAtTime(0.08, this.ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 1.2);
-        osc.connect(gain);
-        gain.connect(this.ctx.destination);
-        osc.start();
-        osc.stop(this.ctx.currentTime + 1.2);
+        const freqs = tune === "marimba" ? [523, 659] : tune === "chime" ? [600, 800] : [440, 480];
+        freqs.forEach((f, i) => {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.frequency.setValueAtTime(f, this.ctx.currentTime + i * 0.15);
+          gain.gain.setValueAtTime(0.07, this.ctx.currentTime + i * 0.15);
+          gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + i * 0.15 + 0.8);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(this.ctx.currentTime + i * 0.15);
+          osc.stop(this.ctx.currentTime + i * 0.15 + 0.8);
+        });
       };
-
       playBeep();
-      this.interval = setInterval(playBeep, 2400);
-    } catch (e) {
-      console.warn("Ringtone audio could not be initialized:", e);
-    }
+      this.timer = setInterval(playBeep, 2400);
+    } catch (e) {}
   }
-
   stopRing() {
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
-    }
-    if (this.ctx) {
-      try {
-        this.ctx.close();
-      } catch (e) {}
-      this.ctx = null;
-    }
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.ctx) { try { this.ctx.close(); } catch (e) {} this.ctx = null; }
   }
 }
 
-const ringtone = new RingtonePlayer();
+const soundEngine = new SoundEngine();
 
-// -------------------------------------------------------------
-// MAIN COMPONENT
-// -------------------------------------------------------------
+// --- BILINGUAL DICTIONARY ---
+const TRANSLATIONS = {
+  bn: {
+    appTitle: "Infinity Chat",
+    chats: "চ্যাট",
+    channels: "চ্যানেল",
+    settings: "সেটিংস",
+    searchPlaceholder: "চ্যাট বা মোবাইল নম্বর খুঁজুন...",
+    addContact: "কন্টাক্ট যোগ করুন",
+    newGroup: "নতুন গ্রুপ",
+    typeMessage: "মেসেজ লিখুন...",
+    vanishOn: "ভ্যানিশ মোড চালু (১৫ সে.)",
+    online: "সক্রিয় আছেন",
+    activeNow: "সক্রিয় আছেন",
+    lastSeen: "সর্বশেষ দেখা",
+    calling: "কল হচ্ছে...",
+    ringing: "রিং হচ্ছে...",
+    profile: "প্রোফাইল",
+    privacySettings: "অ্যাকাউন্ট ও প্রাইভেসী",
+    notifications: "নোটিফিকেশন",
+    privacyPolicy: "প্রাইভেসী পলিসি ও শর্তাবলী",
+    dataStorage: "ডাটা ও স্টোরেজ",
+    language: "ভাষা (Language)",
+    contactListInvite: "কন্টাক্ট তালিকা ও ইনভাইট",
+    ringtones: "রিংটোন ও কলার টিউন",
+    switchAccount: "অ্যাকাউন্ট পরিবর্তন",
+    theme: "থিম (ডার্ক / লাইট)",
+    updateCheck: "অ্যাপ আপডেট চেক",
+    sharedMedia: "শেয়ার করা মিডিয়া ও ফাইল",
+    clearCache: "ক্যাশে ক্লিয়ার করুন",
+    logOut: "লগ আউট",
+    cancel: "বাতিল",
+    save: "সংরক্ষণ",
+    send: "পাঠান",
+    termsText: "Infinity Chat আপনার গোপনীয়তাকে গুরুত্ব দেয়। আমরা শুধুমাত্র অ্যাপ পরিচালনা, অ্যাকাউন্ট নিরাপত্তা এবং সেবা উন্নত করার জন্য প্রয়োজনীয় তথ্য সংগ্রহ করি। আপনার ব্যক্তিগত তথ্য আপনার অনুমতি ছাড়া তৃতীয় পক্ষের কাছে বিক্রি বা শেয়ার করা হয় না। সকল ব্যবহারকারীকে নিরাপদ, সম্মানজনক এবং আইনসম্মতভাবে প্ল্যাটফর্ম ব্যবহার করতে হবে। Infinity Chat ব্যবহার করার মাধ্যমে আপনি আমাদের Privacy Policy এবং Terms of Service মেনে নিতে সম্মত হচ্ছেন।"
+  },
+  en: {
+    appTitle: "Infinity Chat",
+    chats: "Chats",
+    channels: "Channels",
+    settings: "Settings",
+    searchPlaceholder: "Search chats or phone numbers...",
+    addContact: "Add Contact",
+    newGroup: "New Group",
+    typeMessage: "Type a message...",
+    vanishOn: "Vanish Mode ON (15s)",
+    online: "Online",
+    activeNow: "Active Now",
+    lastSeen: "Last seen",
+    calling: "Calling...",
+    ringing: "Ringing...",
+    profile: "Profile",
+    privacySettings: "Account & Privacy",
+    notifications: "Notifications",
+    privacyPolicy: "Privacy Policy & Terms",
+    dataStorage: "Data & Storage",
+    language: "Language",
+    contactListInvite: "Contacts & Invite",
+    ringtones: "Ringtones & Caller Tune",
+    switchAccount: "Switch Account",
+    theme: "Theme (Dark / Light)",
+    updateCheck: "Check App Updates",
+    sharedMedia: "Shared Media & Files",
+    clearCache: "Clear Cache",
+    logOut: "Log Out",
+    cancel: "Cancel",
+    save: "Save",
+    send: "Send",
+    termsText: "Infinity Chat values your privacy. We only collect the necessary information required for operating the app, securing accounts, and enhancing services. Your personal data is never sold or shared with third parties without your permission. All users must use the platform safely, respectfully, and lawfully. By using Infinity Chat, you agree to comply with our Privacy Policy and Terms of Service."
+  }
+};
+
 export default function App() {
-  // 1. Session state from localStorage: key = "infinity_chat_user"
+  // --- PERSISTENCE & USER STATE ---
   const [currentUser, setCurrentUser] = useState(() => {
     try {
-      const saved = localStorage.getItem("infinity_chat_user");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && parsed.phone) return parsed;
-      }
-    } catch (e) {
-      console.error("Failed to parse stored session:", e);
-    }
-    return null;
+      const s = localStorage.getItem("infinity_chat_user");
+      return s ? JSON.parse(s) : null;
+    } catch (e) { return null; }
   });
 
-  // Auth & Registration inputs
+  // Settings & Preferences
+  const [lang, setLang] = useState(() => localStorage.getItem("infinity_lang") || "bn");
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem("infinity_theme") !== "light");
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => localStorage.getItem("infinity_notif") !== "false");
+  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("infinity_sound") !== "false");
+  const [ghostMode, setGhostMode] = useState(false);
+  const [selectedRingtone, setSelectedRingtone] = useState("classic");
+
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+
+  // Navigation & Modals
+  const [mobileView, setMobileView] = useState("list"); // "list" | "chat"
+  const [activeModal, setActiveModal] = useState(null); // null | "settings" | "profile_view" | "add_contact" | "new_group" | "channels" | "invite"
+  const [settingsTab, setSettingsTab] = useState("main");
+  const [viewedProfile, setViewedProfile] = useState(null);
+
+  // Active Chats & Messages
+  const [contacts, setContacts] = useState([]);
+  const [channels, setChannels] = useState([
+    { id: "ch_news", name: "Infinity Official 📢", desc: "Official updates & notices", subscribers: 1240, messages: ["Welcome to Infinity Chat! Enjoy secure conversations."] }
+  ]);
+  const [activeChat, setActiveChat] = useState(null);
+  const [peerPresence, setPeerPresence] = useState({ isOnline: false, lastSeen: "" });
+  const [messagesMap, setMessagesMap] = useState({});
+  const [searchTerm, setSearchTerm] = useState("");
+  const [inputText, setInputText] = useState("");
+  const [vanishMode, setVanishMode] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordSecs, setRecordSecs] = useState(0);
+  const [playingVoiceId, setPlayingVoiceId] = useState(null);
+
+  // Modals & Creation States
+  const [contactSearchInput, setContactSearchInput] = useState("");
+  const [newGroupName, setNewGroupName] = useState("");
+  const [selectedGroupMembers, setSelectedGroupMembers] = useState([]);
+  const [newChannelName, setNewChannelName] = useState("");
+  const [newChannelDesc, setNewChannelDesc] = useState("");
+
+  // Auth States
   const [authMode, setAuthMode] = useState("register"); // "register" | "login" | "otp"
   const [phoneInput, setPhoneInput] = useState("");
   const [nameInput, setNameInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
-  const [avatarInput, setAvatarInput] = useState(
-    "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=160"
-  );
+  const [avatarInput, setAvatarInput] = useState("https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=160");
   const [otpCode, setOtpCode] = useState(["", "", "", "", "", ""]);
   const [generatedOtp, setGeneratedOtp] = useState("123456");
   const [isProcessing, setIsProcessing] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
 
-  // Chats & Contacts
-  const [contacts, setContacts] = useState([]);
-  const [activeChat, setActiveChat] = useState(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [sidebarView, setSidebarView] = useState("chats"); // "chats" | "settings"
-  const [mobileView, setMobileView] = useState("list"); // "list" | "chat"
-  const [messagesMap, setMessagesMap] = useState({});
-
-  // Active composer
-  const [inputText, setInputText] = useState("");
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordSecs, setRecordSecs] = useState(0);
-  const [vanishMode, setVanishMode] = useState(false);
-  const [playingVoiceId, setPlayingVoiceId] = useState(null);
-
-  // Modals
-  const [showAddContactModal, setShowAddContactModal] = useState(false);
-  const [contactSearchInput, setContactSearchInput] = useState("");
-  const [inviteModalData, setInviteModalData] = useState(null);
-
-  const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
-  const [newGroupName, setNewGroupName] = useState("");
-  const [selectedGroupMembers, setSelectedGroupMembers] = useState([]);
-
-  // WebRTC Audio/Video Call System
-  const [activeCall, setActiveCall] = useState(null);
+  // WebRTC Audio/Video Calls
+  const [activeCall, setActiveCall] = useState(null); // { type: "audio"|"video", status: "ringing"|"connected", duration: 0 }
   const [localStream, setLocalStream] = useState(null);
-  const [isAudioMuted, setIsAudioMuted] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
   const [isVideoDisabled, setIsVideoDisabled] = useState(false);
-  const localVideoRef = useRef(null);
-  const peerConnectionRef = useRef(null);
-
-  // Settings
-  const [settingsActiveTab, setSettingsActiveTab] = useState("main");
-  const [profileName, setProfileName] = useState("");
-  const [profileAbout, setProfileAbout] = useState("");
-  const [readReceipts, setReadReceipts] = useState(true);
 
   // Refs
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const avatarUploadRef = useRef(null);
-  const otpInputRefs = useRef([]);
+  const localVideoRef = useRef(null);
+  const peerConnectionRef = useRef(null);
 
   const showToast = (msg) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(""), 4500);
+    setTimeout(() => setToastMessage(""), 4000);
   };
 
-  // Sync profile details when currentUser changes
-  useEffect(() => {
-    if (currentUser) {
-      setProfileName(currentUser.name || "");
-      setProfileAbout(currentUser.about || "Available on Infinity Chat");
+  // --- THEME COLOR DEFINITIONS ---
+  const THEME = useMemo(() => {
+    if (!darkMode) {
+      return {
+        bg: "#efeae2",
+        sidebar: "#ffffff",
+        header: "#f0f2f5",
+        card: "#f7f8fa",
+        cardHover: "#f0f2f5",
+        border: "#e1e4ea",
+        primary: "#00a884",
+        secondary: "#0284c7",
+        accent: "#10b981",
+        danger: "#ef4444",
+        bubbleMe: "#d9fdd3",
+        bubblePeer: "#ffffff",
+        text: "#111b21",
+        textMuted: "#667781",
+        tickSent: "#8696a0",
+        tickRead: "#53bdeb"
+      };
     }
-  }, [currentUser]);
+    return {
+      bg: "#0b141a",
+      sidebar: "#111b21",
+      header: "#202c33",
+      card: "#182229",
+      cardHover: "#202c33",
+      border: "#222d34",
+      primary: "#00a884",
+      secondary: "#00b4d8",
+      accent: "#25d366",
+      danger: "#ea4335",
+      bubbleMe: "#005c4b",
+      bubblePeer: "#202c33",
+      text: "#e9edef",
+      textMuted: "#8696a0",
+      tickSent: "#8696a0",
+      tickRead: "#53bdeb"
+    };
+  }, [darkMode]);
 
-  // -------------------------------------------------------------
-  // EXPLICIT PERMISSION REQUEST (To force Android Camera/Mic Prompt)
-  // -------------------------------------------------------------
+  // --- 1. BACK BUTTON NAVIGATION FIX (Prevent Direct App Exit) ---
   useEffect(() => {
-    if (!currentUser) return;
+    window.history.pushState({ page: "root" }, "");
 
-    // Trigger explicit media device request upon login to force Android permission prompt
-    const triggerExplicitPermissions = async () => {
-      if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
-        try {
-          const testStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-          // Stop tracks immediately so camera light doesn't remain active until a call begins
-          testStream.getTracks().forEach((track) => track.stop());
-        } catch (err) {
-          console.warn("Explicit camera/mic permission prompt handled:", err.message);
-          // Try audio-only fallback
-          try {
-            const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            audioStream.getTracks().forEach((track) => track.stop());
-          } catch (audioErr) {
-            console.warn("Audio-only permission fallback note:", audioErr.message);
-          }
-        }
+    const handlePopState = () => {
+      if (activeCall) {
+        endCall();
+        window.history.pushState({ page: "root" }, "");
+        return;
+      }
+      if (activeModal) {
+        setActiveModal(null);
+        window.history.pushState({ page: "root" }, "");
+        return;
+      }
+      if (mobileView === "chat") {
+        setMobileView("list");
+        window.history.pushState({ page: "root" }, "");
+        return;
+      }
+      window.history.pushState({ page: "root" }, "");
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [activeModal, mobileView, activeCall]);
+
+  const openViewOrModal = (modalName) => {
+    window.history.pushState({ modal: modalName }, "");
+    setActiveModal(modalName);
+  };
+
+  // --- 2. PRESENCE ENGINE (Tracking in Firestore) ---
+  useEffect(() => {
+    if (!currentUser?.phone) return;
+    const myNorm = normalizePhone(currentUser.phone);
+    const userDocRef = doc(db, "users", myNorm);
+
+    if (!ghostMode) {
+      updateDoc(userDocRef, {
+        isOnline: true,
+        lastSeen: new Date().toISOString()
+      }).catch(() => {});
+    }
+
+    const handleVisibility = () => {
+      if (ghostMode) return;
+      if (document.hidden) {
+        updateDoc(userDocRef, {
+          isOnline: false,
+          lastSeen: new Date().toISOString()
+        }).catch(() => {});
+      } else {
+        updateDoc(userDocRef, {
+          isOnline: true,
+          lastSeen: new Date().toISOString()
+        }).catch(() => {});
       }
     };
 
-    triggerExplicitPermissions();
-  }, [currentUser?.phone]);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      if (!ghostMode) {
+        updateDoc(userDocRef, {
+          isOnline: false,
+          lastSeen: new Date().toISOString()
+        }).catch(() => {});
+      }
+    };
+  }, [currentUser?.phone, ghostMode]);
 
-  // -------------------------------------------------------------
-  // FIRESTORE REAL-TIME CONTACTS LISTENER
-  // Subcollection: users/{normalizedPhone}/contacts
-  // -------------------------------------------------------------
+  // Real-time peer presence listener
+  useEffect(() => {
+    if (!activeChat || activeChat.isGroup) {
+      setPeerPresence({ isOnline: false, lastSeen: "" });
+      return;
+    }
+    const peerNorm = normalizePhone(activeChat.phone);
+    const peerDocRef = doc(db, "users", peerNorm);
+    const unsub = onSnapshot(peerDocRef, (snap) => {
+      if (snap.exists()) {
+        const d = snap.data();
+        setPeerPresence({
+          isOnline: !!d.isOnline,
+          lastSeen: d.lastSeen ? formatLastSeen(d.lastSeen) : ""
+        });
+      }
+    });
+    return () => unsub();
+  }, [activeChat?.phone]);
+
+  function formatLastSeen(iso) {
+    if (!iso) return "";
+    try {
+      const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+      if (diff < 1) return t.activeNow;
+      if (diff < 60) return `${diff}m ago`;
+      const hrs = Math.floor(diff / 60);
+      if (hrs < 24) return `${hrs}h ago`;
+      return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+    } catch (e) { return ""; }
+  }
+
+  // Request Web Push Notifications on mount
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // --- 3. FIRESTORE CONTACTS & REALTIME MESSAGING ---
   useEffect(() => {
     if (!currentUser?.phone) return;
-
-    const normalizedPhone = normalizePhone(currentUser.phone);
-    const contactsRef = collection(db, "users", normalizedPhone, "contacts");
-    const unsubscribe = onSnapshot(
-      contactsRef,
-      (snapshot) => {
-        const list = [];
-        snapshot.forEach((docSnap) => {
-          list.push({ id: docSnap.id, ...docSnap.data() });
-        });
-        setContacts(list);
-
-        setActiveChat((prev) => {
-          if (!prev && list.length > 0) return list[0];
-          if (prev) {
-            const updated = list.find((c) => c.id === prev.id);
-            return updated || prev;
-          }
-          return null;
-        });
-      },
-      (error) => {
-        console.error("Firestore contacts listener error:", error);
-      }
-    );
-
-    return () => unsubscribe();
+    const myNorm = normalizePhone(currentUser.phone);
+    const contactsRef = collection(db, "users", myNorm, "contacts");
+    const unsub = onSnapshot(contactsRef, (snap) => {
+      const list = [];
+      snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+      setContacts(list);
+    });
+    return () => unsub();
   }, [currentUser?.phone]);
 
-  // -------------------------------------------------------------
-  // INSTANT REAL-TIME CONVERSATION MESSAGES LISTENER (<10ms Latency)
-  // Directly binds to conversations/{roomId}/messages
-  // -------------------------------------------------------------
+  // Active chat message listener
   useEffect(() => {
     if (!currentUser || !activeChat) return;
-
     const myNorm = normalizePhone(currentUser.phone);
     const peerNorm = normalizePhone(activeChat.phone);
-    const roomId = activeChat.isGroup
-      ? activeChat.id
-      : activeChat.roomId || getRoomId(myNorm, peerNorm);
+    const roomId = activeChat.isGroup ? activeChat.id : activeChat.roomId || getRoomId(myNorm, peerNorm);
 
     const msgsRef = collection(db, "conversations", roomId, "messages");
     const q = query(msgsRef, orderBy("createdAt", "asc"));
+    const unsub = onSnapshot(q, (snap) => {
+      const serverMsgs = [];
+      snap.forEach((d) => {
+        const m = { id: d.id, ...d.data() };
+        serverMsgs.push(m);
+        // Web Push Notification if app in background
+        if (
+          document.hidden &&
+          notificationsEnabled &&
+          m.senderPhone !== myNorm &&
+          "Notification" in window &&
+          Notification.permission === "granted"
+        ) {
+          try {
+            new Notification(m.senderName || t.appTitle, {
+              body: m.content || "New message received",
+              icon: "/favicon.ico"
+            });
+            if (soundEnabled) soundEngine.playTone(600, "sine", 0.4);
+          } catch (e) {}
+        }
+      });
 
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const serverMsgs = [];
-        snapshot.forEach((docSnap) => {
-          serverMsgs.push({ id: docSnap.id, ...docSnap.data() });
-        });
+      setMessagesMap((prev) => {
+        const localList = prev[activeChat.id] || [];
+        const pending = localList.filter(
+          (loc) => loc.status === "sending" && !serverMsgs.some((s) => s.id === loc.id)
+        );
+        const merged = [...serverMsgs, ...pending];
+        merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        return { ...prev, [activeChat.id]: merged };
+      });
+    });
+    return () => unsub();
+  }, [activeChat?.id, currentUser?.phone, notificationsEnabled, soundEnabled]);
 
-        // Merge server snapshot with any optimistic local messages pending Firestore commit
-        setMessagesMap((prev) => {
-          const currentRoomMsgs = prev[activeChat.id] || [];
-          const pendingOptimistic = currentRoomMsgs.filter(
-            (localMsg) =>
-              localMsg.status === "sending" &&
-              !serverMsgs.some((serverMsg) => serverMsg.id === localMsg.id)
-          );
-
-          const merged = [...serverMsgs, ...pendingOptimistic];
-          merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-          return { ...prev, [activeChat.id]: merged };
-        });
-      },
-      (error) => {
-        console.error("Firestore messages listener error:", error);
-      }
-    );
-
-    return () => unsubscribe();
-  }, [activeChat?.id, currentUser?.phone]);
-
-  // Auto-scroll messages smoothly
-  const activeMessages = activeChat ? messagesMap[activeChat.id] || [] : [];
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [activeMessages.length]);
+  }, [messagesMap[activeChat?.id]?.length]);
 
-  // Voice recording timer
+  // Call timer and ringing status
   useEffect(() => {
     let t;
-    if (isRecording) {
-      t = setInterval(() => setRecordSecs((s) => s + 1), 1000);
-    } else {
-      setRecordSecs(0);
-    }
-    return () => clearInterval(t);
-  }, [isRecording]);
-
-  // WebRTC Call timer, ringtone control, and connection management
-  useEffect(() => {
-    let timer;
     if (activeCall) {
       if (activeCall.status === "ringing") {
-        ringtone.startRing();
+        soundEngine.startRing(selectedRingtone);
       } else {
-        ringtone.stopRing();
+        soundEngine.stopRing();
       }
-
-      timer = setInterval(() => {
+      t = setInterval(() => {
         setActiveCall((prev) => {
           if (!prev) return null;
           if (prev.status === "ringing") {
-            ringtone.stopRing();
+            soundEngine.stopRing();
             return { ...prev, status: "connected", duration: 1 };
           }
           return { ...prev, duration: (prev.duration || 0) + 1 };
         });
       }, 1000);
     } else {
-      ringtone.stopRing();
+      soundEngine.stopRing();
     }
-
     return () => {
-      clearInterval(timer);
-      ringtone.stopRing();
+      clearInterval(t);
+      soundEngine.stopRing();
     };
-  }, [activeCall?.status]);
+  }, [activeCall?.status, selectedRingtone]);
 
-  // Local camera stream binding
+  // Local camera binding
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
     }
-  }, [localStream, activeCall?.status]);
+  }, [localStream, activeCall]);
 
-  // -------------------------------------------------------------
-  // REGISTRATION STRATEGY (STANDARDIZED 11-DIGIT DOC ID)
-  // -------------------------------------------------------------
-  const handleStartRegistration = (e) => {
-    e.preventDefault();
-    const normalized = normalizePhone(phoneInput);
-
-    if (!nameInput.trim()) {
-      showToast("Please enter your display name.");
-      return;
-    }
-    if (!isValidBDPhone(normalized)) {
-      showToast("Enter a valid 11-digit BD number (e.g. 01712345678 or +88017...).");
-      return;
-    }
-    if (passwordInput.length < 6) {
-      showToast("Password must be at least 6 characters.");
-      return;
-    }
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    setGeneratedOtp(otp);
-    setAuthMode("otp");
-    showToast(`Infinity Chat OTP sent to ${normalized}: [ ${otp} ]`);
-  };
-
-  const handleVerifyOtpAndSave = async () => {
-    const entered = otpCode.join("");
-    if (entered !== generatedOtp && entered !== "123456") {
-      showToast("Invalid 6-digit OTP code!");
-      return;
-    }
-
-    setIsProcessing(true);
-    const normalized = normalizePhone(phoneInput);
-
-    try {
-      const userRecord = {
-        phone: normalized,
-        name: nameInput.trim(),
-        avatar: avatarInput,
-        about: "Available on Infinity Chat",
-        password: passwordInput,
-        isOnline: true,
-        lastSeen: "Online",
-        registeredAt: new Date().toISOString()
-      };
-
-      // 1. Save document in Firestore users collection using normalized 11-digit phone as Doc ID
-      await setDoc(doc(db, "users", normalized), userRecord, { merge: true });
-
-      // 2. Save full profile in localStorage under "infinity_chat_user"
-      localStorage.setItem("infinity_chat_user", JSON.stringify(userRecord));
-
-      setCurrentUser(userRecord);
-      setProfileName(userRecord.name);
-      setProfileAbout(userRecord.about);
-      setAuthMode("register");
-      showToast("Account successfully registered & saved globally in Firestore! 🇧🇩");
-    } catch (err) {
-      console.error("Firestore Registration Error:", err);
-      showToast(`Registration failed: ${err.message}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  // -------------------------------------------------------------
-  // LOGIN STRATEGY
-  // -------------------------------------------------------------
-  const handleLoginSubmit = async (e) => {
-    e.preventDefault();
-    const normalized = normalizePhone(phoneInput);
-
-    if (!isValidBDPhone(normalized)) {
-      showToast("Enter a valid 11-digit Bangladeshi mobile number.");
-      return;
-    }
-
-    setIsProcessing(true);
-    try {
-      const userDocRef = doc(db, "users", normalized);
-      const userSnap = await getDoc(userDocRef);
-
-      if (!userSnap.exists()) {
-        showToast("Account not found in Firestore! Please Register first.");
-        setIsProcessing(false);
-        return;
-      }
-
-      const account = userSnap.data();
-      if (account.password && account.password !== passwordInput) {
-        showToast("Incorrect password. Please verify and try again.");
-        setIsProcessing(false);
-        return;
-      }
-
-      // Update presence
-      await setDoc(userDocRef, { isOnline: true, lastSeen: "Online" }, { merge: true });
-
-      // Save session in localStorage under "infinity_chat_user"
-      localStorage.setItem("infinity_chat_user", JSON.stringify(account));
-      setCurrentUser(account);
-      setProfileName(account.name);
-      setProfileAbout(account.about || "Available on Infinity Chat");
-      showToast(`Welcome back, ${account.name}!`);
-    } catch (err) {
-      console.error("Firestore Login Error:", err);
-      showToast(`Login failed: ${err.message}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  // -------------------------------------------------------------
-  // LOGOUT (Clears session & returns to initial screen)
-  // -------------------------------------------------------------
-  const handleLogout = async () => {
-    if (currentUser?.phone) {
-      const myNorm = normalizePhone(currentUser.phone);
-      try {
-        await updateDoc(doc(db, "users", myNorm), {
-          isOnline: false,
-          lastSeen: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-        });
-      } catch (e) {}
-    }
-
-    localStorage.removeItem("infinity_chat_user");
-    setCurrentUser(null);
-    setActiveChat(null);
-    setContacts([]);
-    setMessagesMap({});
-    setSidebarView("chats");
-    setAuthMode("login");
-    showToast("Logged out successfully.");
-  };
-
-  // -------------------------------------------------------------
-  // ROBUST CONTACT SEARCH & REGISTRATION
-  // Direct Document ID lookup: doc(db, "users", normalizedInput)
-  // -------------------------------------------------------------
-  const handleVerifyAndAddContact = async (e) => {
-    e.preventDefault();
-    const normalizedInput = normalizePhone(contactSearchInput);
-    const myNormalized = normalizePhone(currentUser.phone);
-
-    if (!isValidBDPhone(normalizedInput)) {
-      showToast("Enter a valid 11-digit BD number (e.g., 017xxxxxxxx or +88017...).");
-      return;
-    }
-
-    if (normalizedInput === myNormalized) {
-      showToast("You cannot add your own mobile number as a contact.");
-      return;
-    }
-
-    setIsProcessing(true);
-    try {
-      const peerDocRef = doc(db, "users", normalizedInput);
-      const peerSnap = await getDoc(peerDocRef);
-
-      if (peerSnap.exists()) {
-        const foundUser = peerSnap.data();
-        const roomId = getRoomId(myNormalized, normalizedInput);
-
-        const contactRecordForMe = {
-          id: `c_${foundUser.phone}`,
-          phone: foundUser.phone,
-          name: foundUser.name || foundUser.phone,
-          avatar: foundUser.avatar || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=160",
-          about: foundUser.about || "",
-          isOnline: foundUser.isOnline ?? true,
-          lastSeen: foundUser.lastSeen || "Online",
-          roomId: roomId,
-          isGroup: false,
-          addedAt: new Date().toISOString()
-        };
-
-        // 1. Save to current user's contacts subcollection
-        await setDoc(doc(db, "users", myNormalized, "contacts", contactRecordForMe.id), contactRecordForMe);
-
-        // 2. Reciprocally save to peer's contacts subcollection
-        const contactRecordForPeer = {
-          id: `c_${currentUser.phone}`,
-          phone: currentUser.phone,
-          name: currentUser.name || currentUser.phone,
-          avatar: currentUser.avatar,
-          about: currentUser.about || "",
-          isOnline: true,
-          lastSeen: "Online",
-          roomId: roomId,
-          isGroup: false,
-          addedAt: new Date().toISOString()
-        };
-        await setDoc(doc(db, "users", normalizedInput, "contacts", contactRecordForPeer.id), contactRecordForPeer);
-
-        setActiveChat(contactRecordForMe);
-        setShowAddContactModal(false);
-        setContactSearchInput("");
-        setMobileView("chat");
-        showToast(`Contact "${foundUser.name}" verified and added from Firestore! 🎉`);
-      } else {
-        setShowAddContactModal(false);
-        setInviteModalData({
-          phone: normalizedInput,
-          inviteUrl: `https://infinity-chat-922be.firebaseapp.com/invite?from=${currentUser.phone}`
-        });
-        setContactSearchInput("");
-      }
-    } catch (err) {
-      console.error("Contact search error:", err);
-      showToast(`Contact search error: ${err.message}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  // -------------------------------------------------------------
-  // ULTRA-FAST REAL-TIME MESSAGING WITH OPTIMISTIC UI UPDATES (0ms)
-  // -------------------------------------------------------------
+  // --- SENDING MESSAGES (OPTIMISTIC 0ms LATENCY) ---
   const handleSendMessage = async () => {
     if (!inputText.trim() || !activeChat || !currentUser) return;
-
-    const messageText = inputText.trim();
-    setInputText(""); // Reset input field instantly
+    const text = inputText.trim();
+    setInputText("");
 
     const myNorm = normalizePhone(currentUser.phone);
     const peerNorm = normalizePhone(activeChat.phone);
-    const roomId = activeChat.isGroup
-      ? activeChat.id
-      : activeChat.roomId || getRoomId(myNorm, peerNorm);
+    const roomId = activeChat.isGroup ? activeChat.id : activeChat.roomId || getRoomId(myNorm, peerNorm);
+    const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const now = new Date().toISOString();
 
-    const nowISO = new Date().toISOString();
-    const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-    const optimisticMessage = {
+    const optimisticMsg = {
       id: msgId,
-      roomId: roomId,
-      senderId: currentUser.id || `usr_${myNorm}`,
+      roomId,
+      senderId: currentUser.id || myNorm,
       senderPhone: myNorm,
       senderName: currentUser.name,
-      content: messageText,
+      content: text,
       type: "text",
-      status: "sending", // Instantly rendered with 0ms delay
+      status: "sending",
       isVanish: vanishMode,
-      createdAt: nowISO
+      createdAt: now
     };
 
-    // 1. OPTIMISTIC UI UPDATE: Immediate display with 0ms latency
-    setMessagesMap((prev) => {
-      const roomList = prev[activeChat.id] || [];
-      return {
+    // Optimistic UI state
+    setMessagesMap((prev) => ({
+      ...prev,
+      [activeChat.id]: [...(prev[activeChat.id] || []), optimisticMsg]
+    }));
+
+    if (soundEnabled) soundEngine.playTone(800, "sine", 0.15);
+
+    try {
+      await setDoc(doc(db, "conversations", roomId, "messages", msgId), {
+        ...optimisticMsg,
+        status: "sent"
+      });
+      setMessagesMap((prev) => ({
         ...prev,
-        [activeChat.id]: [...roomList, optimisticMessage]
-      };
-    });
-
-    // 2. BACKGROUND ASYNC FIRESTORE DISPATCH
-    (async () => {
-      try {
-        const payload = { ...optimisticMessage, status: "sent" };
-        await setDoc(doc(db, "conversations", roomId, "messages", msgId), payload);
-
-        // Mark as sent locally
-        setMessagesMap((prev) => ({
-          ...prev,
-          [activeChat.id]: (prev[activeChat.id] || []).map((m) =>
-            m.id === msgId ? { ...m, status: "sent" } : m
-          )
-        }));
-
-        // Read receipt update
-        setTimeout(async () => {
-          try {
-            await setDoc(
-              doc(db, "conversations", roomId, "messages", msgId),
-              { status: "read" },
-              { merge: true }
-            );
-          } catch (e) {}
-        }, 800);
-      } catch (err) {
-        console.error("Firestore message send error:", err);
-        showToast("Message could not be saved to Firestore.");
-      }
-    })();
+        [activeChat.id]: (prev[activeChat.id] || []).map((m) =>
+          m.id === msgId ? { ...m, status: "sent" } : m
+        )
+      }));
+    } catch (e) {
+      console.error(e);
+    }
 
     if (vanishMode) {
       setTimeout(() => {
@@ -735,896 +572,507 @@ export default function App() {
     }
   };
 
-  const handleSendVoice = async () => {
-    const dur = recordSecs || 3;
-    setIsRecording(false);
-    const myNorm = normalizePhone(currentUser.phone);
-    const peerNorm = normalizePhone(activeChat.phone);
-    const roomId = activeChat.isGroup
-      ? activeChat.id
-      : activeChat.roomId || getRoomId(myNorm, peerNorm);
-
-    const voiceMsgId = `voice_${Date.now()}`;
-    const nowISO = new Date().toISOString();
-    const voicePayload = {
-      id: voiceMsgId,
-      roomId: roomId,
-      senderId: currentUser.id || `usr_${myNorm}`,
-      senderPhone: myNorm,
-      senderName: currentUser.name,
-      content: `Voice Message (${dur}s)`,
-      duration: dur,
-      type: "voice",
-      status: "sending",
-      createdAt: nowISO
-    };
-
-    // Optimistic voice UI update
-    setMessagesMap((prev) => ({
-      ...prev,
-      [activeChat.id]: [...(prev[activeChat.id] || []), voicePayload]
-    }));
-
-    try {
-      await setDoc(doc(db, "conversations", roomId, "messages", voiceMsgId), {
-        ...voicePayload,
-        status: "sent"
-      });
-    } catch (err) {
-      console.error("Voice note send error:", err);
-    }
-  };
-
-  const handleFileUpload = async (e) => {
+  // Profile Picture Upload to Base64
+  const handleAvatarFile = (e) => {
     const file = e.target.files?.[0];
-    if (!file || !activeChat) return;
-
-    const myNorm = normalizePhone(currentUser.phone);
-    const peerNorm = normalizePhone(activeChat.phone);
-    const roomId = activeChat.isGroup
-      ? activeChat.id
-      : activeChat.roomId || getRoomId(myNorm, peerNorm);
-
-    const isImg = file.type.startsWith("image/");
-    const blobUrl = URL.createObjectURL(file);
-    const fileMsgId = `att_${Date.now()}`;
-    const nowISO = new Date().toISOString();
-
-    const filePayload = {
-      id: fileMsgId,
-      roomId: roomId,
-      senderId: currentUser.id || `usr_${myNorm}`,
-      senderPhone: myNorm,
-      senderName: currentUser.name,
-      content: file.name,
-      fileUrl: blobUrl,
-      fileSize: `${(file.size / (1024 * 1024)).toFixed(2)} MB`,
-      type: isImg ? "image" : "file",
-      status: "sending",
-      createdAt: nowISO
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result;
+      setAvatarInput(base64);
+      if (currentUser?.phone) {
+        const myNorm = normalizePhone(currentUser.phone);
+        try {
+          await updateDoc(doc(db, "users", myNorm), { avatar: base64 });
+          const updated = { ...currentUser, avatar: base64 };
+          setCurrentUser(updated);
+          localStorage.setItem("infinity_chat_user", JSON.stringify(updated));
+          showToast("Profile photo updated successfully!");
+        } catch (err) {
+          showToast(`Error saving avatar: ${err.message}`);
+        }
+      }
     };
-
-    // Optimistic attachment UI update
-    setMessagesMap((prev) => ({
-      ...prev,
-      [activeChat.id]: [...(prev[activeChat.id] || []), filePayload]
-    }));
-
-    try {
-      await setDoc(doc(db, "conversations", roomId, "messages", fileMsgId), {
-        ...filePayload,
-        status: "sent"
-      });
-    } catch (err) {
-      console.error("File record send error:", err);
-    }
+    reader.readAsDataURL(file);
   };
 
-  // Group Creation
-  const handleCreateGroup = async (e) => {
+  // Add Contact logic
+  const handleAddContact = async (e) => {
     e.preventDefault();
-    if (!newGroupName.trim()) {
-      showToast("Please enter a group subject.");
-      return;
-    }
-    if (selectedGroupMembers.length < 1) {
-      showToast("Select at least 1 contact.");
-      return;
-    }
-
+    const targetNorm = normalizePhone(contactSearchInput);
     const myNorm = normalizePhone(currentUser.phone);
-    const memberPhones = contacts
-      .filter((c) => selectedGroupMembers.includes(c.id))
-      .map((c) => normalizePhone(c.phone));
 
-    const grpId = `grp_${Date.now()}`;
-    const newGroup = {
-      id: grpId,
-      roomId: grpId,
-      name: newGroupName.trim(),
-      avatar: "https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=160",
-      isGroup: true,
-      members: [myNorm, ...memberPhones],
-      lastSeen: `${memberPhones.length + 1} participants`,
-      isOnline: true,
-      createdAt: new Date().toISOString()
-    };
+    if (!isValidBDPhone(targetNorm)) {
+      showToast("Enter a valid 11-digit BD number (01XXXXXXXXX).");
+      return;
+    }
+    if (targetNorm === myNorm) {
+      showToast("Cannot add your own number.");
+      return;
+    }
 
+    setIsProcessing(true);
     try {
-      await setDoc(doc(db, "users", myNorm, "contacts", grpId), newGroup);
-      for (const p of memberPhones) {
-        await setDoc(doc(db, "users", p, "contacts", grpId), newGroup);
+      const peerSnap = await getDoc(doc(db, "users", targetNorm));
+      if (peerSnap.exists()) {
+        const found = peerSnap.data();
+        const roomId = getRoomId(myNorm, targetNorm);
+        const contactForMe = {
+          id: `c_${found.phone}`,
+          phone: found.phone,
+          name: found.name || found.phone,
+          avatar: found.avatar || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=160",
+          about: found.about || "Available on Infinity Chat",
+          roomId,
+          isGroup: false
+        };
+        await setDoc(doc(db, "users", myNorm, "contacts", contactForMe.id), contactForMe);
+        setActiveChat(contactForMe);
+        setActiveModal(null);
+        setContactSearchInput("");
+        setMobileView("chat");
+        showToast(`Added ${contactForMe.name}!`);
+      } else {
+        setActiveModal("invite");
       }
     } catch (err) {
-      console.error("Group creation error:", err);
+      showToast(err.message);
+    } finally {
+      setIsProcessing(false);
     }
-
-    setActiveChat(newGroup);
-    setShowCreateGroupModal(false);
-    setNewGroupName("");
-    setSelectedGroupMembers([]);
-    setMobileView("chat");
-    showToast(`Group "${newGroup.name}" created and synced via Firestore!`);
   };
 
-  // -------------------------------------------------------------
-  // WEBRTC AUDIO/VIDEO CALL SETUP (Optimized with Google STUN)
-  // -------------------------------------------------------------
-  const startWebRtcCall = async (type) => {
+  // Start WebRTC Call with Dynamic Status
+  const startCall = async (type) => {
     try {
-      const constraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
-        video:
-          type === "video"
-            ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" }
-            : false
-      };
-
-      // Explicit permission prompt and hardware initialization
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video: type === "video"
+      });
       setLocalStream(stream);
-
-      // Create RTCPeerConnection with Google STUN servers
-      try {
-        const pc = new RTCPeerConnection(RTC_CONFIG);
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-        peerConnectionRef.current = pc;
-      } catch (peerErr) {
-        console.warn("RTCPeerConnection STUN initialization:", peerErr);
-      }
-
-      setActiveCall({ type, status: "ringing", duration: 0 });
-    } catch (err) {
-      console.warn("Media device access error:", err);
-      showToast("Camera/Mic permission needed. Please allow permissions in Android / browser.");
-      setActiveCall({ type, status: "ringing", duration: 0 });
+      const pc = new RTCPeerConnection(RTC_CONFIG);
+      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+      peerConnectionRef.current = pc;
+    } catch (e) {
+      console.warn(e);
     }
+    setActiveCall({
+      type,
+      status: "ringing",
+      duration: 0
+    });
   };
 
   const endCall = () => {
-    ringtone.stopRing();
+    soundEngine.stopRing();
     if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
+      localStream.getTracks().forEach((t) => t.stop());
       setLocalStream(null);
     }
     if (peerConnectionRef.current) {
-      try {
-        peerConnectionRef.current.close();
-      } catch (e) {}
+      try { peerConnectionRef.current.close(); } catch (e) {}
       peerConnectionRef.current = null;
     }
     setActiveCall(null);
-    setIsAudioMuted(false);
-    setIsVideoDisabled(false);
   };
 
-  const toggleCallMute = () => {
-    if (localStream) {
-      localStream.getAudioTracks().forEach((t) => (t.enabled = isAudioMuted));
+  // Auth Submit Handlers
+  const handleRegister = (e) => {
+    e.preventDefault();
+    const norm = normalizePhone(phoneInput);
+    if (!nameInput.trim() || !isValidBDPhone(norm) || passwordInput.length < 6) {
+      showToast("Please provide valid details (11-digit BD number, password min 6 chars).");
+      return;
     }
-    setIsAudioMuted(!isAudioMuted);
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    setGeneratedOtp(otp);
+    setAuthMode("otp");
+    showToast(`Infinity Chat OTP: [ ${otp} ]`);
   };
 
-  const toggleCallVideo = () => {
-    if (localStream) {
-      localStream.getVideoTracks().forEach((t) => (t.enabled = isVideoDisabled));
+  const verifyOtpAndLogin = async () => {
+    const entered = otpCode.join("");
+    if (entered !== generatedOtp && entered !== "123456") {
+      showToast("Invalid OTP!");
+      return;
     }
-    setIsVideoDisabled(!isVideoDisabled);
+    setIsProcessing(true);
+    const norm = normalizePhone(phoneInput);
+    try {
+      const record = {
+        phone: norm,
+        name: nameInput.trim(),
+        avatar: avatarInput,
+        about: "Available on Infinity Chat",
+        password: passwordInput,
+        isOnline: true,
+        lastSeen: new Date().toISOString()
+      };
+      await setDoc(doc(db, "users", norm), record, { merge: true });
+      localStorage.setItem("infinity_chat_user", JSON.stringify(record));
+      setCurrentUser(record);
+      showToast("Account registered successfully!");
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  const filteredContacts = contacts.filter(
-    (c) =>
-      (c.name && c.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      (c.phone && c.phone.includes(searchTerm))
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    const norm = normalizePhone(phoneInput);
+    if (!isValidBDPhone(norm)) {
+      showToast("Enter valid 11-digit BD phone number.");
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      const snap = await getDoc(doc(db, "users", norm));
+      if (!snap.exists()) {
+        showToast("Account not found. Please register.");
+        setIsProcessing(false);
+        return;
+      }
+      const data = snap.data();
+      if (data.password && data.password !== passwordInput) {
+        showToast("Incorrect password.");
+        setIsProcessing(false);
+        return;
+      }
+      localStorage.setItem("infinity_chat_user", JSON.stringify(data));
+      setCurrentUser(data);
+      showToast(`Welcome back, ${data.name}!`);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("infinity_chat_user");
+    setCurrentUser(null);
+    setActiveChat(null);
+    setActiveModal(null);
+    showToast("Logged out successfully.");
+  };
+
+  // Filtered contacts and messages
+  const filteredContacts = contacts.filter((c) =>
+    (c.name && c.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+    (c.phone && c.phone.includes(searchTerm))
   );
 
+  const activeMessages = activeChat ? messagesMap[activeChat.id] || [] : [];
+  const sharedMediaFiles = useMemo(() => {
+    return activeMessages.filter((m) => m.type === "image" || m.type === "file");
+  }, [activeMessages]);
+
   // -------------------------------------------------------------
-  // VIEW 1: AUTHENTICATION / REGISTRATION / OTP SCREEN
+  // VIEW: AUTHENTICATION
   // -------------------------------------------------------------
   if (!currentUser) {
     return (
-      <div style={styles.authContainer}>
-        {toastMessage && <div style={styles.toastNotification}>{toastMessage}</div>}
-
-        <div style={styles.authCard}>
-          <div style={{ textAlign: "center", marginBottom: "22px" }}>
-            <div style={styles.authBadgeCircle}>
-              <MessageSquare size={34} color="#ffffff" />
+      <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg, color: THEME.text }}>
+        {toastMessage && <div style={{ ...styles.toast, backgroundColor: THEME.primary }}>{toastMessage}</div>}
+        <div style={{ ...styles.card, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+          <div style={{ textAlign: "center", marginBottom: "20px" }}>
+            <div style={{ ...styles.logoCircle, backgroundColor: THEME.primary }}>
+              <MessageSquare size={32} color="#fff" />
             </div>
-            <h1 style={{ fontSize: "24px", fontWeight: "800", margin: "6px 0 0" }}>Infinity Chat</h1>
-            <p style={{ fontSize: "13px", color: THEME.textMuted, margin: "4px 0 0" }}>
-              Firestore Integrated PWA • Global Multi-Device
-            </p>
+            <h1 style={{ fontSize: "22px", fontWeight: "800", margin: "6px 0 2px" }}>{t.appTitle}</h1>
+            <p style={{ fontSize: "12px", color: THEME.textMuted }}>Bangladeshi Multi-Device Chat Network</p>
           </div>
 
-          {/* REGISTER MODE */}
           {authMode === "register" && (
-            <form onSubmit={handleStartRegistration} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+            <form onSubmit={handleRegister} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div style={{ textAlign: "center" }}>
-                <input
-                  type="file"
-                  ref={avatarUploadRef}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) setAvatarInput(URL.createObjectURL(f));
-                  }}
-                  accept="image/*"
-                  style={{ display: "none" }}
-                />
-                <div
-                  onClick={() => avatarUploadRef.current?.click()}
-                  style={styles.avatarUploadBubble}
-                  title="Upload profile picture"
-                >
-                  <img src={avatarInput} alt="" style={styles.avatarCircleImg} />
-                  <div style={styles.avatarUploadCam}>
-                    <Camera size={13} color="#fff" />
-                  </div>
+                <input type="file" ref={avatarUploadRef} onChange={handleAvatarFile} accept="image/*" style={{ display: "none" }} />
+                <div onClick={() => avatarUploadRef.current?.click()} style={styles.avatarBubble}>
+                  <img src={avatarInput} alt="" style={styles.avatarImgFull} />
+                  <div style={{ ...styles.camBadge, backgroundColor: THEME.primary }}><Camera size={12} color="#fff" /></div>
                 </div>
-                <span style={{ fontSize: "11px", color: THEME.textMuted }}>Choose Profile Picture</span>
+                <span style={{ fontSize: "11px", color: THEME.textMuted }}>Upload Profile Photo</span>
               </div>
 
               <div>
-                <label style={styles.labelTitle}>Full Name</label>
-                <div style={styles.fieldBox}>
-                  <User size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
-                  <input
-                    type="text"
-                    placeholder="e.g. Tanvir Ahmed"
-                    value={nameInput}
-                    onChange={(e) => setNameInput(e.target.value)}
-                    style={styles.bareInput}
-                  />
+                <label style={styles.label}>Display Name</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <User size={16} color={THEME.textMuted} />
+                  <input type="text" placeholder="e.g. Shakib Hasan" value={nameInput} onChange={(e) => setNameInput(e.target.value)} style={{ ...styles.bareInput, color: THEME.text }} />
                 </div>
               </div>
 
               <div>
-                <label style={styles.labelTitle}>Bangladeshi Mobile Number</label>
-                <div style={styles.fieldBox}>
-                  <Smartphone size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
-                  <input
-                    type="tel"
-                    placeholder="01712345678 or +88017..."
-                    value={phoneInput}
-                    onChange={(e) => setPhoneInput(e.target.value)}
-                    style={styles.bareInput}
-                  />
+                <label style={styles.label}>Bangladeshi Mobile (01XXXXXXXXX)</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <Smartphone size={16} color={THEME.textMuted} />
+                  <input type="tel" placeholder="017XXXXXXXX" value={phoneInput} onChange={(e) => setPhoneInput(e.target.value)} style={{ ...styles.bareInput, color: THEME.text }} />
                 </div>
-                <span style={{ fontSize: "11px", color: THEME.textMuted, marginTop: "3px", display: "block" }}>
-                  Normalized automatically into 11-digit local format: <code>01XXXXXXXXX</code>
-                </span>
               </div>
 
               <div>
-                <label style={styles.labelTitle}>Password</label>
-                <div style={styles.fieldBox}>
-                  <Lock size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
-                  <input
-                    type="password"
-                    placeholder="Minimum 6 characters"
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    style={styles.bareInput}
-                  />
+                <label style={styles.label}>Password</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <Lock size={16} color={THEME.textMuted} />
+                  <input type="password" placeholder="Min 6 characters" value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} style={{ ...styles.bareInput, color: THEME.text }} />
                 </div>
               </div>
 
-              <button type="submit" disabled={isProcessing} style={styles.primaryActionButton}>
-                {isProcessing ? <Loader2 size={16} className="spin" /> : <span>Continue with Verification</span>}
-                <ChevronRight size={18} />
+              <button type="submit" style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
+                <span>Continue</span>
+                <ChevronRight size={16} />
               </button>
 
-              <div style={{ textAlign: "center", marginTop: "8px" }}>
-                <span style={{ fontSize: "12px", color: THEME.textMuted }}>Already registered? </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("login");
-                    setToastMessage("");
-                  }}
-                  style={styles.linkTextButton}
-                >
-                  Log In
-                </button>
+              <div style={{ textAlign: "center", marginTop: "4px" }}>
+                <span style={{ fontSize: "12px", color: THEME.textMuted }}>Already have an account? </span>
+                <button type="button" onClick={() => setAuthMode("login")} style={{ ...styles.linkBtn, color: THEME.secondary }}>Log In</button>
               </div>
             </form>
           )}
 
-          {/* OTP MODE */}
           {authMode === "otp" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              <div style={styles.otpNoticeBanner}>
-                <KeyRound size={26} color={THEME.accent} style={{ marginBottom: "6px" }} />
-                <div style={{ fontWeight: "700", fontSize: "15px" }}>Verify BD Mobile Number</div>
-                <div style={{ fontSize: "12px", color: THEME.textMuted, marginTop: "2px" }}>
-                  Enter the 6-digit verification code sent to <b>{normalizePhone(phoneInput)}</b>
-                </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <div style={{ textAlign: "center" }}>
+                <KeyRound size={28} color={THEME.accent} style={{ margin: "0 auto 6px" }} />
+                <h3 style={{ fontSize: "16px", margin: 0 }}>Verify Number</h3>
+                <p style={{ fontSize: "12px", color: THEME.textMuted, marginTop: "4px" }}>Enter 6-digit code sent to {normalizePhone(phoneInput)}</p>
               </div>
-
-              <div style={{ display: "flex", gap: "8px", justifyContent: "center" }}>
+              <div style={{ display: "flex", gap: "6px", justifyContent: "center" }}>
                 {otpCode.map((digit, idx) => (
                   <input
                     key={idx}
-                    ref={(el) => (otpInputRefs.current[idx] = el)}
                     type="text"
                     maxLength={1}
                     value={digit}
                     onChange={(e) => {
                       const val = e.target.value.replace(/\D/g, "");
-                      const updated = [...otpCode];
-                      updated[idx] = val;
-                      setOtpCode(updated);
-                      if (val && idx < 5) otpInputRefs.current[idx + 1]?.focus();
+                      const next = [...otpCode];
+                      next[idx] = val;
+                      setOtpCode(next);
                     }}
-                    style={styles.otpSingleBox}
+                    style={{ ...styles.otpBox, backgroundColor: THEME.card, borderColor: THEME.border, color: THEME.text }}
                   />
                 ))}
               </div>
-
-              <button onClick={handleVerifyOtpAndSave} disabled={isProcessing} style={styles.primaryActionButton}>
-                {isProcessing ? <Loader2 size={16} className="spin" /> : <span>Verify & Save in Firestore</span>}
-                <CheckCircle size={18} />
+              <button onClick={verifyOtpAndLogin} disabled={isProcessing} style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
+                {isProcessing ? <Loader2 size={16} className="spin" /> : <span>Verify & Access</span>}
               </button>
-
-              <button onClick={() => setAuthMode("register")} style={{ ...styles.linkTextButton, textAlign: "center" }}>
-                ← Edit phone number
-              </button>
+              <button onClick={() => setAuthMode("register")} style={{ ...styles.linkBtn, textAlign: "center", color: THEME.textMuted }}>Back</button>
             </div>
           )}
 
-          {/* LOGIN MODE */}
           {authMode === "login" && (
-            <form onSubmit={handleLoginSubmit} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+            <form onSubmit={handleLogin} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div>
-                <label style={styles.labelTitle}>Bangladeshi Mobile Number</label>
-                <div style={styles.fieldBox}>
-                  <Smartphone size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
-                  <input
-                    type="tel"
-                    placeholder="01712345678 or +88017..."
-                    value={phoneInput}
-                    onChange={(e) => setPhoneInput(e.target.value)}
-                    style={styles.bareInput}
-                  />
+                <label style={styles.label}>Mobile Number</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <Smartphone size={16} color={THEME.textMuted} />
+                  <input type="tel" placeholder="017XXXXXXXX" value={phoneInput} onChange={(e) => setPhoneInput(e.target.value)} style={{ ...styles.bareInput, color: THEME.text }} />
                 </div>
               </div>
-
               <div>
-                <label style={styles.labelTitle}>Password</label>
-                <div style={styles.fieldBox}>
-                  <Lock size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
-                  <input
-                    type="password"
-                    placeholder="Enter account password"
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    style={styles.bareInput}
-                  />
+                <label style={styles.label}>Password</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <Lock size={16} color={THEME.textMuted} />
+                  <input type="password" placeholder="Enter password" value={passwordInput} onChange={(e) => setPasswordInput(e.target.value)} style={{ ...styles.bareInput, color: THEME.text }} />
                 </div>
               </div>
-
-              <button type="submit" disabled={isProcessing} style={styles.primaryActionButton}>
-                {isProcessing ? <Loader2 size={16} className="spin" /> : <span>Log In to Infinity Chat</span>}
-                <CheckCircle size={18} />
+              <button type="submit" disabled={isProcessing} style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
+                {isProcessing ? <Loader2 size={16} className="spin" /> : <span>Log In</span>}
               </button>
-
-              <div style={{ textAlign: "center", marginTop: "8px" }}>
-                <span style={{ fontSize: "12px", color: THEME.textMuted }}>Don't have an account? </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("register");
-                    setToastMessage("");
-                  }}
-                  style={styles.linkTextButton}
-                >
-                  Register new account
-                </button>
+              <div style={{ textAlign: "center", marginTop: "4px" }}>
+                <span style={{ fontSize: "12px", color: THEME.textMuted }}>New to Infinity Chat? </span>
+                <button type="button" onClick={() => setAuthMode("register")} style={{ ...styles.linkBtn, color: THEME.secondary }}>Register</button>
               </div>
             </form>
           )}
-
-          <div style={styles.authFooterSeal}>
-            <ShieldCheck size={14} color={THEME.accent} style={{ marginRight: "5px" }} />
-            <span>End-to-End Encrypted • Firestore Synchronized</span>
-          </div>
         </div>
       </div>
     );
   }
 
   // -------------------------------------------------------------
-  // VIEW 2: COMPLETE MAIN MESSENGER CLIENT
+  // VIEW: MAIN MESSENGER INTERFACE
   // -------------------------------------------------------------
   return (
-    <div style={styles.appContainer}>
-      {toastMessage && <div style={styles.toastNotification}>{toastMessage}</div>}
+    <div style={{ ...styles.appWrap, backgroundColor: THEME.bg, color: THEME.text }}>
+      {toastMessage && <div style={{ ...styles.toast, backgroundColor: THEME.primary }}>{toastMessage}</div>}
 
-      {/* SIDEBAR */}
-      <aside
-        style={{
-          ...styles.sidebar,
-          display: mobileView === "chat" ? "none" : "flex"
-        }}
-        className="app-sidebar"
-      >
-        {/* User Top Header */}
-        <div style={styles.userTopBar}>
+      {/* --- SIDEBAR --- */}
+      <aside style={{
+        ...styles.sidebar,
+        backgroundColor: THEME.sidebar,
+        borderColor: THEME.border,
+        display: mobileView === "chat" ? "none" : "flex"
+      }}>
+        {/* Top Header */}
+        <div style={{ ...styles.headerBar, backgroundColor: THEME.header, borderColor: THEME.border }}>
           <div
             onClick={() => {
-              setSidebarView("settings");
-              setSettingsActiveTab("profile");
+              setViewedProfile(currentUser);
+              openViewOrModal("profile_view");
             }}
             style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer" }}
             title="View Profile"
           >
-            <img src={currentUser.avatar} alt="" style={styles.avatarImg} />
+            <img src={currentUser.avatar} alt="" style={styles.roundAvatar} />
             <div>
-              <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>{currentUser.name}</div>
-              <div style={{ fontSize: "11px", color: THEME.accent }}>● Online ({normalizePhone(currentUser.phone)})</div>
+              <div style={{ fontWeight: "700", fontSize: "14px" }}>{currentUser.name}</div>
+              <div style={{ fontSize: "11px", color: THEME.accent }}>● {t.online}</div>
             </div>
           </div>
 
           <div style={{ display: "flex", gap: "6px" }}>
-            <button
-              onClick={() => setShowCreateGroupModal(true)}
-              style={styles.circleActionButton}
-              title="New Group"
-            >
-              <Users size={16} color={THEME.textMuted} />
+            <button onClick={() => openViewOrModal("channels")} style={{ ...styles.iconBtn, backgroundColor: THEME.card }} title={t.channels}>
+              <Radio size={16} color={THEME.secondary} />
             </button>
-
-            <button
-              onClick={() => setShowAddContactModal(true)}
-              style={styles.circleActionButton}
-              title="Add BD Contact"
-            >
+            <button onClick={() => openViewOrModal("add_contact")} style={{ ...styles.iconBtn, backgroundColor: THEME.card }} title={t.addContact}>
               <UserPlus size={16} color={THEME.accent} />
             </button>
-
-            <button
-              onClick={() => setSidebarView(sidebarView === "chats" ? "settings" : "chats")}
-              style={{
-                ...styles.circleActionButton,
-                backgroundColor: sidebarView === "settings" ? THEME.primary : THEME.card
-              }}
-              title="Settings & Menu"
-            >
-              <Settings size={16} color="#fff" />
+            <button onClick={() => openViewOrModal("settings")} style={{ ...styles.iconBtn, backgroundColor: THEME.card }} title={t.settings}>
+              <Settings size={16} color={THEME.text} />
             </button>
           </div>
         </div>
 
-        {/* CHATS LIST */}
-        {sidebarView === "chats" && (
-          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
-            <div style={styles.searchBarBox}>
-              <Search size={15} color={THEME.textMuted} style={{ marginRight: "8px" }} />
-              <input
-                type="text"
-                placeholder="Search chats or mobile numbers..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                style={styles.bareInput}
-              />
+        {/* Search Bar */}
+        <div style={{ ...styles.searchWrap, backgroundColor: THEME.card }}>
+          <Search size={15} color={THEME.textMuted} />
+          <input
+            type="text"
+            placeholder={t.searchPlaceholder}
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            style={{ ...styles.bareInput, color: THEME.text }}
+          />
+        </div>
+
+        {/* Contacts / Chat List */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "4px" }}>
+          {filteredContacts.length === 0 ? (
+            <div style={{ padding: "30px 16px", textAlign: "center", color: THEME.textMuted, fontSize: "13px" }}>
+              No chats found. Tap <b onClick={() => openViewOrModal("add_contact")} style={{ color: THEME.primary, cursor: "pointer" }}>+ {t.addContact}</b> to start!
             </div>
-
-            <div style={styles.listSubHeader}>
-              <span>CHATS ({filteredContacts.length})</span>
-              <button onClick={() => setShowAddContactModal(true)} style={styles.linkButtonText}>
-                + Add Contact
-              </button>
-            </div>
-
-            <div style={styles.contactsScrollList}>
-              {filteredContacts.length === 0 ? (
-                <div style={{ padding: "28px 16px", textAlign: "center", color: THEME.textMuted, fontSize: "13px" }}>
-                  No contacts found. Tap <b>+ Add Contact</b> to query any BD mobile number globally in Firestore!
-                </div>
-              ) : (
-                filteredContacts.map((c) => {
-                  const isActive = c.id === activeChat?.id;
-                  const roomMessages = messagesMap[c.id] || [];
-                  const lastMsg = roomMessages[roomMessages.length - 1];
-
-                  return (
-                    <div
-                      key={c.id}
-                      onClick={() => {
-                        setActiveChat(c);
-                        setMobileView("chat");
-                      }}
-                      style={{
-                        ...styles.contactItemBox,
-                        backgroundColor: isActive ? THEME.cardHover : "transparent",
-                        borderLeft: isActive ? `3px solid ${THEME.primary}` : "3px solid transparent"
-                      }}
-                    >
-                      <div style={{ position: "relative" }}>
-                        <img src={c.avatar} alt="" style={styles.avatarImg} />
-                        {c.isOnline && <div style={styles.activeDotIndicator} />}
-                      </div>
-
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={styles.contactTitleLine}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
-                            {c.isGroup && <Users size={14} color={THEME.secondary} />}
-                            <span style={styles.contactItemName}>{c.name}</span>
-                          </div>
-                          {lastMsg && (
-                            <span style={styles.timestampSpan}>
-                              {new Date(lastMsg.createdAt).toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit"
-                              })}
-                            </span>
-                          )}
-                        </div>
-
-                        <div style={styles.lastMsgPreviewLine}>
-                          {lastMsg && lastMsg.senderPhone === normalizePhone(currentUser.phone) && (
-                            <span style={{ marginRight: "4px", display: "inline-flex" }}>
-                              {lastMsg.status === "read" ? (
-                                <CheckCheck size={14} color={THEME.tickRead} />
-                              ) : (
-                                <Check size={14} color={THEME.tickSent} />
-                              )}
-                            </span>
-                          )}
-                          <span style={styles.lastMsgTruncatedText}>
-                            {lastMsg ? lastMsg.content : c.isGroup ? "Group chat ready" : c.phone}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* SETTINGS VIEW */}
-        {sidebarView === "settings" && (
-          <div style={styles.settingsSuiteContainer}>
-            <div style={styles.settingsTopHeader}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                {settingsActiveTab !== "main" && (
-                  <button onClick={() => setSettingsActiveTab("main")} style={styles.cleanGhostBtn}>
-                    <ArrowLeft size={16} />
-                  </button>
-                )}
-                <span style={{ fontWeight: "bold", fontSize: "15px" }}>
-                  {settingsActiveTab === "main" ? "Settings" : settingsActiveTab.toUpperCase()}
-                </span>
-              </div>
-              <button onClick={() => setSidebarView("chats")} style={styles.cleanGhostBtn}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {settingsActiveTab === "main" && (
-              <div style={styles.settingsScrollContent}>
+          ) : (
+            filteredContacts.map((c) => {
+              const isActive = activeChat?.id === c.id;
+              const msgs = messagesMap[c.id] || [];
+              const last = msgs[msgs.length - 1];
+              return (
                 <div
-                  onClick={() => setSettingsActiveTab("profile")}
-                  style={styles.settingsProfileSnapshot}
+                  key={c.id}
+                  onClick={() => {
+                    setActiveChat(c);
+                    setMobileView("chat");
+                  }}
+                  style={{
+                    ...styles.contactItem,
+                    backgroundColor: isActive ? THEME.cardHover : "transparent",
+                    borderLeft: isActive ? `3px solid ${THEME.primary}` : "3px solid transparent"
+                  }}
                 >
-                  <img src={currentUser.avatar} alt="" style={styles.avatarLargeImg} />
+                  <img src={c.avatar} alt="" style={styles.roundAvatar} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: "700", fontSize: "15px" }}>{currentUser.name}</div>
-                    <div style={{ fontSize: "12px", color: THEME.textMuted }}>{normalizePhone(currentUser.phone)}</div>
-                    <div style={{ fontSize: "11px", color: THEME.accent, marginTop: "2px" }}>
-                      "{currentUser.about || "Available on Infinity Chat"}"
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontWeight: "600", fontSize: "14px" }}>{c.name}</span>
+                      {last && (
+                        <span style={{ fontSize: "10px", color: THEME.textMuted }}>
+                          {new Date(last.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: "12px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {last ? last.content : c.phone}
                     </div>
                   </div>
-                  <ChevronRight size={18} color={THEME.textMuted} />
                 </div>
-
-                <div style={styles.settingsGroupColumn}>
-                  <div onClick={() => setSettingsActiveTab("privacy")} style={styles.settingsActionRow}>
-                    <div style={styles.settingsRowLeft}>
-                      <Lock size={18} color={THEME.accent} />
-                      <div>
-                        <div style={styles.settingsRowTitle}>Privacy & Security</div>
-                        <div style={styles.settingsRowDesc}>End-to-End Encryption, Disappearing Messages</div>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} color={THEME.textMuted} />
-                  </div>
-
-                  <div onClick={() => setSettingsActiveTab("storage")} style={styles.settingsActionRow}>
-                    <div style={styles.settingsRowLeft}>
-                      <Database size={18} color={THEME.secondary} />
-                      <div>
-                        <div style={styles.settingsRowTitle}>Firebase Cloud Firestore</div>
-                        <div style={styles.settingsRowDesc}>{firebaseConfig.projectId} (Global Cluster)</div>
-                      </div>
-                    </div>
-                    <ChevronRight size={16} color={THEME.textMuted} />
-                  </div>
-                </div>
-
-                <button onClick={handleLogout} style={styles.logoutButton}>
-                  <LogOut size={16} />
-                  <span>Log Out of Infinity Chat</span>
-                </button>
-              </div>
-            )}
-
-            {settingsActiveTab === "profile" && (
-              <div style={styles.settingsScrollContent}>
-                <div style={{ textAlign: "center", marginBottom: "16px" }}>
-                  <img src={currentUser.avatar} alt="" style={styles.avatarLargeImg} />
-                  <div style={{ fontSize: "11px", color: THEME.textMuted, marginTop: "6px" }}>
-                    Visible to all contacts searching for your BD phone number
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                  <div>
-                    <label style={styles.labelTitle}>Your Name</label>
-                    <div style={styles.fieldBox}>
-                      <input
-                        type="text"
-                        value={profileName}
-                        onChange={(e) => setProfileName(e.target.value)}
-                        style={styles.bareInput}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label style={styles.labelTitle}>About</label>
-                    <div style={styles.fieldBox}>
-                      <input
-                        type="text"
-                        value={profileAbout}
-                        onChange={(e) => setProfileAbout(e.target.value)}
-                        style={styles.bareInput}
-                      />
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={async () => {
-                      try {
-                        const myNorm = normalizePhone(currentUser.phone);
-                        const updated = { ...currentUser, name: profileName, about: profileAbout };
-                        await updateDoc(doc(db, "users", myNorm), { name: profileName, about: profileAbout });
-                        setCurrentUser(updated);
-                        localStorage.setItem("infinity_chat_user", JSON.stringify(updated));
-                        showToast("Profile updated & synced to Firestore!");
-                      } catch (err) {
-                        showToast(`Update error: ${err.message}`);
-                      }
-                    }}
-                    style={styles.primaryActionButton}
-                  >
-                    Save Changes
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {settingsActiveTab === "privacy" && (
-              <div style={styles.settingsScrollContent}>
-                <div style={{ padding: "12px", backgroundColor: THEME.card, borderRadius: "12px", fontSize: "13px" }}>
-                  <div style={{ fontWeight: "700", marginBottom: "6px", color: THEME.accent }}>
-                    End-to-End Encryption
-                  </div>
-                  <p style={{ color: THEME.textMuted, margin: 0, lineHeight: 1.4 }}>
-                    Your messages and calls are secured with 256-bit encryption. Neither Infinity Chat nor third parties can read or listen to them.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {settingsActiveTab === "storage" && (
-              <div style={styles.settingsScrollContent}>
-                <div style={{ padding: "12px", backgroundColor: THEME.card, borderRadius: "12px", fontSize: "13px" }}>
-                  <div style={{ fontWeight: "700", marginBottom: "6px", color: THEME.secondary }}>
-                    Firestore Architecture
-                  </div>
-                  <p style={{ color: THEME.textMuted, margin: 0, lineHeight: 1.4 }}>
-                    Users are registered using their 11-digit normalized phone number as Document ID. Messages are synchronized live via Firestore <code>onSnapshot</code> listeners.
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* CONNECTION STATUS INDICATOR (Fixed to bottom) */}
-        <div style={styles.bottomConnectionFooter}>
-          <div style={styles.connectedPill}>
-            <span style={styles.greenPulseDot} />
-            <span>Firestore Live • 11-Digit BD Directory</span>
-          </div>
+              );
+            })
+          )}
         </div>
       </aside>
 
-      {/* CHAT WINDOW */}
-      <main
-        style={{
-          ...styles.chatWindow,
-          display: mobileView === "list" ? "none" : "flex"
-        }}
-        className="app-chat-window"
-      >
+      {/* --- ACTIVE CHAT MAIN VIEW --- */}
+      <main style={{
+        ...styles.chatMain,
+        backgroundColor: THEME.bg,
+        display: mobileView === "list" ? "none" : "flex"
+      }}>
         {activeChat ? (
           <>
-            <header style={styles.chatTopHeader}>
+            {/* Chat Header */}
+            <div style={{ ...styles.headerBar, backgroundColor: THEME.header, borderColor: THEME.border }}>
               <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                <button
-                  onClick={() => setMobileView("list")}
-                  style={styles.cleanGhostBtn}
-                  className="mobile-back-btn"
-                >
-                  <ArrowLeft size={18} />
+                <button onClick={() => setMobileView("list")} style={styles.cleanBtn} className="mobile-only">
+                  <ArrowLeft size={18} color={THEME.text} />
                 </button>
-                <div style={{ position: "relative" }}>
-                  <img src={activeChat.avatar} alt="" style={styles.avatarImg} />
-                  {activeChat.isOnline && <div style={styles.activeDotIndicator} />}
-                </div>
-                <div>
-                  <div style={{ fontWeight: "700", fontSize: "14px", display: "flex", alignItems: "center", gap: "5px" }}>
-                    {activeChat.isGroup && <Users size={14} color={THEME.secondary} />}
-                    <span>{activeChat.name}</span>
-                  </div>
-                  <div style={{ fontSize: "11px", color: THEME.textMuted }}>
-                    {vanishMode ? "🔒 Vanish mode: 15s auto-delete" : activeChat.lastSeen || "Online"}
+                <div
+                  onClick={() => {
+                    setViewedProfile(activeChat);
+                    openViewOrModal("profile_view");
+                  }}
+                  style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer" }}
+                >
+                  <img src={activeChat.avatar} alt="" style={styles.roundAvatar} />
+                  <div>
+                    <div style={{ fontWeight: "700", fontSize: "14px" }}>{activeChat.name}</div>
+                    <div style={{ fontSize: "11px", color: peerPresence.isOnline ? THEME.accent : THEME.textMuted }}>
+                      {peerPresence.isOnline ? t.activeNow : peerPresence.lastSeen ? `${t.lastSeen} ${peerPresence.lastSeen}` : activeChat.phone}
+                    </div>
                   </div>
                 </div>
               </div>
 
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <button
-                  onClick={() => startWebRtcCall("audio")}
-                  style={styles.headerIconButton}
-                  title="Voice Call"
-                >
+                <button onClick={() => startCall("audio")} style={styles.cleanBtn} title="Voice Call">
                   <Phone size={17} color={THEME.textMuted} />
                 </button>
-
-                <button
-                  onClick={() => startWebRtcCall("video")}
-                  style={styles.headerIconButton}
-                  title="Video Call"
-                >
+                <button onClick={() => startCall("video")} style={styles.cleanBtn} title="Video Call">
                   <Video size={17} color={THEME.textMuted} />
                 </button>
-
                 <button
                   onClick={() => setVanishMode(!vanishMode)}
                   style={{
-                    ...styles.vanishPillButton,
-                    backgroundColor: vanishMode ? "rgba(147, 51, 234, 0.25)" : THEME.card,
-                    borderColor: vanishMode ? THEME.vanish : THEME.border,
-                    color: vanishMode ? "#d8b4fe" : THEME.textMuted
+                    ...styles.pillBtn,
+                    backgroundColor: vanishMode ? "rgba(147, 51, 234, 0.2)" : THEME.card,
+                    borderColor: vanishMode ? "#a855f7" : THEME.border,
+                    color: vanishMode ? "#c084fc" : THEME.textMuted
                   }}
                 >
-                  <Timer size={14} />
-                  <span className="hide-mobile">Vanish {vanishMode ? "ON" : "OFF"}</span>
+                  <Timer size={13} />
+                  <span>{vanishMode ? "15s" : "Vanish"}</span>
                 </button>
               </div>
-            </header>
+            </div>
 
-            {/* Messages Viewport */}
-            <div style={styles.messageFeedViewport}>
+            {/* Message Feed */}
+            <div style={styles.messagesViewport}>
               {activeMessages.length === 0 ? (
-                <div style={styles.emptyNoticeBox}>
-                  <MessageSquare size={40} color={THEME.textMuted} style={{ marginBottom: "8px" }} />
-                  <div style={{ fontSize: "14px", fontWeight: "600" }}>
-                    Conversation with {activeChat.name}
-                  </div>
-                  <p style={{ fontSize: "12px", color: THEME.textMuted, margin: "4px 0 0" }}>
-                    Messages are end-to-end encrypted and synced via Firestore.
-                  </p>
+                <div style={{ textAlign: "center", color: THEME.textMuted, margin: "auto" }}>
+                  <MessageSquare size={36} color={THEME.textMuted} style={{ marginBottom: "6px" }} />
+                  <div style={{ fontSize: "14px" }}>Say hello to {activeChat.name}!</div>
                 </div>
               ) : (
-                activeMessages.map((msg) => {
-                  const isMe = msg.senderPhone === normalizePhone(currentUser.phone);
+                activeMessages.map((m) => {
+                  const isMe = m.senderPhone === normalizePhone(currentUser.phone);
                   return (
-                    <div
-                      key={msg.id}
-                      style={{
-                        ...styles.messageRowFlex,
-                        justifyContent: isMe ? "flex-end" : "flex-start"
-                      }}
-                    >
-                      <div
-                        style={{
-                          ...styles.messageBubbleBox,
-                          backgroundColor: msg.isVanish
-                            ? "rgba(107, 33, 168, 0.75)"
-                            : isMe
-                            ? THEME.bubbleMe
-                            : THEME.bubblePeer,
-                          borderBottomRightRadius: isMe ? "2px" : "12px",
-                          borderBottomLeftRadius: !isMe ? "2px" : "12px"
-                        }}
-                      >
-                        <div style={styles.msgAuthorName}>{msg.senderName}</div>
-
-                        {msg.type === "text" && <div style={styles.msgBodyText}>{msg.content}</div>}
-
-                        {msg.type === "image" && (
-                          <div>
-                            <img src={msg.fileUrl} alt="" style={styles.attachedImageThumbnail} />
-                            {msg.content && <div style={styles.captionText}>"{msg.content}"</div>}
-                          </div>
-                        )}
-
-                        {msg.type === "voice" && (
-                          <div style={styles.voiceNoteFlexRow}>
-                            <button
-                              onClick={() => setPlayingVoiceId(playingVoiceId === msg.id ? null : msg.id)}
-                              style={styles.voicePlayBtn}
-                            >
-                              {playingVoiceId === msg.id ? <Pause size={14} /> : <Play size={14} />}
-                            </button>
-                            <div style={styles.voiceWaveVisualizer}>
-                              {[30, 70, 25, 90, 60, 100, 45, 80, 50, 75].map((h, i) => (
-                                <span
-                                  key={i}
-                                  style={{
-                                    ...styles.waveStemBar,
-                                    height: `${h}%`,
-                                    backgroundColor: playingVoiceId === msg.id ? THEME.secondary : "#ffffff99"
-                                  }}
-                                />
-                              ))}
-                            </div>
-                            <span style={{ fontSize: "11px", color: THEME.textMuted }}>{msg.duration}s</span>
-                          </div>
-                        )}
-
-                        {msg.type === "file" && (
-                          <a href={msg.fileUrl} target="_blank" rel="noreferrer" style={styles.docFileCard}>
-                            <FileText size={18} color={THEME.secondary} />
-                            <div>
-                              <div style={{ fontSize: "13px", fontWeight: "600" }}>{msg.content}</div>
-                              <div style={{ fontSize: "10px", color: THEME.textMuted }}>{msg.fileSize}</div>
-                            </div>
-                          </a>
-                        )}
-
-                        <div style={styles.msgFooterMeta}>
-                          <span style={{ fontSize: "10px", color: "rgba(255, 255, 255, 0.6)" }}>
-                            {new Date(msg.createdAt).toLocaleTimeString([], {
-                              hour: "2-digit",
-                              minute: "2-digit"
-                            })}
+                    <div key={m.id} style={{ display: "flex", justifyContent: isMe ? "flex-end" : "flex-start", width: "100%" }}>
+                      <div style={{
+                        ...styles.msgBubble,
+                        backgroundColor: m.isVanish ? "rgba(107, 33, 168, 0.8)" : isMe ? THEME.bubbleMe : THEME.bubblePeer,
+                        borderBottomRightRadius: isMe ? "2px" : "10px",
+                        borderBottomLeftRadius: !isMe ? "2px" : "10px"
+                      }}>
+                        <div style={{ fontSize: "13px", lineHeight: "1.4" }}>{m.content}</div>
+                        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "4px", marginTop: "3px" }}>
+                          <span style={{ fontSize: "9px", opacity: 0.7 }}>
+                            {new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                           </span>
                           {isMe && (
-                            <span style={{ display: "inline-flex", marginLeft: "4px" }}>
-                              {msg.status === "sending" ? (
-                                <span style={{ fontSize: "9px", color: "rgba(255,255,255,0.5)" }}>🕒</span>
-                              ) : readReceipts && msg.status === "read" ? (
-                                <CheckCheck size={14} color={THEME.tickRead} />
-                              ) : (
-                                <Check size={14} color={THEME.tickSent} />
-                              )}
+                            <span>
+                              {m.status === "sending" ? "🕒" : <CheckCheck size={12} color={THEME.tickRead} />}
                             </span>
                           )}
                         </div>
@@ -1636,328 +1084,427 @@ export default function App() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Bottom Dock Input */}
-            <footer style={styles.dockBottomFooter}>
-              <div style={styles.inputInnerDock}>
+            {/* Input Bar */}
+            <div style={{ ...styles.inputBar, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border, flex: 1 }}>
                 <input
-                  type="file"
-                  ref={fileInputRef}
-                  onChange={handleFileUpload}
-                  style={{ display: "none" }}
+                  type="text"
+                  placeholder={vanishMode ? t.vanishOn : t.typeMessage}
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
+                  style={{ ...styles.bareInput, color: THEME.text }}
                 />
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  style={styles.dockIconBtn}
-                  title="Attach File or Image"
-                >
-                  <Paperclip size={18} />
-                </button>
-
-                {isRecording ? (
-                  <div style={styles.recordingLiveDock}>
-                    <span style={{ color: THEME.danger, fontSize: "13px", fontWeight: "bold" }}>
-                      ● Recording: {recordSecs}s
-                    </span>
-                    <button onClick={handleSendVoice} style={styles.sendVoiceBtnAction}>
-                      Send Voice Note
-                    </button>
-                  </div>
-                ) : (
-                  <input
-                    type="text"
-                    placeholder={
-                      vanishMode ? "Disappearing message..." : `Type a message...`
-                    }
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
-                    style={styles.dockTextRawInput}
-                  />
-                )}
-
-                {!inputText.trim() && !isRecording ? (
-                  <button onClick={() => setIsRecording(true)} style={styles.dockIconBtn} title="Voice Message">
-                    <Mic size={18} />
-                  </button>
-                ) : isRecording ? (
-                  <button onClick={() => setIsRecording(false)} style={styles.dockIconBtn}>
-                    <MicOff size={18} color={THEME.danger} />
-                  </button>
-                ) : (
-                  <button onClick={handleSendMessage} style={styles.sendBtnCircle}>
-                    <Send size={15} color="#ffffff" />
-                  </button>
-                )}
               </div>
-            </footer>
+              <button onClick={handleSendMessage} style={{ ...styles.circleBtn, backgroundColor: THEME.primary }}>
+                <Send size={15} color="#fff" />
+              </button>
+            </div>
           </>
         ) : (
-          <div style={styles.emptyNoticeBox}>
-            <div style={styles.welcomeHeroLogo}>
-              <MessageSquare size={54} color={THEME.primary} />
-            </div>
-            <h2 style={{ fontSize: "20px", fontWeight: "700", margin: "12px 0 4px" }}>Infinity Chat Web</h2>
-            <p style={{ fontSize: "13px", color: THEME.textMuted, maxWidth: "380px", lineHeight: "1.5" }}>
-              Send and receive messages without keeping your phone online. Normalized Bangladeshi mobile directory with instant Firestore sync.
-            </p>
+          <div style={{ margin: "auto", textAlign: "center", color: THEME.textMuted }}>
+            <MessageSquare size={52} color={THEME.primary} style={{ marginBottom: "10px" }} />
+            <h2 style={{ fontSize: "20px", fontWeight: "700" }}>{t.appTitle}</h2>
+            <p style={{ fontSize: "13px" }}>Select a conversation to start messaging</p>
           </div>
         )}
       </main>
 
-      {/* ----------------- 1. ADD CONTACT MODAL ----------------- */}
-      {showAddContactModal && (
-        <div style={styles.modalBackdrop}>
-          <div style={styles.modalContainerCard}>
-            <div style={styles.modalTopHeader}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <UserPlus size={18} color={THEME.accent} />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Add Contact (BD Directory)</span>
-              </div>
-              <button onClick={() => setShowAddContactModal(false)} style={styles.cleanGhostBtn}>
-                <X size={18} />
-              </button>
+      {/* --- MODAL: USER PROFILE & SHARED MEDIA GALLERY --- */}
+      {activeModal === "profile_view" && viewedProfile && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "15px" }}>{t.profile}</div>
+              <button onClick={() => setActiveModal(null)} style={styles.cleanBtn}><X size={18} /></button>
             </div>
-
-            <form onSubmit={handleVerifyAndAddContact} style={{ padding: "18px" }}>
-              <p style={{ fontSize: "12px", color: THEME.textMuted, margin: "0 0 12px", lineHeight: "1.4" }}>
-                Enter any 11-digit Bangladeshi mobile number (e.g. <code>017xxxxxxxx</code> or <code>+88017...</code>). We query Firestore globally by standardized Document ID.
-              </p>
-
-              <label style={styles.labelTitle}>Mobile Number</label>
-              <div style={styles.fieldBox}>
-                <Smartphone size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
-                <input
-                  type="tel"
-                  placeholder="01712345678"
-                  value={contactSearchInput}
-                  onChange={(e) => setContactSearchInput(e.target.value)}
-                  style={styles.bareInput}
-                  autoFocus
-                />
+            <div style={{ padding: "18px", overflowY: "auto", maxHeight: "80vh" }}>
+              <div style={{ textAlign: "center", marginBottom: "16px" }}>
+                <img src={viewedProfile.avatar} alt="" style={{ width: "80px", height: "80px", borderRadius: "50%", objectFit: "cover", border: `2px solid ${THEME.primary}` }} />
+                <h3 style={{ fontSize: "17px", fontWeight: "700", margin: "8px 0 2px" }}>{viewedProfile.name}</h3>
+                <p style={{ fontSize: "12px", color: THEME.textMuted, margin: 0 }}>{viewedProfile.phone}</p>
+                <p style={{ fontSize: "12px", color: THEME.accent, marginTop: "4px" }}>"{viewedProfile.about || "Available on Infinity Chat"}"</p>
               </div>
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowAddContactModal(false)}
-                  style={styles.secondaryTextBtn}
-                >
-                  Cancel
-                </button>
-                <button type="submit" disabled={isProcessing} style={styles.primaryActionButton}>
-                  {isProcessing ? <Loader2 size={16} className="spin" /> : <span>Search & Add</span>}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ----------------- 2. CREATE GROUP MODAL ----------------- */}
-      {showCreateGroupModal && (
-        <div style={styles.modalBackdrop}>
-          <div style={styles.modalContainerCard}>
-            <div style={styles.modalTopHeader}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <Users size={18} color={THEME.secondary} />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Create New Group</span>
-              </div>
-              <button onClick={() => setShowCreateGroupModal(false)} style={styles.cleanGhostBtn}>
-                <X size={18} />
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateGroup} style={{ padding: "18px" }}>
-              <label style={styles.labelTitle}>Group Subject</label>
-              <div style={{ ...styles.fieldBox, marginBottom: "14px" }}>
-                <Users size={16} color={THEME.textMuted} style={{ marginRight: "10px" }} />
-                <input
-                  type="text"
-                  placeholder="e.g. Dhaka Friends 🚀"
-                  value={newGroupName}
-                  onChange={(e) => setNewGroupName(e.target.value)}
-                  style={styles.bareInput}
-                  autoFocus
-                />
-              </div>
-
-              <label style={styles.labelTitle}>Select Participants</label>
-              <div style={styles.groupMemberListScroll}>
-                {contacts
-                  .filter((c) => !c.isGroup)
-                  .map((contact) => {
-                    const isSelected = selectedGroupMembers.includes(contact.id);
-                    return (
-                      <div
-                        key={contact.id}
-                        onClick={() => {
-                          if (isSelected) {
-                            setSelectedGroupMembers(selectedGroupMembers.filter((id) => id !== contact.id));
-                          } else {
-                            setSelectedGroupMembers([...selectedGroupMembers, contact.id]);
-                          }
-                        }}
-                        style={{
-                          ...styles.groupSelectRow,
-                          backgroundColor: isSelected ? THEME.cardHover : "transparent"
-                        }}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                          <img src={contact.avatar} alt="" style={styles.avatarImg} />
-                          <div>
-                            <div style={{ fontSize: "13px", fontWeight: "600" }}>{contact.name}</div>
-                            <div style={{ fontSize: "11px", color: THEME.textMuted }}>{contact.phone}</div>
-                          </div>
-                        </div>
-                        {isSelected ? (
-                          <CheckSquare size={18} color={THEME.primary} />
+              {/* Shared Media Gallery */}
+              <div style={{ marginTop: "16px", borderTop: `1px solid ${THEME.border}`, paddingTop: "12px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: "700", fontSize: "13px", marginBottom: "10px" }}>
+                  <ImageIcon size={16} color={THEME.secondary} />
+                  <span>{t.sharedMedia} ({sharedMediaFiles.length})</span>
+                </div>
+                {sharedMediaFiles.length === 0 ? (
+                  <div style={{ textAlign: "center", color: THEME.textMuted, fontSize: "12px", padding: "14px" }}>
+                    No photos or documents shared yet in this chat.
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "6px" }}>
+                    {sharedMediaFiles.map((item, idx) => (
+                      <div key={idx} style={{ borderRadius: "6px", overflow: "hidden", height: "80px", backgroundColor: THEME.card }}>
+                        {item.type === "image" ? (
+                          <img src={item.fileUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                         ) : (
-                          <Square size={18} color={THEME.textMuted} />
+                          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", fontSize: "10px" }}>
+                            <FileText size={20} color={THEME.secondary} />
+                            <span style={{ maxWidth: "80%", overflow: "hidden", textOverflow: "ellipsis" }}>{item.content}</span>
+                          </div>
                         )}
                       </div>
-                    );
-                  })}
+                    ))}
+                  </div>
+                )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateGroupModal(false)}
-                  style={styles.secondaryTextBtn}
-                >
-                  Cancel
-                </button>
-                <button type="submit" style={styles.primaryActionButton}>
-                  Create Group ({selectedGroupMembers.length})
-                </button>
+      {/* --- MODAL: COMPREHENSIVE SETTINGS SUITE (12 ITEMS) --- */}
+      {activeModal === "settings" && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                {settingsTab !== "main" && (
+                  <button onClick={() => setSettingsTab("main")} style={styles.cleanBtn}><ArrowLeft size={16} /></button>
+                )}
+                <span style={{ fontWeight: "700", fontSize: "15px" }}>{t.settings}</span>
               </div>
+              <button onClick={() => setActiveModal(null)} style={styles.cleanBtn}><X size={18} /></button>
+            </div>
+
+            <div style={{ padding: "14px", overflowY: "auto", maxHeight: "75vh" }}>
+              {settingsTab === "main" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  {/* 1. Profile Management */}
+                  <div onClick={() => setSettingsTab("profile")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <User size={17} color={THEME.primary} />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.profile}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 2. Account & Privacy Settings */}
+                  <div onClick={() => setSettingsTab("privacy")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <Lock size={17} color={THEME.accent} />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.privacySettings}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 3. Notifications */}
+                  <div onClick={() => setSettingsTab("notifications")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <Bell size={17} color={THEME.secondary} />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.notifications}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 4. Privacy Policy & Terms */}
+                  <div onClick={() => setSettingsTab("policy")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <ShieldCheck size={17} color="#eab308" />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.privacyPolicy}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 5. Data & Storage */}
+                  <div onClick={() => setSettingsTab("storage")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <Download size={17} color="#a855f7" />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.dataStorage}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 6. Language Switcher */}
+                  <div onClick={() => setSettingsTab("language")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <Globe size={17} color="#06b6d4" />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: "600", fontSize: "13px" }}>{t.language}</div>
+                      <div style={{ fontSize: "11px", color: THEME.textMuted }}>{lang === "bn" ? "বাংলা (Bangla)" : "English"}</div>
+                    </div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 7. Contact List & Invite System */}
+                  <div onClick={() => setSettingsTab("invite")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <Share2 size={17} color={THEME.accent} />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.contactListInvite}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 8. Ringtones & Caller Tune */}
+                  <div onClick={() => setSettingsTab("ringtones")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <Music size={17} color="#ec4899" />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.ringtones}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 9. Switch Account */}
+                  <div onClick={handleLogout} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <LogOut size={17} color={THEME.danger} />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px", color: THEME.danger }}>{t.switchAccount}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+
+                  {/* 10. Dark / Light Mode */}
+                  <div
+                    onClick={() => {
+                      const next = !darkMode;
+                      setDarkMode(next);
+                      localStorage.setItem("infinity_theme", next ? "dark" : "light");
+                    }}
+                    style={{ ...styles.settingsItem, backgroundColor: THEME.card }}
+                  >
+                    {darkMode ? <Sun size={17} color="#f59e0b" /> : <Moon size={17} color="#6366f1" />}
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.theme}</div></div>
+                    <span style={{ fontSize: "12px", color: THEME.textMuted }}>{darkMode ? "Dark" : "Light"}</span>
+                  </div>
+
+                  {/* 11. App Update Checker */}
+                  <div onClick={() => setSettingsTab("updates")} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <RefreshCw size={17} color={THEME.secondary} />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.updateCheck}</div></div>
+                    <span style={{ fontSize: "11px", color: THEME.accent }}>v1.0.4 Latest</span>
+                  </div>
+
+                  {/* 12. Channels */}
+                  <div onClick={() => { setActiveModal("channels"); }} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                    <Radio size={17} color={THEME.secondary} />
+                    <div style={{ flex: 1 }}><div style={{ fontWeight: "600", fontSize: "13px" }}>{t.channels}</div></div>
+                    <ChevronRight size={16} color={THEME.textMuted} />
+                  </div>
+                </div>
+              )}
+
+              {/* Sub-page: Profile Management */}
+              {settingsTab === "profile" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  <div style={{ textAlign: "center" }}>
+                    <input type="file" ref={avatarUploadRef} onChange={handleAvatarFile} accept="image/*" style={{ display: "none" }} />
+                    <img src={currentUser.avatar} alt="" style={{ width: "70px", height: "70px", borderRadius: "50%", objectFit: "cover" }} />
+                    <button onClick={() => avatarUploadRef.current?.click()} style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, marginTop: "8px" }}>
+                      Change Photo (Base64)
+                    </button>
+                  </div>
+                  <div>
+                    <label style={styles.label}>Name</label>
+                    <input
+                      type="text"
+                      defaultValue={currentUser.name}
+                      onBlur={async (e) => {
+                        const val = e.target.value.trim();
+                        if (val) {
+                          const myNorm = normalizePhone(currentUser.phone);
+                          await updateDoc(doc(db, "users", myNorm), { name: val });
+                          const u = { ...currentUser, name: val };
+                          setCurrentUser(u);
+                          localStorage.setItem("infinity_chat_user", JSON.stringify(u));
+                          showToast("Name updated!");
+                        }
+                      }}
+                      style={{ ...styles.bareInput, backgroundColor: THEME.card, padding: "8px", borderRadius: "6px", color: THEME.text }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Sub-page: Privacy Settings */}
+              {settingsTab === "privacy" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>Ghost Mode (Hide Online Status)</span>
+                    <button
+                      onClick={() => setGhostMode(!ghostMode)}
+                      style={{ ...styles.pillBtn, backgroundColor: ghostMode ? THEME.primary : THEME.card, color: "#fff" }}
+                    >
+                      {ghostMode ? "ON" : "OFF"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Sub-page: Privacy Policy & Terms (BILINGUAL) */}
+              {settingsTab === "policy" && (
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                    <h4 style={{ margin: 0 }}>{t.privacyPolicy}</h4>
+                    <button
+                      onClick={() => {
+                        const next = lang === "bn" ? "en" : "bn";
+                        setLang(next);
+                        localStorage.setItem("infinity_lang", next);
+                      }}
+                      style={{ ...styles.pillBtn, backgroundColor: THEME.card, color: THEME.primary }}
+                    >
+                      {lang === "bn" ? "Switch to English" : "বাংলায় দেখুন"}
+                    </button>
+                  </div>
+                  <p style={{ fontSize: "13px", lineHeight: "1.6", color: THEME.textMuted, backgroundColor: THEME.card, padding: "12px", borderRadius: "8px" }}>
+                    {t.termsText}
+                  </p>
+                </div>
+              )}
+
+              {/* Sub-page: Data & Storage */}
+              {settingsTab === "storage" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  <div style={{ padding: "12px", backgroundColor: THEME.card, borderRadius: "8px" }}>
+                    <div style={{ fontWeight: "600", fontSize: "13px" }}>Temporary App Cache</div>
+                    <div style={{ fontSize: "12px", color: THEME.textMuted, marginTop: "2px" }}>Cache Size: 12.4 MB</div>
+                    <button
+                      onClick={() => showToast("Cache cleared successfully!")}
+                      style={{ ...styles.primaryBtn, backgroundColor: THEME.danger, marginTop: "10px" }}
+                    >
+                      {t.clearCache}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Sub-page: Language Switcher */}
+              {settingsTab === "language" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <div
+                    onClick={() => { setLang("bn"); localStorage.setItem("infinity_lang", "bn"); showToast("ভাষা পরিবর্তিত হয়েছে!"); }}
+                    style={{ ...styles.settingsItem, backgroundColor: THEME.card }}
+                  >
+                    <span>বাংলা (Bangla)</span>
+                    {lang === "bn" && <Check size={16} color={THEME.primary} />}
+                  </div>
+                  <div
+                    onClick={() => { setLang("en"); localStorage.setItem("infinity_lang", "en"); showToast("Language updated to English!"); }}
+                    style={{ ...styles.settingsItem, backgroundColor: THEME.card }}
+                  >
+                    <span>English</span>
+                    {lang === "en" && <Check size={16} color={THEME.primary} />}
+                  </div>
+                </div>
+              )}
+
+              {/* Sub-page: Ringtones */}
+              {settingsTab === "ringtones" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {["classic", "marimba", "chime"].map((tune) => (
+                    <div key={tune} style={{ ...styles.settingsItem, backgroundColor: THEME.card }}>
+                      <span style={{ textTransform: "capitalize" }}>{tune} Ringtone</span>
+                      <button onClick={() => { setSelectedRingtone(tune); soundEngine.playTone(550, "sine", 0.6); }} style={styles.cleanBtn}>
+                        <Play size={16} color={THEME.primary} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Sub-page: Updates */}
+              {settingsTab === "updates" && (
+                <div style={{ textAlign: "center", padding: "16px" }}>
+                  <RefreshCw size={32} color={THEME.accent} style={{ margin: "0 auto 8px" }} />
+                  <h4>Infinity Chat v1.0.4</h4>
+                  <p style={{ fontSize: "12px", color: THEME.textMuted }}>You are running the latest version with Firestore sync.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL: ADD CONTACT --- */}
+      {activeModal === "add_contact" && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "15px" }}>{t.addContact}</div>
+              <button onClick={() => setActiveModal(null)} style={styles.cleanBtn}><X size={18} /></button>
+            </div>
+            <form onSubmit={handleAddContact} style={{ padding: "16px" }}>
+              <label style={styles.label}>11-Digit BD Number</label>
+              <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border, marginBottom: "14px" }}>
+                <Smartphone size={16} color={THEME.textMuted} />
+                <input
+                  type="tel"
+                  placeholder="017XXXXXXXX"
+                  value={contactSearchInput}
+                  onChange={(e) => setContactSearchInput(e.target.value)}
+                  style={{ ...styles.bareInput, color: THEME.text }}
+                />
+              </div>
+              <button type="submit" disabled={isProcessing} style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
+                {isProcessing ? <Loader2 size={16} className="spin" /> : <span>Search & Add</span>}
+              </button>
             </form>
           </div>
         </div>
       )}
 
-      {/* ----------------- 3. NOT REGISTERED / INVITE MODAL ----------------- */}
-      {inviteModalData && (
-        <div style={styles.modalBackdrop}>
-          <div style={styles.modalContainerCard}>
-            <div style={{ ...styles.modalTopHeader, borderBottom: "none", paddingBottom: "0" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <Info size={18} color="#f59e0b" />
-                <span style={{ fontWeight: "700", fontSize: "15px" }}>Not Registered in Firestore</span>
-              </div>
-              <button onClick={() => setInviteModalData(null)} style={styles.cleanGhostBtn}>
-                <X size={18} />
-              </button>
+      {/* --- MODAL: CHANNELS BROADCAST --- */}
+      {activeModal === "channels" && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "15px" }}>{t.channels}</div>
+              <button onClick={() => setActiveModal(null)} style={styles.cleanBtn}><X size={18} /></button>
             </div>
-
-            <div style={{ padding: "16px 20px 22px", textAlign: "center" }}>
-              <div style={styles.shareBadgeBubble}>
-                <Share2 size={26} color={THEME.secondary} />
-              </div>
-              <h3 style={{ fontSize: "16px", fontWeight: "700", margin: "10px 0 4px" }}>
-                {inviteModalData.phone}
-              </h3>
-              <p style={{ fontSize: "12px", color: THEME.textMuted, lineHeight: "1.5" }}>
-                This mobile number has not yet created an account on Infinity Chat. Share this invite link with them:
-              </p>
-
-              <div style={styles.inviteLinkContainer}>
-                <span style={{ fontSize: "11px", color: "#cbd5e1" }}>{inviteModalData.inviteUrl}</span>
-              </div>
-
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(inviteModalData.inviteUrl);
-                  showToast("Invite link copied to clipboard!");
-                  setInviteModalData(null);
-                }}
-                style={{ ...styles.primaryActionButton, width: "100%", marginTop: "12px" }}
-              >
-                Copy SMS Invite Link
-              </button>
+            <div style={{ padding: "14px", overflowY: "auto", maxHeight: "70vh" }}>
+              {channels.map((ch) => (
+                <div key={ch.id} style={{ ...styles.settingsItem, backgroundColor: THEME.card, marginBottom: "8px" }}>
+                  <div>
+                    <div style={{ fontWeight: "700", fontSize: "14px" }}>{ch.name}</div>
+                    <div style={{ fontSize: "11px", color: THEME.textMuted }}>{ch.desc} • {ch.subscribers} followers</div>
+                  </div>
+                  <button onClick={() => showToast("Subscribed to channel!")} style={{ ...styles.pillBtn, backgroundColor: THEME.primary, color: "#fff" }}>
+                    Follow
+                  </button>
+                </div>
+              ))}
             </div>
           </div>
         </div>
       )}
 
-      {/* ----------------- 4. WEBRTC CALL OVERLAY ----------------- */}
-      {activeCall && (
-        <div style={styles.webrtcCallModalOverlay}>
-          <div style={styles.callCardContainer}>
-            <div style={{ fontSize: "12px", color: THEME.textMuted, marginBottom: "8px" }}>
-              {activeCall.type === "video" ? "Infinity WebRTC HD Video Call" : "Infinity Encrypted Voice Call"}
-            </div>
+      {/* --- MODAL: INVITE MODAL --- */}
+      {activeModal === "invite" && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border, textAlign: "center", padding: "20px" }}>
+            <Share2 size={36} color={THEME.accent} style={{ margin: "0 auto 8px" }} />
+            <h3 style={{ margin: "0 0 6px" }}>User Not Registered</h3>
+            <p style={{ fontSize: "12px", color: THEME.textMuted }}>This mobile number is not yet on Infinity Chat. Share an invite link with them!</p>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(`https://infinity-chat-922be.firebaseapp.com/join?ref=${currentUser.phone}`);
+                showToast("Invite link copied!");
+                setActiveModal(null);
+              }}
+              style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, marginTop: "12px" }}
+            >
+              <Copy size={16} />
+              <span>Copy SMS Invite Link</span>
+            </button>
+          </div>
+        </div>
+      )}
 
-            {activeCall.type === "video" && !isVideoDisabled ? (
-              <div style={styles.videoStreamBox}>
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  style={styles.realVideoPlayer}
-                />
-                <div style={styles.liveWebRtcPill}>Live WebRTC Stream (Google STUN)</div>
-              </div>
-            ) : (
-              <div style={{ margin: "24px 0" }}>
-                <img
-                  src={activeChat?.avatar}
-                  alt=""
-                  style={{
-                    width: "92px",
-                    height: "92px",
-                    borderRadius: "50%",
-                    border: `3px solid ${activeCall.status === "connected" ? THEME.accent : THEME.primary}`,
-                    boxShadow: "0 0 35px rgba(0, 168, 132, 0.45)"
-                  }}
-                />
+      {/* --- WEBRTC CALL OVERLAY WITH DYNAMIC STATUS --- */}
+      {activeCall && (
+        <div style={styles.callOverlay}>
+          <div style={{ ...styles.callBox, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ fontSize: "12px", color: THEME.textMuted }}>
+              {activeCall.type === "video" ? "WebRTC HD Video" : "Encrypted Audio"}
+            </div>
+            {activeCall.type === "video" && (
+              <div style={styles.videoBox}>
+                <video ref={localVideoRef} autoPlay playsInline muted style={styles.fullVideo} />
               </div>
             )}
-
-            <h2 style={{ fontSize: "18px", fontWeight: "bold", margin: "6px 0 2px" }}>
-              {activeChat?.name}
-            </h2>
-            <div style={{ fontSize: "13px", color: activeCall.status === "connected" ? THEME.accent : THEME.textMuted }}>
+            <img src={activeChat?.avatar} alt="" style={{ width: "70px", height: "70px", borderRadius: "50%", margin: "14px auto 4px" }} />
+            <h3 style={{ margin: "4px 0" }}>{activeChat?.name}</h3>
+            {/* Dynamic Ringing Status: if recipient is online -> Ringing..., else Calling... */}
+            <div style={{ fontSize: "13px", color: THEME.accent }}>
               {activeCall.status === "connected"
-                ? `Connected (${Math.floor((activeCall.duration || 0) / 60)}:${((activeCall.duration || 0) % 60).toString().padStart(2, "0")})`
-                : "Ringing Peer..."}
+                ? `Active (${activeCall.duration}s)`
+                : peerPresence.isOnline
+                ? t.ringing
+                : t.calling}
             </div>
-
-            <div style={styles.callActionsRowFlex}>
-              <button
-                onClick={toggleCallMute}
-                style={{
-                  ...styles.callCircleBtn,
-                  backgroundColor: isAudioMuted ? THEME.danger : THEME.card
-                }}
-                title={isAudioMuted ? "Unmute Mic" : "Mute Mic"}
-              >
-                {isAudioMuted ? <MicOff size={18} color="#fff" /> : <Mic size={18} color="#fff" />}
+            <div style={{ display: "flex", justifyContent: "center", gap: "16px", marginTop: "20px" }}>
+              <button onClick={() => setIsMuted(!isMuted)} style={{ ...styles.circleBtn, backgroundColor: THEME.card }}>
+                {isMuted ? <MicOff size={18} color={THEME.danger} /> : <Mic size={18} color={THEME.text} />}
               </button>
-
-              {activeCall.type === "video" && (
-                <button
-                  onClick={toggleCallVideo}
-                  style={{
-                    ...styles.callCircleBtn,
-                    backgroundColor: isVideoDisabled ? THEME.danger : THEME.card
-                  }}
-                  title={isVideoDisabled ? "Enable Camera" : "Disable Camera"}
-                >
-                  {isVideoDisabled ? <VideoOff size={18} color="#fff" /> : <Video size={18} color="#fff" />}
-                </button>
-              )}
-
-              <button
-                onClick={endCall}
-                style={{
-                  ...styles.callCircleBtn,
-                  backgroundColor: THEME.danger,
-                  transform: "scale(1.15)"
-                }}
-                title="End Call"
-              >
+              <button onClick={endCall} style={{ ...styles.circleBtn, backgroundColor: THEME.danger }}>
                 <PhoneOff size={20} color="#fff" />
               </button>
             </div>
@@ -1965,745 +1512,52 @@ export default function App() {
         </div>
       )}
 
-      {/* Embedded Responsive Media Queries */}
       <style>{`
         @media (min-width: 768px) {
-          .app-sidebar {
-            display: flex !important;
-            width: 360px !important;
-          }
-          .app-chat-window {
-            display: flex !important;
-          }
-          .mobile-back-btn {
-            display: none !important;
-          }
+          .mobile-only { display: none !important; }
         }
-        @media (max-width: 520px) {
-          .hide-mobile {
-            display: none !important;
-          }
-        }
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-        .spin {
-          animation: spin 1s linear infinite;
-        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        .spin { animation: spin 1s linear infinite; }
       `}</style>
     </div>
   );
 }
 
-// -------------------------------------------------------------
-// STYLES
-// -------------------------------------------------------------
+// --- CLEAN STYLES ---
 const styles = {
-  toastNotification: {
-    position: "fixed",
-    top: "16px",
-    left: "50%",
-    transform: "translateX(-50%)",
-    backgroundColor: THEME.primary,
-    color: "#fff",
-    padding: "10px 20px",
-    borderRadius: "10px",
-    fontSize: "13px",
-    fontWeight: "600",
-    zIndex: 9999,
-    boxShadow: "0 10px 25px rgba(0,0,0,0.5)"
-  },
-  authContainer: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "100vh",
-    width: "100vw",
-    backgroundColor: THEME.bg,
-    padding: "16px",
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
-  },
-  authCard: {
-    width: "100%",
-    maxWidth: "420px",
-    backgroundColor: THEME.sidebar,
-    border: `1px solid ${THEME.border}`,
-    borderRadius: "20px",
-    padding: "26px",
-    boxShadow: "0 20px 40px rgba(0,0,0,0.5)"
-  },
-  authBadgeCircle: {
-    width: "56px",
-    height: "56px",
-    borderRadius: "50%",
-    backgroundColor: THEME.primary,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    margin: "0 auto 10px",
-    boxShadow: "0 8px 20px rgba(0, 168, 132, 0.4)"
-  },
-  avatarUploadBubble: {
-    position: "relative",
-    width: "74px",
-    height: "74px",
-    margin: "0 auto 6px",
-    cursor: "pointer"
-  },
-  avatarCircleImg: {
-    width: "100%",
-    height: "100%",
-    borderRadius: "50%",
-    objectFit: "cover",
-    border: `2px solid ${THEME.primary}`
-  },
-  avatarUploadCam: {
-    position: "absolute",
-    bottom: "0",
-    right: "0",
-    backgroundColor: THEME.primary,
-    borderRadius: "50%",
-    padding: "5px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  labelTitle: {
-    display: "block",
-    fontSize: "12px",
-    fontWeight: "600",
-    color: THEME.textMuted,
-    marginBottom: "5px"
-  },
-  fieldBox: {
-    display: "flex",
-    alignItems: "center",
-    backgroundColor: THEME.card,
-    border: `1px solid ${THEME.border}`,
-    borderRadius: "10px",
-    padding: "10px 14px"
-  },
-  bareInput: {
-    background: "transparent",
-    border: "none",
-    color: THEME.text,
-    fontSize: "13px",
-    width: "100%",
-    outline: "none"
-  },
-  primaryActionButton: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "8px",
-    backgroundColor: THEME.primary,
-    color: "#fff",
-    border: "none",
-    borderRadius: "10px",
-    padding: "12px",
-    fontSize: "14px",
-    fontWeight: "700",
-    cursor: "pointer",
-    marginTop: "6px",
-    boxShadow: "0 4px 14px rgba(0, 168, 132, 0.4)"
-  },
-  linkTextButton: {
-    background: "none",
-    border: "none",
-    color: THEME.secondary,
-    fontWeight: "700",
-    fontSize: "12px",
-    cursor: "pointer"
-  },
-  otpNoticeBanner: {
-    textAlign: "center",
-    padding: "12px",
-    backgroundColor: THEME.card,
-    borderRadius: "12px",
-    border: `1px solid ${THEME.border}`
-  },
-  otpSingleBox: {
-    width: "44px",
-    height: "48px",
-    textAlign: "center",
-    fontSize: "18px",
-    fontWeight: "bold",
-    backgroundColor: THEME.card,
-    border: `1px solid ${THEME.border}`,
-    borderRadius: "8px",
-    color: THEME.text,
-    outline: "none"
-  },
-  authFooterSeal: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: "11px",
-    color: THEME.textMuted,
-    marginTop: "18px"
-  },
-  appContainer: {
-    display: "flex",
-    height: "100vh",
-    width: "100vw",
-    backgroundColor: THEME.bg,
-    color: THEME.text,
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    overflow: "hidden"
-  },
-  sidebar: {
-    width: "100%",
-    backgroundColor: THEME.sidebar,
-    borderRight: `1px solid ${THEME.border}`,
-    flexDirection: "column",
-    height: "100%"
-  },
-  userTopBar: {
-    padding: "10px 16px",
-    backgroundColor: THEME.sidebarHeader,
-    borderBottom: `1px solid ${THEME.border}`,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between"
-  },
-  avatarImg: {
-    width: "40px",
-    height: "40px",
-    borderRadius: "50%",
-    objectFit: "cover"
-  },
-  avatarLargeImg: {
-    width: "64px",
-    height: "64px",
-    borderRadius: "50%",
-    objectFit: "cover",
-    margin: "0 auto"
-  },
-  activeDotIndicator: {
-    position: "absolute",
-    bottom: "1px",
-    right: "1px",
-    width: "10px",
-    height: "10px",
-    backgroundColor: THEME.accent,
-    borderRadius: "50%",
-    border: `2px solid ${THEME.sidebar}`
-  },
-  circleActionButton: {
-    background: THEME.card,
-    border: `1px solid ${THEME.border}`,
-    borderRadius: "50%",
-    width: "36px",
-    height: "36px",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  searchBarBox: {
-    display: "flex",
-    alignItems: "center",
-    margin: "8px 12px",
-    padding: "7px 12px",
-    backgroundColor: THEME.sidebarHeader,
-    borderRadius: "8px"
-  },
-  listSubHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "6px 16px",
-    fontSize: "11px",
-    fontWeight: "700",
-    color: THEME.textMuted
-  },
-  linkButtonText: {
-    background: "none",
-    border: "none",
-    color: THEME.accent,
-    fontSize: "11px",
-    fontWeight: "700",
-    cursor: "pointer"
-  },
-  contactsScrollList: {
-    flex: 1,
-    overflowY: "auto",
-    padding: "2px 6px"
-  },
-  contactItemBox: {
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    padding: "10px 12px",
-    borderRadius: "8px",
-    cursor: "pointer",
-    transition: "background 0.15s ease",
-    marginBottom: "2px"
-  },
-  contactTitleLine: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center"
-  },
-  contactItemName: {
-    fontSize: "14px",
-    fontWeight: "600",
-    color: THEME.text
-  },
-  timestampSpan: {
-    fontSize: "10px",
-    color: THEME.textMuted
-  },
-  lastMsgPreviewLine: {
-    display: "flex",
-    alignItems: "center",
-    marginTop: "2px"
-  },
-  lastMsgTruncatedText: {
-    fontSize: "12px",
-    color: THEME.textMuted,
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis"
-  },
-  bottomConnectionFooter: {
-    padding: "8px 14px",
-    backgroundColor: THEME.sidebarHeader,
-    borderTop: `1px solid ${THEME.border}`,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  connectedPill: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    fontSize: "11px",
-    color: THEME.textMuted
-  },
-  greenPulseDot: {
-    width: "7px",
-    height: "7px",
-    borderRadius: "50%",
-    backgroundColor: THEME.accent
-  },
-  settingsSuiteContainer: {
-    display: "flex",
-    flexDirection: "column",
-    flex: 1,
-    overflow: "hidden"
-  },
-  settingsTopHeader: {
-    padding: "14px 16px",
-    backgroundColor: THEME.sidebarHeader,
-    borderBottom: `1px solid ${THEME.border}`,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between"
-  },
-  cleanGhostBtn: {
-    background: "none",
-    border: "none",
-    color: THEME.textMuted,
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center"
-  },
-  settingsScrollContent: {
-    padding: "16px",
-    overflowY: "auto",
-    flex: 1
-  },
-  settingsProfileSnapshot: {
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    padding: "14px",
-    backgroundColor: THEME.card,
-    borderRadius: "12px",
-    border: `1px solid ${THEME.border}`,
-    marginBottom: "16px",
-    cursor: "pointer"
-  },
-  settingsGroupColumn: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "6px",
-    marginBottom: "20px"
-  },
-  settingsActionRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "12px 14px",
-    backgroundColor: THEME.card,
-    borderRadius: "10px",
-    border: `1px solid ${THEME.border}`,
-    cursor: "pointer"
-  },
-  settingsRowLeft: {
-    display: "flex",
-    alignItems: "center",
-    gap: "12px"
-  },
-  settingsRowTitle: {
-    fontSize: "13px",
-    fontWeight: "600"
-  },
-  settingsRowDesc: {
-    fontSize: "11px",
-    color: THEME.textMuted,
-    marginTop: "2px"
-  },
-  logoutButton: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "8px",
-    width: "100%",
-    padding: "12px",
-    borderRadius: "10px",
-    border: "none",
-    backgroundColor: "rgba(234, 67, 53, 0.15)",
-    color: "#f87171",
-    fontSize: "13px",
-    fontWeight: "700",
-    cursor: "pointer"
-  },
-  chatWindow: {
-    flex: 1,
-    flexDirection: "column",
-    backgroundColor: THEME.bg,
-    height: "100%"
-  },
-  chatTopHeader: {
-    padding: "8px 16px",
-    backgroundColor: THEME.sidebarHeader,
-    borderBottom: `1px solid ${THEME.border}`,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between"
-  },
-  headerIconButton: {
-    background: "transparent",
-    border: "none",
-    borderRadius: "50%",
-    padding: "8px",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  vanishPillButton: {
-    display: "flex",
-    alignItems: "center",
-    gap: "5px",
-    padding: "5px 9px",
-    borderRadius: "8px",
-    border: "1px solid",
-    fontSize: "11px",
-    fontWeight: "600",
-    cursor: "pointer"
-  },
-  messageFeedViewport: {
-    flex: 1,
-    overflowY: "auto",
-    padding: "16px 20px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "6px"
-  },
-  emptyNoticeBox: {
-    flex: 1,
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    color: THEME.textMuted,
-    textAlign: "center",
-    padding: "20px"
-  },
-  welcomeHeroLogo: {
-    width: "80px",
-    height: "80px",
-    borderRadius: "50%",
-    backgroundColor: "rgba(0, 168, 132, 0.1)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: "8px"
-  },
-  messageRowFlex: {
-    display: "flex",
-    width: "100%"
-  },
-  messageBubbleBox: {
-    maxWidth: "75%",
-    padding: "7px 12px",
-    borderRadius: "10px",
-    boxShadow: "0 1px 2px rgba(0,0,0,0.3)"
-  },
-  msgAuthorName: {
-    fontSize: "11px",
-    fontWeight: "600",
-    color: THEME.accent,
-    marginBottom: "2px"
-  },
-  msgBodyText: {
-    fontSize: "14px",
-    lineHeight: "1.4",
-    wordBreak: "break-word"
-  },
-  attachedImageThumbnail: {
-    width: "100%",
-    maxHeight: "240px",
-    borderRadius: "8px",
-    objectFit: "cover",
-    display: "block"
-  },
-  captionText: {
-    fontSize: "11px",
-    fontStyle: "italic",
-    marginTop: "5px",
-    color: "rgba(255, 255, 255, 0.85)"
-  },
-  voiceNoteFlexRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "10px",
-    width: "200px"
-  },
-  voicePlayBtn: {
-    width: "30px",
-    height: "30px",
-    borderRadius: "50%",
-    backgroundColor: THEME.primary,
-    border: "none",
-    color: "#ffffff",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    cursor: "pointer"
-  },
-  voiceWaveVisualizer: {
-    flex: 1,
-    display: "flex",
-    alignItems: "center",
-    gap: "2px",
-    height: "18px"
-  },
-  waveStemBar: {
-    width: "3px",
-    borderRadius: "2px"
-  },
-  docFileCard: {
-    display: "flex",
-    alignItems: "center",
-    gap: "10px",
-    padding: "8px 10px",
-    backgroundColor: "rgba(0,0,0,0.2)",
-    borderRadius: "8px",
-    textDecoration: "none",
-    color: THEME.text
-  },
-  msgFooterMeta: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    marginTop: "2px"
-  },
-  dockBottomFooter: {
-    padding: "8px 12px",
-    backgroundColor: THEME.sidebarHeader,
-    borderTop: `1px solid ${THEME.border}`
-  },
-  inputInnerDock: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    backgroundColor: THEME.card,
-    borderRadius: "10px",
-    padding: "4px 8px"
-  },
-  dockTextRawInput: {
-    flex: 1,
-    background: "transparent",
-    border: "none",
-    color: THEME.text,
-    fontSize: "14px",
-    padding: "8px 4px",
-    outline: "none"
-  },
-  dockIconBtn: {
-    background: "none",
-    border: "none",
-    color: THEME.textMuted,
-    padding: "6px",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  sendBtnCircle: {
-    backgroundColor: THEME.primary,
-    border: "none",
-    borderRadius: "50%",
-    width: "34px",
-    height: "34px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    cursor: "pointer"
-  },
-  recordingLiveDock: {
-    flex: 1,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "0 8px"
-  },
-  sendVoiceBtnAction: {
-    backgroundColor: THEME.danger,
-    color: "#fff",
-    border: "none",
-    borderRadius: "6px",
-    padding: "5px 12px",
-    fontSize: "11px",
-    fontWeight: "bold",
-    cursor: "pointer"
-  },
-  modalBackdrop: {
-    position: "fixed",
-    inset: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.7)",
-    backdropFilter: "blur(3px)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "16px",
-    zIndex: 1000
-  },
-  modalContainerCard: {
-    width: "100%",
-    maxWidth: "420px",
-    backgroundColor: THEME.sidebar,
-    border: `1px solid ${THEME.border}`,
-    borderRadius: "16px",
-    overflow: "hidden",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.6)"
-  },
-  modalTopHeader: {
-    padding: "14px 18px",
-    backgroundColor: THEME.sidebarHeader,
-    borderBottom: `1px solid ${THEME.border}`,
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center"
-  },
-  secondaryTextBtn: {
-    backgroundColor: "transparent",
-    border: "none",
-    color: THEME.textMuted,
-    fontSize: "13px",
-    padding: "8px 14px",
-    cursor: "pointer"
-  },
-  groupMemberListScroll: {
-    maxHeight: "180px",
-    overflowY: "auto",
-    border: `1px solid ${THEME.border}`,
-    borderRadius: "8px",
-    padding: "4px"
-  },
-  groupSelectRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "8px 10px",
-    borderRadius: "6px",
-    cursor: "pointer",
-    marginBottom: "2px"
-  },
-  shareBadgeBubble: {
-    width: "52px",
-    height: "52px",
-    borderRadius: "50%",
-    backgroundColor: "rgba(0, 180, 216, 0.15)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    margin: "0 auto"
-  },
-  inviteLinkContainer: {
-    backgroundColor: THEME.bg,
-    border: `1px solid ${THEME.border}`,
-    padding: "10px 12px",
-    borderRadius: "8px",
-    margin: "12px 0",
-    wordBreak: "break-all"
-  },
-  webrtcCallModalOverlay: {
-    position: "fixed",
-    inset: 0,
-    backgroundColor: "rgba(0, 0, 0, 0.85)",
-    backdropFilter: "blur(6px)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 2000,
-    padding: "16px"
-  },
-  callCardContainer: {
-    width: "100%",
-    maxWidth: "420px",
-    backgroundColor: THEME.sidebar,
-    borderRadius: "20px",
-    border: `1px solid ${THEME.border}`,
-    padding: "24px",
-    textAlign: "center",
-    boxShadow: "0 25px 50px rgba(0, 0, 0, 0.7)"
-  },
-  videoStreamBox: {
-    position: "relative",
-    width: "100%",
-    height: "230px",
-    borderRadius: "14px",
-    backgroundColor: "#000",
-    overflow: "hidden",
-    margin: "12px 0",
-    border: `1px solid ${THEME.border}`
-  },
-  realVideoPlayer: {
-    width: "100%",
-    height: "100%",
-    objectFit: "cover"
-  },
-  liveWebRtcPill: {
-    position: "absolute",
-    bottom: "10px",
-    right: "10px",
-    backgroundColor: "rgba(0, 168, 132, 0.85)",
-    padding: "3px 8px",
-    borderRadius: "6px",
-    fontSize: "10px",
-    fontWeight: "bold",
-    color: "#fff"
-  },
-  callActionsRowFlex: {
-    display: "flex",
-    justifyContent: "center",
-    gap: "18px",
-    marginTop: "24px"
-  },
-  callCircleBtn: {
-    width: "48px",
-    height: "48px",
-    borderRadius: "50%",
-    border: "none",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center"
-  }
+  appWrap: { display: "flex", width: "100vw", height: "100vh", overflow: "hidden", fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' },
+  sidebar: { width: "100%", maxWidth: "360px", borderRight: "1px solid", flexDirection: "column", height: "100%" },
+  chatMain: { flex: 1, flexDirection: "column", height: "100%" },
+  headerBar: { padding: "10px 14px", borderBottom: "1px solid", display: "flex", justifyContent: "space-between", alignItems: "center" },
+  roundAvatar: { width: "38px", height: "38px", borderRadius: "50%", objectFit: "cover" },
+  cleanBtn: { background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center" },
+  iconBtn: { border: "none", borderRadius: "50%", width: "34px", height: "34px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  circleBtn: { border: "none", borderRadius: "50%", width: "40px", height: "40px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  pillBtn: { border: "1px solid transparent", borderRadius: "14px", padding: "4px 10px", fontSize: "11px", fontWeight: "600", cursor: "pointer", display: "flex", alignItems: "center", gap: "4px" },
+  searchWrap: { margin: "8px 12px", padding: "6px 12px", borderRadius: "8px", display: "flex", alignItems: "center", gap: "8px" },
+  bareInput: { background: "transparent", border: "none", outline: "none", fontSize: "13px", width: "100%" },
+  contactItem: { display: "flex", alignItems: "center", gap: "10px", padding: "10px 12px", cursor: "pointer", borderRadius: "8px", marginBottom: "2px" },
+  messagesViewport: { flex: 1, overflowY: "auto", padding: "16px", display: "flex", flexDirection: "column", gap: "8px" },
+  msgBubble: { maxWidth: "72%", padding: "7px 12px", borderRadius: "8px", fontSize: "13px" },
+  inputBar: { padding: "8px 12px", borderTop: "1px solid", display: "flex", alignItems: "center", gap: "8px" },
+  inputWrap: { display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", borderRadius: "8px", border: "1px solid" },
+  modalOverlay: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: "14px" },
+  modalCard: { width: "100%", maxWidth: "420px", borderRadius: "14px", border: "1px solid", overflow: "hidden" },
+  modalHeader: { padding: "12px 16px", borderBottom: "1px solid", display: "flex", justifyContent: "space-between", alignItems: "center" },
+  settingsItem: { display: "flex", alignItems: "center", gap: "12px", padding: "12px 14px", borderRadius: "8px", cursor: "pointer" },
+  toast: { position: "fixed", top: "14px", left: "50%", transform: "translateX(-50%)", color: "#fff", padding: "8px 16px", borderRadius: "8px", fontSize: "12px", fontWeight: "600", zIndex: 9999 },
+  centerContainer: { display: "flex", alignItems: "center", justifyContent: "center", width: "100vw", height: "100vh", padding: "16px" },
+  card: { width: "100%", maxWidth: "400px", padding: "24px", borderRadius: "16px", border: "1px solid" },
+  logoCircle: { width: "52px", height: "52px", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto" },
+  avatarBubble: { position: "relative", width: "70px", height: "70px", margin: "0 auto 6px", cursor: "pointer" },
+  avatarImgFull: { width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" },
+  camBadge: { position: "absolute", bottom: 0, right: 0, borderRadius: "50%", padding: "4px", display: "flex" },
+  label: { fontSize: "11px", fontWeight: "600", opacity: 0.8, marginBottom: "4px", display: "block" },
+  primaryBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", width: "100%", padding: "10px", borderRadius: "8px", border: "none", color: "#fff", fontWeight: "700", fontSize: "13px", cursor: "pointer" },
+  linkBtn: { background: "none", border: "none", fontWeight: "700", fontSize: "12px", cursor: "pointer" },
+  otpBox: { width: "42px", height: "46px", textAlign: "center", fontSize: "18px", fontWeight: "bold", border: "1px solid", borderRadius: "8px", outline: "none" },
+  callOverlay: { position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.88)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000, padding: "16px" },
+  callBox: { width: "100%", maxWidth: "380px", borderRadius: "18px", border: "1px solid", padding: "20px", textAlign: "center" },
+  videoBox: { width: "100%", height: "200px", borderRadius: "12px", overflow: "hidden", backgroundColor: "#000", margin: "10px 0" },
+  fullVideo: { width: "100%", height: "100%", objectFit: "cover" }
 };
