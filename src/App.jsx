@@ -10,7 +10,8 @@ import {
   query,
   orderBy,
   updateDoc,
-  addDoc
+  addDoc,
+  enableIndexedDbPersistence
 } from "firebase/firestore";
 import {
   Send, Paperclip, Mic, MicOff, Timer, Play, Pause, Image as ImageIcon,
@@ -19,7 +20,8 @@ import {
   Lock, Camera, Share2, Check, CheckCheck, ChevronRight, Info, KeyRound,
   ShieldCheck, Smartphone, CheckSquare, Square, Bell, BellOff, Volume2,
   VolumeX, Moon, Sun, Globe, RefreshCw, Radio, Trash2, Download, Eye,
-  EyeOff, Music, Copy, ExternalLink, HelpCircle, Film
+  EyeOff, Music, Copy, ExternalLink, HelpCircle, Film, Pin, PinOff,
+  Reply, Smile, CornerDownRight
 } from "lucide-react";
 
 // --- FIREBASE CONFIGURATION ---
@@ -35,6 +37,17 @@ const firebaseConfig = {
 
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 const db = getFirestore(app);
+
+// Enable offline persistence (IndexedDB)
+if (typeof window !== "undefined") {
+  enableIndexedDbPersistence(db).catch((err) => {
+    if (err.code === "failed-precondition") {
+      console.warn("Multiple tabs open, persistence enabled in first tab only");
+    } else if (err.code === "unimplemented") {
+      console.warn("Browser does not support IndexedDB persistence");
+    }
+  });
+}
 
 // STUN configuration for WebRTC
 const RTC_CONFIG = {
@@ -234,6 +247,22 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [inputText, setInputText] = useState("");
   const [vanishMode, setVanishMode] = useState(false);
+  const [viewOnceMode, setViewOnceMode] = useState(false);
+  const [replyingTo, setReplyingTo] = useState(null); // null | { id, senderName, content, type }
+  const [activeMessageMenu, setActiveMessageMenu] = useState(null); // null | { msgId, x, y }
+  const [pinnedChats, setPinnedChats] = useState(() => {
+    try {
+      const p = localStorage.getItem("infinity_pinned_chats");
+      return p ? JSON.parse(p) : [];
+    } catch (e) { return []; }
+  });
+  const [mutedChats, setMutedChats] = useState(() => {
+    try {
+      const m = localStorage.getItem("infinity_muted_chats");
+      return m ? JSON.parse(m) : [];
+    } catch (e) { return []; }
+  });
+  const [openedViewOnceMap, setOpenedViewOnceMap] = useState({});
   const [isRecording, setIsRecording] = useState(false);
   const [recordSecs, setRecordSecs] = useState(0);
 
@@ -268,6 +297,7 @@ export default function App() {
   const peerConnectionRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const otpInputsRef = useRef([]);
 
   const showToast = (msg) => {
     setToastMessage(msg);
@@ -459,10 +489,12 @@ export default function App() {
       snap.forEach((d) => {
         const m = { id: d.id, ...d.data() };
         serverMsgs.push(m);
-        // Web Push Notification if app in background
+        // Web Push Notification if app in background and chat not muted
+        const isChatMuted = mutedChats.includes(activeChat.id);
         if (
           document.hidden &&
           notificationsEnabled &&
+          !isChatMuted &&
           m.senderPhone !== myNorm &&
           "Notification" in window &&
           Notification.permission === "granted"
@@ -733,6 +765,97 @@ export default function App() {
     setActiveCall(null);
   };
 
+  // --- HTML CANVAS IMAGE COMPRESSION HELPER ---
+  const compressImage = (file, maxWidth = 800, quality = 0.7) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          let width = img.width;
+          let height = img.height;
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL("image/jpeg", quality));
+        };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Toggle Pin & Mute Chats
+  const togglePinChat = (chatId, e) => {
+    e?.stopPropagation();
+    setPinnedChats((prev) => {
+      const next = prev.includes(chatId) ? prev.filter((id) => id !== chatId) : [...prev, chatId];
+      localStorage.setItem("infinity_pinned_chats", JSON.stringify(next));
+      showToast(next.includes(chatId) ? "Chat pinned to top 📌" : "Chat unpinned");
+      return next;
+    });
+  };
+
+  const toggleMuteChat = (chatId, e) => {
+    e?.stopPropagation();
+    setMutedChats((prev) => {
+      const next = prev.includes(chatId) ? prev.filter((id) => id !== chatId) : [...prev, chatId];
+      localStorage.setItem("infinity_muted_chats", JSON.stringify(next));
+      showToast(next.includes(chatId) ? "Notifications muted 🔕" : "Notifications unmuted 🔔");
+      return next;
+    });
+  };
+
+  // Add Emoji Reaction to Message
+  const handleAddReaction = async (msgId, emoji) => {
+    if (!activeChat || !currentUser) return;
+    const myNorm = normalizePhone(currentUser.phone);
+    const peerNorm = normalizePhone(activeChat.phone);
+    const roomId = activeChat.isGroup ? activeChat.id : activeChat.roomId || getRoomId(myNorm, peerNorm);
+
+    // Optimistic reaction update
+    setMessagesMap((prev) => {
+      const list = prev[activeChat.id] || [];
+      const updated = list.map((m) => {
+        if (m.id === msgId) {
+          const reactions = { ...(m.reactions || {}) };
+          if (reactions[myNorm] === emoji) {
+            delete reactions[myNorm];
+          } else {
+            reactions[myNorm] = emoji;
+          }
+          return { ...m, reactions };
+        }
+        return m;
+      });
+      return { ...prev, [activeChat.id]: updated };
+    });
+
+    setActiveMessageMenu(null);
+
+    try {
+      const msgRef = doc(db, "conversations", roomId, "messages", msgId);
+      const snap = await getDoc(msgRef);
+      if (snap.exists()) {
+        const curReactions = snap.data()?.reactions || {};
+        if (curReactions[myNorm] === emoji) {
+          delete curReactions[myNorm];
+        } else {
+          curReactions[myNorm] = emoji;
+        }
+        await updateDoc(msgRef, { reactions: curReactions });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   // --- SENDING MESSAGES (OPTIMISTIC 0ms LATENCY) ---
   const handleSendMessage = async (customPayload = null) => {
     if (!activeChat || !currentUser) return;
@@ -752,6 +875,8 @@ export default function App() {
         senderName: currentUser.name,
         status: "sending",
         isVanish: vanishMode,
+        isViewOnce: viewOnceMode,
+        replyTo: replyingTo ? { ...replyingTo } : null,
         createdAt: now,
         ...customPayload
       };
@@ -770,9 +895,15 @@ export default function App() {
         type: "text",
         status: "sending",
         isVanish: vanishMode,
+        isViewOnce: false,
+        replyTo: replyingTo ? { ...replyingTo } : null,
         createdAt: now
       };
     }
+
+    // Reset reply and view-once after send
+    setReplyingTo(null);
+    if (viewOnceMode && customPayload) setViewOnceMode(false);
 
     // Optimistic UI state
     setMessagesMap((prev) => ({
@@ -808,62 +939,84 @@ export default function App() {
   };
 
   // --- COMPRESSED BASE64 ATTACHMENT SHARING (Images, Videos, PDFs, Docs) ---
-  const handleAttachmentUpload = (e) => {
+  const handleAttachmentUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Check size limit: keep base64 strings reasonable (< 800KB)
+    const isImg = file.type.startsWith("image/");
+    const isVid = file.type.startsWith("video/");
+    const isPdf = file.type === "application/pdf";
+
+    // For images, compress via canvas
+    if (isImg) {
+      try {
+        const compressedBase64 = await compressImage(file, 800, 0.7);
+        const payload = {
+          type: "image",
+          fileUrl: compressedBase64,
+          fileName: file.name,
+          fileSize: (Math.round(compressedBase64.length * 0.75) / 1024).toFixed(1) + " KB",
+          content: viewOnceMode ? "View Once Photo" : "Photo",
+          isViewOnce: viewOnceMode
+        };
+        await handleSendMessage(payload);
+        showToast("Photo sent!");
+      } catch (err) {
+        showToast("Failed to process image: " + err.message);
+      }
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    // Size limit check for video/docs: keep under 2MB for base64 storage
     if (file.size > 2 * 1024 * 1024) {
-      showToast("Please choose files under 2MB for fast delivery.");
+      showToast("Please choose media files under 2MB for instant delivery.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
     const reader = new FileReader();
     reader.onload = async () => {
       const base64Data = reader.result;
-      const isImg = file.type.startsWith("image/");
-      const isVid = file.type.startsWith("video/");
-      const isPdf = file.type === "application/pdf";
-
-      const type = isImg ? "image" : isVid ? "video" : isPdf ? "pdf" : "file";
+      const type = isVid ? "video" : isPdf ? "pdf" : "file";
       const payload = {
         type,
         fileUrl: base64Data,
         fileName: file.name,
         fileSize: (file.size / 1024).toFixed(1) + " KB",
-        content: isImg ? "Photo" : isVid ? "Video clip" : file.name
+        content: isVid ? (viewOnceMode ? "View Once Video" : "Video clip") : file.name,
+        isViewOnce: isVid ? viewOnceMode : false
       };
 
       await handleSendMessage(payload);
       showToast(`${file.name} sent!`);
     };
     reader.readAsDataURL(file);
-    // Reset file input
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  // Profile Picture Upload to Base64
-  const handleAvatarFile = (e) => {
+  // Profile Picture Upload with Canvas-based Compression
+  const handleAvatarFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = reader.result;
-      setAvatarInput(base64);
+    try {
+      const compressed = await compressImage(file, 300, 0.8);
+      setAvatarInput(compressed);
       if (currentUser?.phone) {
         const myNorm = normalizePhone(currentUser.phone);
         try {
-          await updateDoc(doc(db, "users", myNorm), { avatar: base64 });
-          const updated = { ...currentUser, avatar: base64 };
+          await updateDoc(doc(db, "users", myNorm), { avatar: compressed });
+          const updated = { ...currentUser, avatar: compressed };
           setCurrentUser(updated);
           localStorage.setItem("infinity_chat_user", JSON.stringify(updated));
-          showToast("Profile photo updated successfully!");
+          showToast("Profile photo compressed and updated!");
         } catch (err) {
           showToast(`Error saving avatar: ${err.message}`);
         }
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      showToast("Image compression error: " + err.message);
+    }
   };
 
   // Add Contact logic
@@ -994,11 +1147,20 @@ export default function App() {
     showToast("Logged out successfully.");
   };
 
-  // Filtered contacts and messages
-  const filteredContacts = contacts.filter((c) =>
-    (c.name && c.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (c.phone && c.phone.includes(searchTerm))
-  );
+  // Filtered and pinned-sorted contacts
+  const filteredContacts = useMemo(() => {
+    const list = contacts.filter((c) =>
+      (c.name && c.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (c.phone && c.phone.includes(searchTerm))
+    );
+    return list.sort((a, b) => {
+      const aPinned = pinnedChats.includes(a.id);
+      const bPinned = pinnedChats.includes(b.id);
+      if (aPinned && !bPinned) return -1;
+      if (!aPinned && bPinned) return 1;
+      return 0;
+    });
+  }, [contacts, searchTerm, pinnedChats]);
 
   const activeMessages = activeChat ? messagesMap[activeChat.id] || [] : [];
   const sharedMediaFiles = useMemo(() => {
@@ -1079,14 +1241,24 @@ export default function App() {
                 {otpCode.map((digit, idx) => (
                   <input
                     key={idx}
+                    ref={(el) => (otpInputsRef.current[idx] = el)}
                     type="text"
+                    inputMode="numeric"
                     maxLength={1}
                     value={digit}
                     onChange={(e) => {
-                      const val = e.target.value.replace(/\D/g, "");
+                      const val = e.target.value.replace(/\D/g, "").slice(-1);
                       const next = [...otpCode];
                       next[idx] = val;
                       setOtpCode(next);
+                      if (val && idx < 5) {
+                        otpInputsRef.current[idx + 1]?.focus();
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Backspace" && !otpCode[idx] && idx > 0) {
+                        otpInputsRef.current[idx - 1]?.focus();
+                      }
                     }}
                     style={{ ...styles.otpBox, backgroundColor: THEME.card, borderColor: THEME.border, color: THEME.text }}
                   />
@@ -1194,6 +1366,8 @@ export default function App() {
           ) : (
             filteredContacts.map((c) => {
               const isActive = activeChat?.id === c.id;
+              const isPinned = pinnedChats.includes(c.id);
+              const isMuted = mutedChats.includes(c.id);
               const msgs = messagesMap[c.id] || [];
               const last = msgs[msgs.length - 1];
               return (
@@ -1212,15 +1386,37 @@ export default function App() {
                   <img src={c.avatar} alt="" style={styles.roundAvatar} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontWeight: "600", fontSize: "14px" }}>{c.name}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                        <span style={{ fontWeight: "600", fontSize: "14px" }}>{c.name}</span>
+                        {isPinned && <Pin size={12} color={THEME.accent} style={{ transform: "rotate(45deg)" }} />}
+                        {isMuted && <BellOff size={12} color={THEME.textMuted} />}
+                      </div>
                       {last && (
                         <span style={{ fontSize: "10px", color: THEME.textMuted }}>
                           {new Date(last.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                         </span>
                       )}
                     </div>
-                    <div style={{ fontSize: "12px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {last ? (last.type === "image" ? "📷 Photo" : last.type === "video" ? "🎥 Video" : last.type === "pdf" ? "📄 PDF" : last.content) : c.phone}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "2px" }}>
+                      <div style={{ fontSize: "12px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1, marginRight: "6px" }}>
+                        {last ? (last.type === "image" ? "📷 Photo" : last.type === "video" ? "🎥 Video" : last.type === "pdf" ? "📄 PDF" : last.content) : c.phone}
+                      </div>
+                      <div style={{ display: "flex", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={(e) => togglePinChat(c.id, e)}
+                          style={{ ...styles.cleanBtn, padding: "2px", opacity: isPinned ? 1 : 0.4 }}
+                          title={isPinned ? "Unpin chat" : "Pin chat to top"}
+                        >
+                          <Pin size={13} color={isPinned ? THEME.accent : THEME.textMuted} />
+                        </button>
+                        <button
+                          onClick={(e) => toggleMuteChat(c.id, e)}
+                          style={{ ...styles.cleanBtn, padding: "2px", opacity: isMuted ? 1 : 0.4 }}
+                          title={isMuted ? "Unmute" : "Mute notifications"}
+                        >
+                          {isMuted ? <BellOff size={13} color={THEME.danger} /> : <Bell size={13} color={THEME.textMuted} />}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1294,25 +1490,145 @@ export default function App() {
                 activeMessages.map((m) => {
                   const isMe = m.senderPhone === normalizePhone(currentUser.phone);
                   return (
-                    <div key={m.id} style={{ display: "flex", justifyContent: isMe ? "flex-end" : "flex-start", width: "100%" }}>
-                      <div style={{
-                        ...styles.msgBubble,
-                        backgroundColor: m.isVanish ? "rgba(107, 33, 168, 0.8)" : isMe ? THEME.bubbleMe : THEME.bubblePeer,
-                        borderBottomRightRadius: isMe ? "2px" : "10px",
-                        borderBottomLeftRadius: !isMe ? "2px" : "10px"
-                      }}>
-                        {/* 1. Image Rendering */}
-                        {m.type === "image" && m.fileUrl && (
-                          <div style={{ marginBottom: "6px", borderRadius: "6px", overflow: "hidden" }}>
-                            <img src={m.fileUrl} alt="shared" style={{ maxWidth: "260px", maxHeight: "240px", width: "100%", objectFit: "contain", borderRadius: "6px" }} />
+                    <div
+                      key={m.id}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: isMe ? "flex-end" : "flex-start",
+                        width: "100%",
+                        position: "relative"
+                      }}
+                    >
+                      {/* Context Menu for Emoji Reactions & Reply */}
+                      {activeMessageMenu === m.id && (
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: "-36px",
+                            [isMe ? "right" : "left"]: 0,
+                            backgroundColor: THEME.card,
+                            border: `1px solid ${THEME.border}`,
+                            borderRadius: "20px",
+                            padding: "4px 8px",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "6px",
+                            zIndex: 100,
+                            boxShadow: "0 4px 12px rgba(0,0,0,0.3)"
+                          }}
+                        >
+                          {["❤️", "👍", "😂", "😮", "😢", "🔥"].map((emoji) => (
+                            <button
+                              key={emoji}
+                              onClick={() => handleAddReaction(m.id, emoji)}
+                              style={{ ...styles.cleanBtn, fontSize: "16px", padding: "2px", cursor: "pointer" }}
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                          <div style={{ width: "1px", height: "16px", backgroundColor: THEME.border, margin: "0 2px" }} />
+                          <button
+                            onClick={() => {
+                              setReplyingTo({
+                                id: m.id,
+                                senderName: isMe ? "You" : m.senderName,
+                                content: m.content || (m.type === "image" ? "Photo" : "Media"),
+                                type: m.type
+                              });
+                              setActiveMessageMenu(null);
+                            }}
+                            style={{ ...styles.cleanBtn, color: THEME.secondary, padding: "2px" }}
+                            title="Reply"
+                          >
+                            <Reply size={15} />
+                          </button>
+                          <button
+                            onClick={() => setActiveMessageMenu(null)}
+                            style={{ ...styles.cleanBtn, color: THEME.textMuted, padding: "2px" }}
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      )}
+
+                      <div
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          setActiveMessageMenu(activeMessageMenu === m.id ? null : m.id);
+                        }}
+                        style={{
+                          ...styles.msgBubble,
+                          backgroundColor: m.isVanish ? "rgba(107, 33, 168, 0.8)" : isMe ? THEME.bubbleMe : THEME.bubblePeer,
+                          borderBottomRightRadius: isMe ? "2px" : "10px",
+                          borderBottomLeftRadius: !isMe ? "2px" : "10px",
+                          cursor: "pointer",
+                          position: "relative"
+                        }}
+                      >
+                        {/* Replying Preview Quote inside bubble */}
+                        {m.replyTo && (
+                          <div
+                            style={{
+                              borderLeft: `3px solid ${THEME.primary}`,
+                              backgroundColor: "rgba(0,0,0,0.12)",
+                              borderRadius: "4px",
+                              padding: "4px 8px",
+                              marginBottom: "6px",
+                              fontSize: "11px"
+                            }}
+                          >
+                            <div style={{ fontWeight: "700", color: THEME.primary }}>{m.replyTo.senderName}</div>
+                            <div style={{ opacity: 0.8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {m.replyTo.content}
+                            </div>
                           </div>
                         )}
 
-                        {/* 2. Video Rendering */}
-                        {m.type === "video" && m.fileUrl && (
-                          <div style={{ marginBottom: "6px", borderRadius: "6px", overflow: "hidden" }}>
-                            <video src={m.fileUrl} controls style={{ maxWidth: "260px", maxHeight: "240px", width: "100%", borderRadius: "6px" }} />
+                        {/* View Once Media Gating */}
+                        {m.isViewOnce && !openedViewOnceMap[m.id] ? (
+                          <div
+                            onClick={() => setOpenedViewOnceMap((prev) => ({ ...prev, [m.id]: true }))}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                              padding: "10px 14px",
+                              borderRadius: "8px",
+                              backgroundColor: "rgba(0,0,0,0.15)",
+                              cursor: "pointer",
+                              marginBottom: "4px"
+                            }}
+                          >
+                            <div style={{ width: "24px", height: "24px", borderRadius: "50%", border: `2px dashed ${THEME.primary}`, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold", fontSize: "12px", color: THEME.primary }}>
+                              1
+                            </div>
+                            <div>
+                              <div style={{ fontWeight: "600", fontSize: "12px" }}>View Once {m.type === "video" ? "Video" : "Photo"}</div>
+                              <div style={{ fontSize: "10px", opacity: 0.7 }}>Tap to view once</div>
+                            </div>
                           </div>
+                        ) : (
+                          <>
+                            {/* 1. Image Rendering */}
+                            {m.type === "image" && m.fileUrl && (
+                              <div style={{ marginBottom: "6px", borderRadius: "6px", overflow: "hidden", position: "relative" }}>
+                                <img src={m.fileUrl} alt="shared" style={{ maxWidth: "260px", maxHeight: "240px", width: "100%", objectFit: "contain", borderRadius: "6px" }} />
+                                {m.isViewOnce && (
+                                  <div style={{ position: "absolute", top: "6px", right: "6px", backgroundColor: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: "10px", padding: "2px 6px", fontSize: "9px" }}>
+                                    Opened 1x
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* 2. Video Rendering */}
+                            {m.type === "video" && m.fileUrl && (
+                              <div style={{ marginBottom: "6px", borderRadius: "6px", overflow: "hidden" }}>
+                                <video src={m.fileUrl} controls style={{ maxWidth: "260px", maxHeight: "240px", width: "100%", borderRadius: "6px" }} />
+                              </div>
+                            )}
+                          </>
                         )}
 
                         {/* 3. PDF & Documents Rendering with Download */}
@@ -1344,7 +1660,37 @@ export default function App() {
                           <div style={{ fontSize: "13px", lineHeight: "1.4" }}>{m.content}</div>
                         )}
 
+                        {/* Attached Emoji Reactions display */}
+                        {m.reactions && Object.keys(m.reactions).length > 0 && (
+                          <div style={{ display: "flex", gap: "2px", marginTop: "4px", flexWrap: "wrap" }}>
+                            {Object.entries(m.reactions).map(([phone, emo]) => (
+                              <span
+                                key={phone}
+                                style={{
+                                  fontSize: "11px",
+                                  backgroundColor: "rgba(0,0,0,0.2)",
+                                  borderRadius: "10px",
+                                  padding: "1px 5px",
+                                  display: "inline-block"
+                                }}
+                              >
+                                {emo}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
                         <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: "4px", marginTop: "3px" }}>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveMessageMenu(activeMessageMenu === m.id ? null : m.id);
+                            }}
+                            style={{ ...styles.cleanBtn, opacity: 0.5, padding: "0 2px" }}
+                            title="React or Reply"
+                          >
+                            <Smile size={11} color={THEME.textMuted} />
+                          </button>
                           <span style={{ fontSize: "9px", opacity: 0.7 }}>
                             {new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                           </span>
@@ -1361,6 +1707,33 @@ export default function App() {
               )}
               <div ref={messagesEndRef} />
             </div>
+
+            {/* Reply Preview Banner */}
+            {replyingTo && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "8px 16px",
+                  backgroundColor: THEME.card,
+                  borderTop: `1px solid ${THEME.border}`,
+                  borderLeft: `4px solid ${THEME.primary}`
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: "11px", fontWeight: "700", color: THEME.primary }}>
+                    Replying to {replyingTo.senderName}
+                  </div>
+                  <div style={{ fontSize: "12px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {replyingTo.content}
+                  </div>
+                </div>
+                <button onClick={() => setReplyingTo(null)} style={{ ...styles.cleanBtn, color: THEME.textMuted }}>
+                  <X size={16} />
+                </button>
+              </div>
+            )}
 
             {/* Input Bar with Attachment File Picker */}
             <div style={{ ...styles.inputBar, backgroundColor: THEME.header, borderColor: THEME.border }}>
@@ -1380,6 +1753,26 @@ export default function App() {
                 title={t.attachFile}
               >
                 <Paperclip size={18} color={THEME.textMuted} />
+              </button>
+
+              {/* View Once Toggle Button */}
+              <button
+                type="button"
+                onClick={() => {
+                  setViewOnceMode(!viewOnceMode);
+                  showToast(!viewOnceMode ? "View Once enabled for next media 1️⃣" : "View Once disabled");
+                }}
+                style={{
+                  ...styles.iconBtn,
+                  backgroundColor: viewOnceMode ? "rgba(16, 185, 129, 0.2)" : THEME.card,
+                  border: viewOnceMode ? `1px solid ${THEME.primary}` : "none",
+                  fontWeight: "bold",
+                  fontSize: "13px",
+                  color: viewOnceMode ? THEME.primary : THEME.textMuted
+                }}
+                title="Toggle View Once Media"
+              >
+                ①
               </button>
 
               <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border, flex: 1 }}>
