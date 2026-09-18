@@ -36,7 +36,8 @@ import {
   EyeOff,
   Lock,
   Phone,
-  User
+  User,
+  ArrowLeft
 } from "lucide-react";
 
 // Modular Imports
@@ -70,15 +71,18 @@ export default function App() {
     }
   });
 
-  // Auth View Modes: "login" | "register"
+  // Auth Modes & Step State
+  // authMode: "login" | "register"
   const [authMode, setAuthMode] = useState("login");
+  // step: "form" | "otp"  <-- DEDICATED STEP STATE (Prevents unwanted mode switching)
+  const [step, setStep] = useState("form");
+
   const [phoneInput, setPhoneInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [nameInput, setNameInput] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
   // Dedicated SMS OTP States
-  const [otpSent, setOtpSent] = useState(false);
   const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
   const [confirmationResult, setConfirmationResult] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -195,7 +199,7 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // --- CLEAN UP RECAPTCHA ON UNMOUNT ---
+  // Clean up recaptcha verifier on unmount
   useEffect(() => {
     return () => {
       if (window.recaptchaVerifier) {
@@ -228,6 +232,7 @@ export default function App() {
       if (!userSnap.exists()) {
         showToast("Account not found. Please register your account.");
         setAuthMode("register");
+        setStep("form");
         setIsSubmitting(false);
         return;
       }
@@ -250,7 +255,7 @@ export default function App() {
     }
   };
 
-  // --- 2. ROBUST SMS OTP SEND HANDLER ---
+  // --- 2. SEND SMS OTP: STAYS IN REGISTER MODE AND ENTERS 'otp' STEP ---
   const handleStartRegistration = async (e) => {
     e?.preventDefault();
     const cleanPhone = normalizePhone(phoneInput);
@@ -274,6 +279,7 @@ export default function App() {
       if (userSnap.exists()) {
         showToast("This phone number is already registered. Please log in.");
         setAuthMode("login");
+        setStep("form");
         setIsSubmitting(false);
         return;
       }
@@ -286,10 +292,9 @@ export default function App() {
         window.recaptchaVerifier = null;
       }
 
-      // Ensure explicit recaptcha element container is present
       const container = document.getElementById("recaptcha-container");
       if (!container) {
-        throw new Error("Recaptcha container element missing.");
+        throw new Error("Recaptcha container missing in DOM");
       }
 
       window.recaptchaVerifier = new RecaptchaVerifier(
@@ -313,7 +318,9 @@ export default function App() {
       const confirmation = await signInWithPhoneNumber(auth, formattedNumber, window.recaptchaVerifier);
 
       setConfirmationResult(confirmation);
-      setOtpSent(true);
+      // STRICT FIX: Transition directly to 'otp' step while keeping authMode="register"
+      setAuthMode("register");
+      setStep("otp");
       showToast(`6-Digit SMS verification code sent to ${formattedNumber}`);
     } catch (err) {
       console.error("SMS Dispatch Error:", err);
@@ -329,7 +336,7 @@ export default function App() {
     }
   };
 
-  // --- 3. CONFIRM SMS OTP & FINALIZE REGISTRATION ---
+  // --- 3. CONFIRM SMS OTP & FINALIZE ACCOUNT ---
   const handleVerifyOtpAndRegister = async (enteredOtp) => {
     const code = enteredOtp || otpArray.join("");
     if (code.length !== 6) {
@@ -338,7 +345,7 @@ export default function App() {
     }
     if (!confirmationResult) {
       showToast("Session expired. Please request a new code.");
-      setOtpSent(false);
+      setStep("form");
       return;
     }
 
@@ -365,7 +372,7 @@ export default function App() {
 
       setCurrentUser(newUser);
       localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
-      setOtpSent(false);
+      setStep("form");
       showToast(`Account created! Welcome, ${newUser.name}`);
     } catch (err) {
       console.error("OTP Verification Error:", err);
@@ -452,7 +459,7 @@ export default function App() {
     localStorage.removeItem("infinity_chat_user");
     setCurrentUser(null);
     setAuthMode("login");
-    setOtpSent(false);
+    setStep("form");
     setPhoneInput("");
     setPasswordInput("");
     setNameInput("");
@@ -998,7 +1005,7 @@ export default function App() {
           </p>
 
           {/* 1-Click Google Sign-In (Hidden when verifying OTP) */}
-          {!otpSent && (
+          {step !== "otp" && (
             <>
               <button
                 type="button"
@@ -1050,11 +1057,11 @@ export default function App() {
             </>
           )}
 
-          {/* VIEW 1: 6-DIGIT SMS OTP CONFIRMATION (ACTIVE WHEN otpSent === true) */}
-          {otpSent ? (
+          {/* STEP: 'otp' -> 6-DIGIT SMS OTP VERIFICATION SCREEN */}
+          {step === "otp" ? (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
-                Enter the 6-digit SMS code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
+                Enter 6-digit Verification Code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
               </div>
 
               <OtpInput
@@ -1074,19 +1081,20 @@ export default function App() {
                   opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
                 }}
               >
-                {isSubmitting ? "Verifying..." : "Verify Code & Sign In"}
+                {isSubmitting ? "Verifying..." : "Verify Code & Create Account"}
               </button>
 
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
                 <button
                   type="button"
                   onClick={() => {
-                    setOtpSent(false);
+                    setStep("form");
                     setOtpArray(["", "", "", "", "", ""]);
                   }}
-                  style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px" }}
+                  style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
                 >
-                  Edit Details
+                  <ArrowLeft size={13} />
+                  <span>Change Phone Number</span>
                 </button>
                 <button
                   type="button"
@@ -1100,7 +1108,7 @@ export default function App() {
               </div>
             </div>
           ) : authMode === "login" ? (
-            /* VIEW 2: PHONE + PASSWORD DIRECT LOGIN */
+            /* STEP: 'form' & MODE: 'login' -> PHONE + PASSWORD DIRECT LOGIN */
             <form onSubmit={handlePhonePasswordLogin} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               <div>
                 <label style={styles.label}>Bangladeshi Mobile Number</label>
@@ -1157,6 +1165,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setAuthMode("register");
+                    setStep("form");
                     setPasswordInput("");
                   }}
                   style={{ ...styles.linkBtn, color: THEME.primary }}
@@ -1166,7 +1175,7 @@ export default function App() {
               </div>
             </form>
           ) : (
-            /* VIEW 3: REGISTRATION (Phone, Name, Password & Send SMS OTP) */
+            /* STEP: 'form' & MODE: 'register' -> REGISTRATION DETAILS & SEND SMS OTP */
             <form onSubmit={handleStartRegistration} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div>
                 <label style={styles.label}>Your Name</label>
@@ -1240,7 +1249,10 @@ export default function App() {
                 Already have an account?{" "}
                 <button
                   type="button"
-                  onClick={() => setAuthMode("login")}
+                  onClick={() => {
+                    setAuthMode("login");
+                    setStep("form");
+                  }}
                   style={{ ...styles.linkBtn, color: THEME.primary }}
                 >
                   Log In
