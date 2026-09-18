@@ -33,11 +33,8 @@ import {
   BellOff,
   ShieldCheck,
   RotateCcw,
-  Lock,
   Phone,
-  ArrowRight,
-  Eye,
-  EyeOff
+  ArrowRight
 } from "lucide-react";
 
 // Modular Imports
@@ -71,17 +68,16 @@ export default function App() {
     }
   });
 
-  // Hybrid Auth Form State
-  const [authMode, setAuthMode] = useState("login"); // "login" | "signup" | "google_phone_setup" | "otp"
+  // Auth Form State
+  const [authStep, setAuthStep] = useState("login"); // "login" | "otp"
   const [phoneInput, setPhoneInput] = useState("");
-  const [passwordInput, setPasswordInput] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [nameInput, setNameInput] = useState("");
-  const [avatarInput, setAvatarInput] = useState("https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160");
   const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
   const [confirmationResult, setConfirmationResult] = useState(null);
-  const [pendingGoogleUser, setPendingGoogleUser] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Post-login prompt for Google users without a phone number
+  const [showPhonePrompt, setShowPhonePrompt] = useState(false);
+  const [promptPhoneInput, setPromptPhoneInput] = useState("");
 
   const recaptchaVerifierRef = useRef(null);
 
@@ -154,7 +150,7 @@ export default function App() {
     setTimeout(() => setToastMessage(""), 3500);
   };
 
-  // --- ANDROID HARDWARE BACK BUTTON BEHAVIOR ---
+  // --- ANDROID BACK BUTTON HARDWARE BEHAVIOR ---
   useEffect(() => {
     window.history.pushState({ page: "root" }, "");
     const handlePopState = () => {
@@ -186,25 +182,37 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, [incomingCall, activeCall, lightboxMedia, forwardModalMsg, activeModal, mobileView]);
 
-  // --- RECAPTCHA VERIFIER INITIALIZATION ---
-  const getOrCreateRecaptcha = () => {
-    if (recaptchaVerifierRef.current) return recaptchaVerifierRef.current;
+  // Check if logged-in user needs a phone number setup
+  useEffect(() => {
+    if (currentUser && !currentUser.phone) {
+      setShowPhonePrompt(true);
+    }
+  }, [currentUser]);
+
+  // --- RECAPTCHA INITIALIZER ---
+  const initRecaptcha = () => {
+    if (recaptchaVerifierRef.current) {
+      return recaptchaVerifierRef.current;
+    }
+    const container = document.getElementById("recaptcha-container");
+    if (!container) return null;
+
     try {
       const verifier = new RecaptchaVerifier(
         auth,
-        "recaptcha-mount",
+        "recaptcha-container",
         {
           size: "invisible",
           callback: () => {},
           "expired-callback": () => {
-            showToast("Recaptcha verification expired. Please try again.");
+            showToast("Recaptcha expired. Please try sending OTP again.");
           }
         }
       );
       recaptchaVerifierRef.current = verifier;
       return verifier;
     } catch (err) {
-      console.error("Recaptcha error:", err);
+      console.error("Recaptcha init failed:", err);
       return null;
     }
   };
@@ -219,7 +227,7 @@ export default function App() {
     };
   }, []);
 
-  // --- 1. GOOGLE 1-CLICK AUTHENTICATION ---
+  // --- 1. 1-CLICK GOOGLE SIGN-IN ---
   const handleGoogleSignIn = async () => {
     setIsSubmitting(true);
     try {
@@ -228,215 +236,152 @@ export default function App() {
       const result = await signInWithPopup(auth, provider);
       const gUser = result.user;
 
-      const emailKey = (gUser.email || "").replace(/[^a-zA-Z0-9]/g, "_");
-      const mappingSnap = await getDoc(doc(db, "google_users", emailKey));
+      const userDocRef = doc(db, "users", gUser.uid);
+      const snap = await getDoc(userDocRef);
 
-      if (mappingSnap.exists()) {
-        const { phone } = mappingSnap.data();
-        const userDocRef = doc(db, "users", phone);
-        const userSnap = await getDoc(userDocRef);
-
-        if (userSnap.exists()) {
-          const fullUser = { ...userSnap.data(), uid: gUser.uid, phone };
-          setCurrentUser(fullUser);
-          localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
-          showToast(`Welcome back, ${fullUser.name}!`);
-          setIsSubmitting(false);
-          return;
-        }
+      let fullUser;
+      if (snap.exists()) {
+        fullUser = { ...snap.data(), id: gUser.uid, uid: gUser.uid };
+      } else {
+        fullUser = {
+          id: gUser.uid,
+          uid: gUser.uid,
+          name: gUser.displayName || "Infinity User",
+          email: gUser.email,
+          phone: "",
+          avatar: gUser.photoURL || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+          isOnline: true,
+          lastSeen: new Date().toISOString(),
+          createdAt: new Date().toISOString()
+        };
+        await setDoc(userDocRef, fullUser, { merge: true });
       }
 
-      // First-time Google user -> prompt for Bangladeshi phone setup to sync chat room IDs
-      setPendingGoogleUser({
-        uid: gUser.uid,
-        name: gUser.displayName || "Google User",
-        email: gUser.email,
-        emailKey,
-        avatar: gUser.photoURL || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"
-      });
-      setAuthMode("google_phone_setup");
+      setCurrentUser(fullUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
+      showToast(`Welcome, ${fullUser.name}!`);
+
+      if (!fullUser.phone) {
+        setShowPhonePrompt(true);
+      }
     } catch (err) {
       if (err.code !== "auth/popup-closed-by-user") {
-        showToast("Google Auth failed: " + err.message);
+        showToast("Google Login failed: " + err.message);
       }
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Complete Google Phone Number Link
-  const handleGooglePhoneSubmit = async (e) => {
+  // --- 2. PHONE SMS OTP: SEND CODE ---
+  const handleSendOtp = async (e) => {
     e?.preventDefault();
-    const cleanPhone = normalizePhone(phoneInput);
-    if (!isValidBDPhone(cleanPhone)) {
+    const clean = normalizePhone(phoneInput);
+    if (!isValidBDPhone(clean)) {
       showToast("Please enter a valid 11-digit Bangladeshi mobile number (013-019)");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const newUser = {
-        uid: pendingGoogleUser.uid,
-        name: pendingGoogleUser.name,
-        email: pendingGoogleUser.email,
-        phone: cleanPhone,
-        avatar: pendingGoogleUser.avatar,
-        isOnline: true,
-        lastSeen: new Date().toISOString(),
-        createdAt: new Date().toISOString()
-      };
-
-      await setDoc(doc(db, "users", cleanPhone), newUser, { merge: true });
-      await setDoc(doc(db, "google_users", pendingGoogleUser.emailKey), {
-        phone: cleanPhone,
-        email: pendingGoogleUser.email,
-        createdAt: new Date().toISOString()
-      });
-
-      setCurrentUser(newUser);
-      localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
-      setPendingGoogleUser(null);
-      setPhoneInput("");
-      showToast(`Welcome to Infinity Chat, ${newUser.name}!`);
-    } catch (err) {
-      showToast("Setup failed: " + err.message);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // --- 2. EXISTING USER PHONE & PASSWORD LOGIN ---
-  const handlePhoneLogin = async (e) => {
-    e?.preventDefault();
-    const cleanPhone = normalizePhone(phoneInput);
-    if (!isValidBDPhone(cleanPhone)) {
-      showToast("Please enter a valid 11-digit BD mobile number (013-019)");
-      return;
-    }
-    if (!passwordInput || passwordInput.length < 6) {
-      showToast("Password must be at least 6 characters");
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const userDocRef = doc(db, "users", cleanPhone);
-      const userSnap = await getDoc(userDocRef);
-
-      if (!userSnap.exists()) {
-        showToast("No account found with this number. Please Sign Up.");
-        setAuthMode("signup");
-        setIsSubmitting(false);
-        return;
+      const verifier = initRecaptcha();
+      if (!verifier) {
+        throw new Error("reCAPTCHA element not ready in DOM.");
       }
 
-      const userData = userSnap.data();
-      if (userData.password && userData.password !== passwordInput) {
-        showToast("Incorrect password. Please try again.");
-        setIsSubmitting(false);
-        return;
-      }
-
-      const fullUser = { ...userData, phone: cleanPhone };
-      setCurrentUser(fullUser);
-      localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
-      showToast(`Welcome back, ${fullUser.name}!`);
-    } catch (err) {
-      showToast("Login error: " + err.message);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // --- 3. NEW USER PHONE REGISTRATION WITH SMS OTP VERIFICATION ---
-  const handleStartPhoneSignUp = async (e) => {
-    e?.preventDefault();
-    const cleanPhone = normalizePhone(phoneInput);
-    if (!isValidBDPhone(cleanPhone)) {
-      showToast("Please enter a valid 11-digit BD mobile number (013-019)");
-      return;
-    }
-    if (!nameInput.trim()) {
-      showToast("Please enter your name");
-      return;
-    }
-    if (!passwordInput || passwordInput.length < 6) {
-      showToast("Password must be at least 6 characters");
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      // Check if phone is already registered
-      const userSnap = await getDoc(doc(db, "users", cleanPhone));
-      if (userSnap.exists()) {
-        showToast("This phone number is already registered. Please log in.");
-        setAuthMode("login");
-        setIsSubmitting(false);
-        return;
-      }
-
-      const internationalFormat = `+88${cleanPhone}`;
-      const appVerifier = getOrCreateRecaptcha();
-      if (!appVerifier) throw new Error("Could not initialize reCAPTCHA.");
-
-      const confirmation = await signInWithPhoneNumber(auth, internationalFormat, appVerifier);
+      const formattedNumber = `+88${clean}`;
+      const confirmation = await signInWithPhoneNumber(auth, formattedNumber, verifier);
       setConfirmationResult(confirmation);
-      setAuthMode("otp");
-      showToast(`Verification code sent to ${internationalFormat}`);
+      setAuthStep("otp");
+      showToast(`6-Digit OTP sent via SMS to ${formattedNumber}`);
     } catch (err) {
-      console.error("SMS Error:", err);
+      console.error("SMS OTP error:", err);
       if (recaptchaVerifierRef.current) {
         try {
           recaptchaVerifierRef.current.clear();
           recaptchaVerifierRef.current = null;
         } catch (e) {}
       }
-      showToast("SMS failed: " + (err.message || "Request error"));
+      showToast("Failed to send OTP: " + (err.message || "Request rejected."));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Confirm 6-Digit SMS OTP & Finalize Registration
-  const handleConfirmOtp = async (enteredOtp) => {
+  // --- 2. PHONE SMS OTP: VERIFY CODE ---
+  const handleVerifyOtp = async (enteredOtp) => {
     const code = enteredOtp || otpArray.join("");
     if (code.length !== 6) {
-      showToast("Please enter all 6 digits of the OTP code");
+      showToast("Please enter the complete 6-digit OTP code");
       return;
     }
+
     if (!confirmationResult) {
-      showToast("Session expired. Please start over.");
-      setAuthMode("signup");
+      showToast("Verification session expired. Please send OTP again.");
+      setAuthStep("login");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const userCredential = await confirmationResult.confirm(code);
-      const fbUser = userCredential.user;
-      const cleanPhone = normalizePhone(phoneInput);
+      const res = await confirmationResult.confirm(code);
+      const fbUser = res.user;
+      const clean = normalizePhone(phoneInput);
 
-      const newUser = {
-        uid: fbUser.uid,
-        name: nameInput.trim(),
-        phone: cleanPhone,
-        password: passwordInput,
-        avatar: avatarInput,
-        isOnline: true,
-        lastSeen: new Date().toISOString(),
-        createdAt: new Date().toISOString()
-      };
+      const userDocRef = doc(db, "users", fbUser.uid);
+      const snap = await getDoc(userDocRef);
 
-      await setDoc(doc(db, "users", cleanPhone), newUser);
-      setCurrentUser(newUser);
-      localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
-      showToast(`Registration verified! Welcome, ${newUser.name}`);
+      let fullUser;
+      if (snap.exists()) {
+        fullUser = { ...snap.data(), id: fbUser.uid, uid: fbUser.uid, phone: clean };
+      } else {
+        fullUser = {
+          id: fbUser.uid,
+          uid: fbUser.uid,
+          name: `User ${clean.slice(-4)}`,
+          phone: clean,
+          avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+          isOnline: true,
+          lastSeen: new Date().toISOString(),
+          createdAt: new Date().toISOString()
+        };
+        await setDoc(userDocRef, fullUser, { merge: true });
+      }
+
+      // Also index by phone for fast contact lookups
+      await setDoc(doc(db, "users", clean), fullUser, { merge: true });
+
+      setCurrentUser(fullUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
+      showToast(`Verified! Welcome, ${fullUser.name}`);
     } catch (err) {
-      console.error("OTP confirm error:", err);
-      showToast("Invalid or expired SMS OTP code.");
+      console.error("OTP confirmation error:", err);
+      showToast("Invalid or expired verification code.");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // Save prompt phone number to Firestore
+  const handleSavePromptPhone = async (e) => {
+    e?.preventDefault();
+    const clean = normalizePhone(promptPhoneInput);
+    if (!isValidBDPhone(clean)) {
+      showToast("Please enter a valid 11-digit BD number (013-019)");
+      return;
+    }
+
+    try {
+      const updatedUser = { ...currentUser, phone: clean };
+      await setDoc(doc(db, "users", currentUser.uid || currentUser.id), { phone: clean }, { merge: true });
+      await setDoc(doc(db, "users", clean), updatedUser, { merge: true });
+
+      setCurrentUser(updatedUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(updatedUser));
+      setShowPhonePrompt(false);
+      showToast("Phone number linked successfully!");
+    } catch (err) {
+      showToast("Failed to link phone: " + err.message);
     }
   };
 
@@ -447,10 +392,8 @@ export default function App() {
     } catch (e) {}
     localStorage.removeItem("infinity_chat_user");
     setCurrentUser(null);
-    setAuthMode("login");
+    setAuthStep("login");
     setPhoneInput("");
-    setPasswordInput("");
-    setNameInput("");
     setOtpArray(["", "", "", "", "", ""]);
     setConfirmationResult(null);
     setActiveChat(null);
@@ -461,9 +404,11 @@ export default function App() {
 
   // --- FIRESTORE USER PRESENCE & HEARTBEAT ---
   useEffect(() => {
-    if (!currentUser?.phone || ghostMode) return;
-    const myNorm = normalizePhone(currentUser.phone);
-    const userDocRef = doc(db, "users", myNorm);
+    if (!currentUser?.id && !currentUser?.phone) return;
+    if (ghostMode) return;
+
+    const userKey = currentUser.phone ? normalizePhone(currentUser.phone) : currentUser.uid || currentUser.id;
+    const userDocRef = doc(db, "users", userKey);
 
     setDoc(userDocRef, { isOnline: true, lastSeen: new Date().toISOString() }, { merge: true }).catch(() => {});
 
@@ -481,26 +426,29 @@ export default function App() {
       window.removeEventListener("beforeunload", handleUnload);
       setDoc(userDocRef, { isOnline: false, lastSeen: new Date().toISOString() }, { merge: true }).catch(() => {});
     };
-  }, [currentUser?.phone, ghostMode]);
+  }, [currentUser, ghostMode]);
 
   // --- FIRESTORE CONTACTS REAL-TIME LISTENER ---
   useEffect(() => {
-    if (!currentUser?.phone) return;
-    const myNorm = normalizePhone(currentUser.phone);
+    if (!currentUser) return;
+    const myId = currentUser.uid || currentUser.id;
+    const myPhone = currentUser.phone ? normalizePhone(currentUser.phone) : "";
     const usersCol = collection(db, "users");
 
     const unsub = onSnapshot(usersCol, (snap) => {
       const list = [];
+      const seen = new Set();
       snap.forEach((d) => {
         const data = d.data();
-        const norm = normalizePhone(data.phone || d.id);
-        if (norm && norm !== myNorm) {
+        const contactId = data.phone || data.uid || d.id;
+        if (contactId && contactId !== myPhone && contactId !== myId && !seen.has(contactId)) {
+          seen.add(contactId);
           list.push({
-            id: norm,
-            name: data.name || norm,
-            phone: norm,
+            id: contactId,
+            name: data.name || contactId,
+            phone: data.phone || "",
             avatar: data.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
-            isOnline: data.isOnline || false,
+            isOnline: !!data.isOnline,
             lastSeen: data.lastSeen ? new Date(data.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""
           });
         }
@@ -509,14 +457,14 @@ export default function App() {
     });
 
     return () => unsub();
-  }, [currentUser?.phone]);
+  }, [currentUser]);
 
   // --- FIRESTORE ACTIVE CHAT MESSAGES REAL-TIME LISTENER (<10ms) ---
   useEffect(() => {
-    if (!currentUser?.phone || !activeChat?.id) return;
-    const myNorm = normalizePhone(currentUser.phone);
-    const peerNorm = normalizePhone(activeChat.id);
-    const roomId = getRoomId(myNorm, peerNorm);
+    if (!currentUser || !activeChat?.id) return;
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const peerIdent = activeChat.phone || activeChat.id;
+    const roomId = getRoomId(myIdent, peerIdent);
     const messagesCol = collection(db, "rooms", roomId, "messages");
     const q = query(messagesCol, orderBy("createdAt", "asc"), limit(100));
 
@@ -526,14 +474,14 @@ export default function App() {
         const m = { id: d.id, ...d.data() };
         msgs.push(m);
 
-        if (normalizePhone(m.senderPhone) !== myNorm && m.status !== "read") {
+        if (m.senderPhone !== myIdent && m.status !== "read") {
           updateDoc(doc(db, "rooms", roomId, "messages", d.id), { status: "read" }).catch(() => {});
         }
       });
       setMessagesMap((prev) => ({ ...prev, [roomId]: msgs }));
     });
 
-    const peerDocRef = doc(db, "users", peerNorm);
+    const peerDocRef = doc(db, "users", peerIdent);
     const unsubPeer = onSnapshot(peerDocRef, (d) => {
       if (d.exists()) {
         const data = d.data();
@@ -548,11 +496,11 @@ export default function App() {
       unsub();
       unsubPeer();
     };
-  }, [currentUser?.phone, activeChat?.id]);
+  }, [currentUser, activeChat?.id]);
 
   // --- FIRESTORE CHANNELS & SOCIAL FEED ---
   useEffect(() => {
-    if (!currentUser?.phone) return;
+    if (!currentUser) return;
     const channelsCol = collection(db, "channels");
     const unsub = onSnapshot(channelsCol, (snap) => {
       const chs = [];
@@ -560,7 +508,7 @@ export default function App() {
       setChannels(chs);
     });
     return () => unsub();
-  }, [currentUser?.phone]);
+  }, [currentUser]);
 
   useEffect(() => {
     if (!activeChannel?.id) return;
@@ -575,7 +523,7 @@ export default function App() {
   }, [activeChannel?.id]);
 
   useEffect(() => {
-    if (!currentUser?.phone) return;
+    if (!currentUser) return;
     const feedCol = collection(db, "channel_posts");
     const q = query(feedCol, orderBy("createdAt", "desc"), limit(60));
     const unsub = onSnapshot(q, (snap) => {
@@ -584,19 +532,19 @@ export default function App() {
       setFeedPosts(posts);
     });
     return () => unsub();
-  }, [currentUser?.phone]);
+  }, [currentUser]);
 
   // --- FIRESTORE INCOMING CALLS REAL-TIME LISTENER ---
   useEffect(() => {
-    if (!currentUser?.phone) return;
-    const myNorm = normalizePhone(currentUser.phone);
+    if (!currentUser) return;
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
     const callsCol = collection(db, "calls");
     const unsub = onSnapshot(callsCol, (snap) => {
       snap.docChanges().forEach((change) => {
         if (change.type === "added" || change.type === "modified") {
           const callData = { id: change.doc.id, ...change.doc.data() };
           if (
-            normalizePhone(callData.recipientPhone) === myNorm &&
+            callData.recipientPhone === myIdent &&
             callData.status === "ringing" &&
             !activeCall
           ) {
@@ -607,19 +555,19 @@ export default function App() {
       });
     });
     return () => unsub();
-  }, [currentUser?.phone, activeCall, soundEnabled, selectedRingtone]);
+  }, [currentUser, activeCall, soundEnabled, selectedRingtone]);
 
   // --- ACTIONS: MESSAGING & ATTACHMENTS ---
   const handleSendMessage = async (msgData) => {
-    if (!currentUser?.phone || !activeChat?.id) return;
-    const myNorm = normalizePhone(currentUser.phone);
-    const peerNorm = normalizePhone(activeChat.id);
-    const roomId = getRoomId(myNorm, peerNorm);
+    if (!currentUser || !activeChat?.id) return;
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const peerIdent = activeChat.phone || activeChat.id;
+    const roomId = getRoomId(myIdent, peerIdent);
 
     const newMsg = {
-      senderPhone: myNorm,
+      senderPhone: myIdent,
       senderName: currentUser.name,
-      recipientPhone: peerNorm,
+      recipientPhone: peerIdent,
       content: msgData.content || "",
       type: msgData.type || "text",
       status: "sent",
@@ -651,11 +599,11 @@ export default function App() {
   };
 
   const handleReactMessage = async (msgId, emoji) => {
-    if (!activeChat?.id || !currentUser?.phone) return;
-    const myNorm = normalizePhone(currentUser.phone);
-    const roomId = getRoomId(myNorm, normalizePhone(activeChat.id));
+    if (!activeChat?.id || !currentUser) return;
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const roomId = getRoomId(myIdent, activeChat.phone || activeChat.id);
     await updateDoc(doc(db, "rooms", roomId, "messages", msgId), {
-      [`reactions.${myNorm}`]: emoji
+      [`reactions.${myIdent}`]: emoji
     }).catch(() => {});
   };
 
@@ -680,7 +628,7 @@ export default function App() {
   // --- FORWARDING ---
   const handleExecuteForward = async () => {
     if (!forwardModalMsg || selectedForwardTargets.length === 0) return;
-    const myNorm = normalizePhone(currentUser.phone);
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
 
     for (const targetId of selectedForwardTargets) {
       if (targetId.startsWith("ch_")) {
@@ -699,9 +647,9 @@ export default function App() {
           );
         }
       } else {
-        const roomId = getRoomId(myNorm, targetId);
+        const roomId = getRoomId(myIdent, targetId);
         const newMsg = {
-          senderPhone: myNorm,
+          senderPhone: myIdent,
           senderName: currentUser.name,
           recipientPhone: targetId,
           content: forwardModalMsg.content || "",
@@ -725,24 +673,24 @@ export default function App() {
   // --- CHANNELS & SOCIAL FEED ACTIONS ---
   const handleToggleSubscribe = async (ch, e) => {
     e?.stopPropagation();
-    const myNorm = normalizePhone(currentUser.phone);
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
     const subList = ch.subscribers || [];
-    const isSubbed = subList.includes(myNorm);
-    const updated = isSubbed ? subList.filter((p) => p !== myNorm) : [...subList, myNorm];
+    const isSubbed = subList.includes(myIdent);
+    const updated = isSubbed ? subList.filter((p) => p !== myIdent) : [...subList, myIdent];
 
     await updateDoc(doc(db, "channels", ch.id), { subscribers: updated });
     showToast(isSubbed ? `Unsubscribed from ${ch.name}` : `Subscribed to ${ch.name}!`);
   };
 
   const handleBroadcastPost = async (channel, text, fileData) => {
-    const myNorm = normalizePhone(currentUser.phone);
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
     const postId = Date.now().toString();
     const postPayload = {
       id: postId,
       channelId: channel.id,
       channelName: channel.name,
       channelAvatar: channel.avatar,
-      authorPhone: myNorm,
+      authorPhone: myIdent,
       authorName: currentUser.name,
       content: text || "",
       type: fileData?.type || "text",
@@ -759,7 +707,7 @@ export default function App() {
   };
 
   const handleChannelAdminAction = async (action, payload) => {
-    const myNorm = normalizePhone(currentUser.phone);
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
     if (action === "create") {
       const chId = "ch_" + Date.now();
       const newCh = {
@@ -767,19 +715,18 @@ export default function App() {
         name: payload.name,
         desc: payload.desc,
         avatar: payload.avatar,
-        creatorPhone: myNorm,
-        admins: [myNorm],
-        subscribers: [myNorm],
+        creatorPhone: myIdent,
+        admins: [myIdent],
+        subscribers: [myIdent],
         createdAt: new Date().toISOString()
       };
       await setDoc(doc(db, "channels", chId), newCh);
       setActiveChannel(newCh);
     } else if (action === "promote" && activeChannel) {
-      const targetNorm = normalizePhone(payload.phone);
-      if (!isValidBDPhone(targetNorm)) throw new Error("Invalid BD phone number");
+      const targetIdent = normalizePhone(payload.phone);
       const curAdmins = activeChannel.admins || [];
-      if (!curAdmins.includes(targetNorm)) {
-        await updateDoc(doc(db, "channels", activeChannel.id), { admins: [...curAdmins, targetNorm] });
+      if (!curAdmins.includes(targetIdent)) {
+        await updateDoc(doc(db, "channels", activeChannel.id), { admins: [...curAdmins, targetIdent] });
       }
     }
   };
@@ -794,35 +741,35 @@ export default function App() {
   };
 
   const handleToggleFeedLike = async (postId) => {
-    const myNorm = normalizePhone(currentUser.phone);
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
     const postRef = doc(db, "channel_posts", postId);
     const d = await getDoc(postRef);
     if (!d.exists()) return;
     const likes = d.data().likes || {};
-    if (likes[myNorm]) {
-      delete likes[myNorm];
+    if (likes[myIdent]) {
+      delete likes[myIdent];
     } else {
-      likes[myNorm] = true;
+      likes[myIdent] = true;
     }
     await updateDoc(postRef, { likes });
   };
 
   const handleFeedReaction = async (postId, emoji) => {
-    const myNorm = normalizePhone(currentUser.phone);
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
     await updateDoc(doc(db, "channel_posts", postId), {
-      [`reactions.${myNorm}`]: emoji
+      [`reactions.${myIdent}`]: emoji
     }).catch(() => {});
   };
 
   // --- WEBRTC CALL ENGINE ---
   const startCall = async (peer, type = "audio") => {
-    const myNorm = normalizePhone(currentUser.phone);
-    const peerNorm = normalizePhone(peer.phone || peer.id);
+    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const peerIdent = peer.phone || peer.id;
     const callId = `call_${Date.now()}`;
 
     setActiveCall({
       id: callId,
-      peerPhone: peerNorm,
+      peerPhone: peerIdent,
       peerName: peer.name,
       peerAvatar: peer.avatar,
       type
@@ -850,10 +797,10 @@ export default function App() {
 
       const callDocRef = doc(db, "calls", callId);
       await setDoc(callDocRef, {
-        callerPhone: myNorm,
+        callerPhone: myIdent,
         callerName: currentUser.name,
         callerAvatar: currentUser.avatar,
-        recipientPhone: peerNorm,
+        recipientPhone: peerIdent,
         recipientName: peer.name,
         callType: type,
         status: "ringing",
@@ -958,7 +905,7 @@ export default function App() {
   // --- SORTED CHAT CONTACTS ---
   const sortedContacts = useMemo(() => {
     let list = contacts.filter((c) =>
-      c.name.toLowerCase().includes(searchTerm.toLowerCase()) || c.phone.includes(searchTerm)
+      c.name.toLowerCase().includes(searchTerm.toLowerCase()) || (c.phone && c.phone.includes(searchTerm))
     );
     return list.sort((a, b) => {
       const aPinned = pinnedChats.includes(a.id);
@@ -971,12 +918,12 @@ export default function App() {
 
   // ================= RENDER =================
 
-  // If user is not authenticated, render the Hybrid Auth View
+  // If user is not authenticated, render Login Form
   if (!currentUser) {
     return (
       <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg }}>
-        {/* Invisible Recaptcha Element */}
-        <div id="recaptcha-mount"></div>
+        {/* Real Invisible Recaptcha DOM Element (Always Present) */}
+        <div id="recaptcha-container"></div>
 
         <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
           {/* Logo & Branding */}
@@ -988,9 +935,10 @@ export default function App() {
             Real-time low latency messaging & social channels
           </p>
 
-          {/* 1-CLICK GOOGLE SIGN-IN BUTTON */}
-          {authMode !== "google_phone_setup" && authMode !== "otp" && (
-            <>
+          {/* STEP 1: LOGIN (Google or Phone) */}
+          {authStep === "login" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              {/* 1-Click Google Sign-In */}
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
@@ -1008,11 +956,9 @@ export default function App() {
                   fontSize: "13px",
                   fontWeight: "600",
                   boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-                  opacity: isSubmitting ? 0.7 : 1,
-                  marginBottom: "16px"
+                  opacity: isSubmitting ? 0.7 : 1
                 }}
               >
-                {/* Official Google Icon */}
                 <svg width="18" height="18" viewBox="0 0 24 24">
                   <path
                     fill="#4285F4"
@@ -1034,175 +980,67 @@ export default function App() {
                 <span>Continue with Google</span>
               </button>
 
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "14px 0" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "4px 0" }}>
                 <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
-                <span style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: "600" }}>OR PHONE & PASSWORD</span>
+                <span style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: "600" }}>OR SMS OTP</span>
                 <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
               </div>
-            </>
-          )}
 
-          {/* MODE A: LOGIN (Phone + Password) */}
-          {authMode === "login" && (
-            <form onSubmit={handlePhoneLogin} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-              <div>
-                <label style={styles.label}>Bangladeshi Mobile Number</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
-                  <input
-                    type="tel"
-                    placeholder="01712345678"
-                    value={phoneInput}
-                    onChange={(e) => setPhoneInput(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                    autoFocus
-                    required
-                  />
+              {/* Phone OTP Form */}
+              <form onSubmit={handleSendOtp} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+                <div>
+                  <label style={styles.label}>Bangladeshi Mobile Number</label>
+                  <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                    <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
+                    <input
+                      type="tel"
+                      placeholder="01712345678"
+                      value={phoneInput}
+                      onChange={(e) => setPhoneInput(e.target.value)}
+                      style={{ ...styles.bareInput, color: THEME.text }}
+                      autoFocus
+                      required
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div>
-                <label style={styles.label}>Password</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    placeholder="Enter account password"
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    style={styles.cleanBtn}
-                  >
-                    {showPassword ? <EyeOff size={16} color={THEME.textMuted} /> : <Eye size={16} color={THEME.textMuted} />}
-                  </button>
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.textMuted, fontSize: "11px" }}>
+                  <ShieldCheck size={14} color={THEME.accent} />
+                  <span>A 6-digit SMS verification code will be sent to your phone.</span>
                 </div>
-              </div>
 
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, opacity: isSubmitting ? 0.7 : 1 }}
-              >
-                {isSubmitting ? "Logging in..." : "Log In"}
-              </button>
-
-              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted, marginTop: "4px" }}>
-                Don't have an account?{" "}
                 <button
-                  type="button"
-                  onClick={() => {
-                    setAuthMode("signup");
-                    setPasswordInput("");
+                  type="submit"
+                  disabled={isSubmitting}
+                  style={{
+                    ...styles.primaryBtn,
+                    backgroundColor: THEME.primary,
+                    opacity: isSubmitting ? 0.7 : 1
                   }}
-                  style={{ ...styles.linkBtn, color: THEME.primary }}
                 >
-                  Create Account
+                  {isSubmitting ? "Sending SMS OTP..." : "Send Verification Code"}
                 </button>
-              </div>
-            </form>
+              </form>
+            </div>
           )}
 
-          {/* MODE B: SIGN UP (Name, Phone, Password with SMS OTP Trigger) */}
-          {authMode === "signup" && (
-            <form onSubmit={handleStartPhoneSignUp} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div>
-                <label style={styles.label}>Your Full Name</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <input
-                    type="text"
-                    placeholder="e.g. Tanvir Ahmed"
-                    value={nameInput}
-                    onChange={(e) => setNameInput(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                    required
-                    autoFocus
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label style={styles.label}>Mobile Number (BD)</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
-                  <input
-                    type="tel"
-                    placeholder="01712345678"
-                    value={phoneInput}
-                    onChange={(e) => setPhoneInput(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label style={styles.label}>Create Password (min 6 characters)</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    placeholder="Set account password"
-                    value={passwordInput}
-                    onChange={(e) => setPasswordInput(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    style={styles.cleanBtn}
-                  >
-                    {showPassword ? <EyeOff size={16} color={THEME.textMuted} /> : <Eye size={16} color={THEME.textMuted} />}
-                  </button>
-                </div>
-              </div>
-
-              <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.textMuted, fontSize: "11px", marginTop: "2px" }}>
-                <ShieldCheck size={14} color={THEME.accent} />
-                <span>A 6-digit SMS OTP will verify this number.</span>
-              </div>
-
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, opacity: isSubmitting ? 0.7 : 1 }}
-              >
-                {isSubmitting ? "Sending SMS OTP..." : "Verify & Sign Up"}
-              </button>
-
-              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted, marginTop: "4px" }}>
-                Already registered?{" "}
-                <button
-                  type="button"
-                  onClick={() => setAuthMode("login")}
-                  style={{ ...styles.linkBtn, color: THEME.primary }}
-                >
-                  Log In
-                </button>
-              </div>
-            </form>
-          )}
-
-          {/* MODE C: OTP CONFIRMATION MODAL */}
-          {authMode === "otp" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          {/* STEP 2: 6-DIGIT OTP VERIFICATION */}
+          {authStep === "otp" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
-                Enter the 6-digit SMS code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
+                Enter the 6-digit code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
               </div>
 
               <OtpInput
                 otp={otpArray}
                 setOtp={setOtpArray}
-                onComplete={handleConfirmOtp}
+                onComplete={handleVerifyOtp}
                 THEME={THEME}
               />
 
               <button
                 type="button"
-                onClick={() => handleConfirmOtp(otpArray.join(""))}
+                onClick={() => handleVerifyOtp(otpArray.join(""))}
                 disabled={isSubmitting || otpArray.some((d) => d === "")}
                 style={{
                   ...styles.primaryBtn,
@@ -1210,70 +1048,28 @@ export default function App() {
                   opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
                 }}
               >
-                {isSubmitting ? "Verifying..." : "Confirm & Create Account"}
+                {isSubmitting ? "Verifying..." : "Verify & Sign In"}
               </button>
 
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <button
                   type="button"
-                  onClick={() => setAuthMode("signup")}
+                  onClick={() => setAuthStep("login")}
                   style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px" }}
                 >
-                  Edit Details
+                  Edit Number
                 </button>
                 <button
                   type="button"
-                  onClick={handleStartPhoneSignUp}
+                  onClick={handleSendOtp}
                   disabled={isSubmitting}
                   style={{ ...styles.linkBtn, color: THEME.primary, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
                 >
                   <RotateCcw size={12} />
-                  <span>Resend SMS</span>
+                  <span>Resend Code</span>
                 </button>
               </div>
             </div>
-          )}
-
-          {/* MODE D: GOOGLE FIRST-TIME PHONE NUMBER SETUP */}
-          {authMode === "google_phone_setup" && pendingGoogleUser && (
-            <form onSubmit={handleGooglePhoneSubmit} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", backgroundColor: THEME.card, padding: "10px 12px", borderRadius: "8px", border: `1px solid ${THEME.border}` }}>
-                <img src={pendingGoogleUser.avatar} alt="" style={{ width: "40px", height: "40px", borderRadius: "50%", objectFit: "cover" }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: "700", fontSize: "13px", color: THEME.text }}>{pendingGoogleUser.name}</div>
-                  <div style={{ fontSize: "11px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {pendingGoogleUser.email}
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <label style={styles.label}>Link Bangladeshi Mobile Number</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
-                  <input
-                    type="tel"
-                    placeholder="01712345678"
-                    value={phoneInput}
-                    onChange={(e) => setPhoneInput(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                    autoFocus
-                    required
-                  />
-                </div>
-                <div style={{ fontSize: "11px", color: THEME.textMuted, marginTop: "4px" }}>
-                  Used to sync contacts and chat conversations.
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, opacity: isSubmitting ? 0.7 : 1 }}
-              >
-                {isSubmitting ? "Linking..." : "Complete Setup & Chat"}
-              </button>
-            </form>
           )}
         </div>
       </div>
@@ -1287,6 +1083,38 @@ export default function App() {
       {toastMessage && (
         <div style={{ ...styles.toast, backgroundColor: THEME.primary }}>
           {toastMessage}
+        </div>
+      )}
+
+      {/* --- MODAL: POST-LOGIN PHONE NUMBER PROMPT --- */}
+      {showPhonePrompt && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>Link Mobile Number</div>
+              <button onClick={() => setShowPhonePrompt(false)} style={styles.cleanBtn}><X size={18} color={THEME.text} /></button>
+            </div>
+            <form onSubmit={handleSavePromptPhone} style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div style={{ fontSize: "12px", color: THEME.textMuted }}>
+                Link your Bangladeshi mobile number so contacts can discover you and start encrypted chats.
+              </div>
+              <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
+                <input
+                  type="tel"
+                  placeholder="01712345678"
+                  value={promptPhoneInput}
+                  onChange={(e) => setPromptPhoneInput(e.target.value)}
+                  style={{ ...styles.bareInput, color: THEME.text }}
+                  autoFocus
+                  required
+                />
+              </div>
+              <button type="submit" style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
+                Save & Continue
+              </button>
+            </form>
+          </div>
         </div>
       )}
 
@@ -1311,7 +1139,7 @@ export default function App() {
             <img src={currentUser.avatar} alt="" style={styles.roundAvatar} />
             <div>
               <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>{currentUser.name}</div>
-              <div style={{ fontSize: "11px", color: THEME.accent }}>{currentUser.phone}</div>
+              <div style={{ fontSize: "11px", color: THEME.accent }}>{currentUser.phone || "No phone linked"}</div>
             </div>
           </div>
 
@@ -1433,7 +1261,7 @@ export default function App() {
               <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted }}>
                 <MessageSquare size={36} style={{ margin: "0 auto 8px" }} />
                 <div style={{ fontSize: "14px" }}>No chats found</div>
-                <div style={{ fontSize: "11px", marginTop: "4px" }}>Add a Bangladeshi mobile contact to start chatting</div>
+                <div style={{ fontSize: "11px", marginTop: "4px" }}>Add a contact to start chatting</div>
               </div>
             ) : (
               sortedContacts.map((c) => {
@@ -1481,7 +1309,7 @@ export default function App() {
                         </div>
                       </div>
                       <div style={{ fontSize: "11px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        {c.phone}
+                        {c.phone || "Active contact"}
                       </div>
                     </div>
                   </div>
@@ -1557,7 +1385,7 @@ export default function App() {
           <ChatView
             activeChat={activeChat}
             setActiveChat={setActiveChat}
-            messages={messagesMap[getRoomId(normalizePhone(currentUser.phone), normalizePhone(activeChat.id))] || []}
+            messages={messagesMap[getRoomId(currentUser.phone || currentUser.uid || currentUser.id, activeChat.phone || activeChat.id)] || []}
             currentUser={currentUser}
             peerPresence={peerPresence}
             THEME={THEME}
@@ -1735,7 +1563,7 @@ export default function App() {
                     <img src={c.avatar} alt="" style={{ width: "32px", height: "32px", borderRadius: "50%" }} />
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>{c.name}</div>
-                      <div style={{ fontSize: "10px", color: THEME.textMuted }}>{c.phone}</div>
+                      <div style={{ fontSize: "10px", color: THEME.textMuted }}>{c.phone || c.id}</div>
                     </div>
                     <input type="checkbox" checked={isSelected} readOnly style={{ accentColor: THEME.primary }} />
                   </div>
@@ -1743,11 +1571,11 @@ export default function App() {
               })}
 
               {/* Channels Where User is Admin */}
-              {channels.filter((ch) => ch.creatorPhone === normalizePhone(currentUser?.phone) || ch.admins?.includes(normalizePhone(currentUser?.phone))).length > 0 && (
+              {channels.filter((ch) => ch.creatorPhone === (currentUser?.phone || currentUser?.uid) || ch.admins?.includes(currentUser?.phone || currentUser?.uid)).length > 0 && (
                 <>
                   <div style={{ fontSize: "11px", fontWeight: "700", color: THEME.textMuted, textTransform: "uppercase", marginTop: "8px" }}>My Channels</div>
                   {channels
-                    .filter((ch) => ch.creatorPhone === normalizePhone(currentUser?.phone) || ch.admins?.includes(normalizePhone(currentUser?.phone)))
+                    .filter((ch) => ch.creatorPhone === (currentUser?.phone || currentUser?.uid) || ch.admins?.includes(currentUser?.phone || currentUser?.uid))
                     .map((ch) => {
                       const chKey = `ch_${ch.id}`;
                       const isSelected = selectedForwardTargets.includes(chKey);
@@ -1897,18 +1725,18 @@ export default function App() {
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border, textAlign: "center", padding: "20px" }}>
             <img src={viewedProfile.avatar} alt="" style={{ width: "90px", height: "90px", borderRadius: "50%", margin: "0 auto 12px", objectFit: "cover" }} />
             <h3 style={{ margin: "0 0 4px", color: THEME.text }}>{viewedProfile.name}</h3>
-            <p style={{ fontSize: "12px", color: THEME.accent, margin: "0 0 16px" }}>{viewedProfile.phone}</p>
+            <p style={{ fontSize: "12px", color: THEME.accent, margin: "0 0 16px" }}>{viewedProfile.phone || "Google User"}</p>
             <button
               onClick={() => {
                 setActiveModal(null);
-                if (viewedProfile.phone !== currentUser.phone) {
+                if (viewedProfile.id !== (currentUser.phone || currentUser.uid)) {
                   setActiveChat(viewedProfile);
                   setMobileView("chat");
                 }
               }}
               style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}
             >
-              {viewedProfile.phone === currentUser.phone ? "Close" : "Send Direct Message"}
+              {viewedProfile.id === (currentUser.phone || currentUser.uid) ? "Close" : "Send Direct Message"}
             </button>
           </div>
         </div>
