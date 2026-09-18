@@ -36,8 +36,6 @@ import {
 import {
   db,
   RTC_CONFIG,
-  normalizePhone,
-  isValidBDPhone,
   getRoomId,
   soundEngine,
   TRANSLATIONS,
@@ -50,6 +48,17 @@ import ChatView from "./components/ChatView";
 import CallModal from "./components/CallModal";
 import Settings from "./components/Settings";
 import OtpInput from "./components/OtpInput";
+
+// Standard 11-digit clean phone sanitizer (No +880 or E.164 requirements)
+const clean11DigitPhone = (val) => {
+  if (!val) return "";
+  const digits = val.toString().replace(/\D/g, "");
+  // If user pasted with 880 prefix, trim to 11 digits
+  if (digits.startsWith("880") && digits.length === 13) {
+    return digits.slice(2);
+  }
+  return digits.slice(0, 11);
+};
 
 export default function App() {
   // --- USER AUTH & PERSISTENCE ---
@@ -66,12 +75,12 @@ export default function App() {
   // authStep: 'login' | 'register' | 'otp'
   const [authStep, setAuthStep] = useState("login");
 
-  // Separate Login Form State
+  // Separate Login Form State (11-digit phone)
   const [loginPhone, setLoginPhone] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [showLoginPassword, setShowLoginPassword] = useState(false);
 
-  // Separate Register Form State
+  // Separate Register Form State (11-digit phone)
   const [registerName, setRegisterName] = useState("");
   const [registerPhone, setRegisterPhone] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
@@ -183,12 +192,12 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, [incomingCall, activeCall, lightboxMedia, forwardModalMsg, activeModal, mobileView]);
 
-  // --- 1. DIRECT PHONE + PASSWORD LOGIN ---
+  // --- 1. DIRECT 11-DIGIT PHONE + PASSWORD LOGIN ---
   const handlePhonePasswordLogin = async (e) => {
     e?.preventDefault();
-    const cleanPhone = normalizePhone(loginPhone);
-    if (!isValidBDPhone(cleanPhone)) {
-      showToast("Please enter a valid 11-digit Bangladeshi number (013-019)");
+    const cleanPhone = clean11DigitPhone(loginPhone);
+    if (cleanPhone.length !== 11) {
+      showToast("Please enter a valid 11-digit phone number (e.g. 01712345678)");
       return;
     }
     if (!loginPassword || loginPassword.length < 6) {
@@ -203,7 +212,7 @@ export default function App() {
 
       if (!userSnap.exists()) {
         showToast("Account not found. Please register your account.");
-        setRegisterPhone(loginPhone);
+        setRegisterPhone(cleanPhone);
         setAuthStep("register");
         setIsSubmitting(false);
         return;
@@ -227,12 +236,12 @@ export default function App() {
     }
   };
 
-  // --- 2. CUSTOM ON-SCREEN OTP GENERATION (100% RELIABLE) ---
+  // --- 2. 11-DIGIT REGISTRATION & INSTANT LOCAL OTP GENERATION ---
   const handleStartRegistration = async (e) => {
     e?.preventDefault();
-    const cleanPhone = normalizePhone(registerPhone);
-    if (!isValidBDPhone(cleanPhone)) {
-      showToast("Please enter a valid 11-digit Bangladeshi number (013-019)");
+    const cleanPhone = clean11DigitPhone(registerPhone);
+    if (cleanPhone.length !== 11) {
+      showToast("Please enter a valid 11-digit phone number (e.g. 01712345678)");
       return;
     }
     if (!registerName.trim()) {
@@ -249,29 +258,32 @@ export default function App() {
       // Check if user already exists
       const userSnap = await getDoc(doc(db, "users", cleanPhone));
       if (userSnap.exists()) {
-        showToast("This number is already registered. Please log in.");
-        setLoginPhone(registerPhone);
+        showToast("This phone number is already registered. Please log in.");
+        setLoginPhone(cleanPhone);
         setAuthStep("login");
         setIsSubmitting(false);
         return;
       }
 
-      // Generate instant 6-digit verification code locally
+      // Generate 6-digit random code locally
       const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
       setGeneratedOtp(randomCode);
       setOtpArray(["", "", "", "", "", ""]);
 
-      // Switch view to OTP input immediately
+      // Show clear on-screen prompt
+      alert(`Your Verification Code is: ${randomCode}`);
+
+      // Set authStep to 'otp' immediately to view the OTP input view seamlessly
       setAuthStep("otp");
-      showToast(`Verification code generated: ${randomCode}`);
+      showToast(`Verification code: ${randomCode}`);
     } catch (err) {
-      showToast("Failed to initiate registration: " + err.message);
+      showToast("Registration error: " + err.message);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- 3. VERIFY CUSTOM OTP & CREATE ACCOUNT IN FIRESTORE ---
+  // --- 3. VERIFY CUSTOM OTP & SAVE 11-DIGIT ACCOUNT PROFILE ---
   const handleVerifyOtpAndRegister = async (enteredOtp) => {
     const code = enteredOtp || otpArray.join("");
     if (code.length !== 6) {
@@ -286,7 +298,7 @@ export default function App() {
 
     setIsSubmitting(true);
     try {
-      const cleanPhone = normalizePhone(registerPhone);
+      const cleanPhone = clean11DigitPhone(registerPhone);
       const newUser = {
         id: cleanPhone,
         uid: cleanPhone,
@@ -344,7 +356,7 @@ export default function App() {
     if (!currentUser?.id && !currentUser?.phone) return;
     if (ghostMode) return;
 
-    const userKey = currentUser.phone ? normalizePhone(currentUser.phone) : currentUser.id;
+    const userKey = currentUser.phone || currentUser.id;
     const userDocRef = doc(db, "users", userKey);
 
     setDoc(userDocRef, { isOnline: true, lastSeen: new Date().toISOString() }, { merge: true }).catch(() => {});
@@ -369,7 +381,7 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
     const myId = currentUser.id;
-    const myPhone = currentUser.phone ? normalizePhone(currentUser.phone) : "";
+    const myPhone = currentUser.phone || "";
     const usersCol = collection(db, "users");
 
     const unsub = onSnapshot(usersCol, (snap) => {
@@ -660,7 +672,7 @@ export default function App() {
       await setDoc(doc(db, "channels", chId), newCh);
       setActiveChannel(newCh);
     } else if (action === "promote" && activeChannel) {
-      const targetIdent = normalizePhone(payload.phone);
+      const targetIdent = clean11DigitPhone(payload.phone);
       const curAdmins = activeChannel.admins || [];
       if (!curAdmins.includes(targetIdent)) {
         await updateDoc(doc(db, "channels", activeChannel.id), { admins: [...curAdmins, targetIdent] });
@@ -873,7 +885,7 @@ export default function App() {
           {authStep === "otp" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
-                Verification code for <strong>+880 {normalizePhone(registerPhone)}</strong>
+                Verification code for <strong>{clean11DigitPhone(registerPhone)}</strong>
               </div>
 
               {/* High-visibility on-screen verification banner */}
@@ -915,7 +927,7 @@ export default function App() {
                   }}
                 >
                   <CheckCircle2 size={12} />
-                  <span>Tap to Auto-Fill</span>
+                  <span>Tap to Auto-Fill & Enter</span>
                 </button>
               </div>
 
@@ -953,7 +965,7 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={handleStartRegistration}
+                  onClick={(e) => handleStartRegistration(e)}
                   disabled={isSubmitting}
                   style={{ ...styles.linkBtn, color: THEME.primary, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
                 >
@@ -964,18 +976,18 @@ export default function App() {
             </div>
           )}
 
-          {/* STEP 2: 'login' -> PHONE + PASSWORD DIRECT LOGIN */}
+          {/* STEP 2: 'login' -> STANDARD 11-DIGIT PHONE + PASSWORD LOGIN */}
           {authStep === "login" && (
             <form onSubmit={handlePhonePasswordLogin} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               <div>
-                <label style={styles.label}>Bangladeshi Mobile Number</label>
+                <label style={styles.label}>11-Digit Phone Number</label>
                 <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
                   <input
                     type="tel"
                     placeholder="01712345678"
+                    maxLength={11}
                     value={loginPhone}
-                    onChange={(e) => setLoginPhone(e.target.value)}
+                    onChange={(e) => setLoginPhone(clean11DigitPhone(e.target.value))}
                     style={{ ...styles.bareInput, color: THEME.text }}
                     autoFocus
                     required
@@ -1032,7 +1044,7 @@ export default function App() {
             </form>
           )}
 
-          {/* STEP 3: 'register' -> REGISTRATION DETAILS & GENERATE OTP */}
+          {/* STEP 3: 'register' -> REGISTRATION DETAILS & LOCAL ON-SCREEN OTP */}
           {authStep === "register" && (
             <form onSubmit={handleStartRegistration} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div>
@@ -1051,14 +1063,14 @@ export default function App() {
               </div>
 
               <div>
-                <label style={styles.label}>Mobile Number (+880)</label>
+                <label style={styles.label}>11-Digit Phone Number</label>
                 <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
                   <input
                     type="tel"
                     placeholder="01712345678"
+                    maxLength={11}
                     value={registerPhone}
-                    onChange={(e) => setRegisterPhone(e.target.value)}
+                    onChange={(e) => setRegisterPhone(clean11DigitPhone(e.target.value))}
                     style={{ ...styles.bareInput, color: THEME.text }}
                     required
                   />
@@ -1088,7 +1100,7 @@ export default function App() {
 
               <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.textMuted, fontSize: "11px" }}>
                 <ShieldCheck size={14} color={THEME.accent} />
-                <span>Instant 6-digit verification code will be generated on next step.</span>
+                <span>Instant 6-digit verification code will appear immediately on screen.</span>
               </div>
 
               <button
@@ -1154,7 +1166,7 @@ export default function App() {
             <img src={currentUser.avatar} alt="" style={styles.roundAvatar} />
             <div>
               <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>{currentUser.name}</div>
-              <div style={{ fontSize: "11px", color: THEME.accent }}>{currentUser.phone || "No phone linked"}</div>
+              <div style={{ fontSize: "11px", color: THEME.accent }}>{currentUser.phone || "Active"}</div>
             </div>
           </div>
 
@@ -1687,15 +1699,15 @@ export default function App() {
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
             <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
-              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>Add Bangladeshi Contact</div>
+              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>Add Contact by 11-Digit Number</div>
               <button onClick={() => setActiveModal(null)} style={styles.cleanBtn}><X size={18} color={THEME.text} /></button>
             </div>
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                const norm = normalizePhone(contactSearchInput);
-                if (!isValidBDPhone(norm)) {
-                  showToast("Please enter a valid 11-digit BD number (013-019)");
+                const norm = clean11DigitPhone(contactSearchInput);
+                if (norm.length !== 11) {
+                  showToast("Please enter an 11-digit number (e.g. 01712345678)");
                   return;
                 }
                 const docSnap = await getDoc(doc(db, "users", norm));
@@ -1712,14 +1724,14 @@ export default function App() {
               style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}
             >
               <div>
-                <label style={styles.label}>Mobile Number (BD)</label>
+                <label style={styles.label}>11-Digit Phone Number</label>
                 <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <span style={{ fontSize: "13px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
                   <input
                     type="tel"
                     placeholder="01712345678"
+                    maxLength={11}
                     value={contactSearchInput}
-                    onChange={(e) => setContactSearchInput(e.target.value)}
+                    onChange={(e) => setContactSearchInput(clean11DigitPhone(e.target.value))}
                     style={{ ...styles.bareInput, color: THEME.text }}
                     autoFocus
                     required
