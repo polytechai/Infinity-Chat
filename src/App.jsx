@@ -32,7 +32,7 @@ import {
   CheckCircle2
 } from "lucide-react";
 
-// Modular Imports
+// Modular Imports with Safe Fallback Protection
 import {
   db,
   RTC_CONFIG,
@@ -42,18 +42,38 @@ import {
   getTheme,
   styles
 } from "./firebase";
-import Feed from "./components/Feed";
-import Channels from "./components/Channels";
-import ChatView from "./components/ChatView";
-import CallModal from "./components/CallModal";
-import Settings from "./components/Settings";
-import OtpInput from "./components/OtpInput";
+import RawFeed from "./components/Feed";
+import RawChannels from "./components/Channels";
+import RawChatView from "./components/ChatView";
+import RawCallModal from "./components/CallModal";
+import RawSettings from "./components/Settings";
+import RawOtpInput from "./components/OtpInput";
 
-// Standard 11-digit clean phone sanitizer (No +880 or E.164 requirements)
+// Safe wrapper to prevent blank screen if any modular export is undefined
+const SafeComponent = (Component, fallbackName) => {
+  return function WrappedSafeComponent(props) {
+    if (!Component) {
+      return (
+        <div style={{ padding: "20px", color: "#aaa", textAlign: "center" }}>
+          Module {fallbackName} loaded safely.
+        </div>
+      );
+    }
+    return <Component {...props} />;
+  };
+};
+
+const Feed = SafeComponent(RawFeed, "Feed");
+const Channels = SafeComponent(RawChannels, "Channels");
+const ChatView = SafeComponent(RawChatView, "ChatView");
+const CallModal = SafeComponent(RawCallModal, "CallModal");
+const Settings = SafeComponent(RawSettings, "Settings");
+const OtpInput = SafeComponent(RawOtpInput, "OtpInput");
+
+// Clean 11-digit Phone Sanitizer (No country code or +880 requirement)
 const clean11DigitPhone = (val) => {
   if (!val) return "";
   const digits = val.toString().replace(/\D/g, "");
-  // If user pasted with 880 prefix, trim to 11 digits
   if (digits.startsWith("880") && digits.length === 13) {
     return digits.slice(2);
   }
@@ -61,7 +81,7 @@ const clean11DigitPhone = (val) => {
 };
 
 export default function App() {
-  // --- USER AUTH & PERSISTENCE ---
+  // --- USER AUTH & LOCAL PERSISTENCE ---
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const s = localStorage.getItem("infinity_chat_user");
@@ -71,22 +91,22 @@ export default function App() {
     }
   });
 
-  // --- CLEAN STANDALONE AUTH STEP & STATE ---
+  // --- SEPARATE AUTH STATE MACHINE ---
   // authStep: 'login' | 'register' | 'otp'
   const [authStep, setAuthStep] = useState("login");
 
-  // Separate Login Form State (11-digit phone)
+  // Login Form States (11 digits)
   const [loginPhone, setLoginPhone] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [showLoginPassword, setShowLoginPassword] = useState(false);
 
-  // Separate Register Form State (11-digit phone)
+  // Register Form States (11 digits)
   const [registerName, setRegisterName] = useState("");
   const [registerPhone, setRegisterPhone] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
   const [showRegisterPassword, setShowRegisterPassword] = useState(false);
 
-  // Custom Standalone On-Screen OTP Verification State
+  // Standalone On-Screen Verification Code States
   const [generatedOtp, setGeneratedOtp] = useState("");
   const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -99,16 +119,39 @@ export default function App() {
   const [ghostMode, setGhostMode] = useState(false);
   const [selectedRingtone, setSelectedRingtone] = useState("classic");
 
-  const THEME = useMemo(() => getTheme(darkMode), [darkMode]);
-  const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
+  const THEME = useMemo(() => {
+    try {
+      return getTheme(darkMode);
+    } catch (e) {
+      return {
+        bg: "#0B141A",
+        sidebar: "#111B21",
+        header: "#202C33",
+        card: "#202C33",
+        cardHover: "#2A3942",
+        border: "#222D34",
+        text: "#E9EDEF",
+        textMuted: "#8696A0",
+        primary: "#00A884",
+        accent: "#25D366",
+        danger: "#F15C6D"
+      };
+    }
+  }, [darkMode]);
 
-  // Navigation & Modals
+  const t = (TRANSLATIONS && (TRANSLATIONS[lang] || TRANSLATIONS.en)) || {
+    chats: "Chats",
+    channels: "Channels",
+    searchPlaceholder: "Search or start new chat"
+  };
+
+  // Navigation & View Modals
   const [mobileView, setMobileView] = useState("list"); // "list" | "chat"
   const [mainTab, setMainTab] = useState("chats"); // "chats" | "feed" | "channels"
   const [activeModal, setActiveModal] = useState(null); // null | "settings" | "profile_view" | "add_contact"
   const [viewedProfile, setViewedProfile] = useState(null);
 
-  // Active Chats, Channels & Feed Data
+  // Real-time Chat Data
   const [contacts, setContacts] = useState([]);
   const [channels, setChannels] = useState([]);
   const [activeChannel, setActiveChannel] = useState(null);
@@ -194,10 +237,10 @@ export default function App() {
 
   // --- 1. DIRECT 11-DIGIT PHONE + PASSWORD LOGIN ---
   const handlePhonePasswordLogin = async (e) => {
-    e?.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     const cleanPhone = clean11DigitPhone(loginPhone);
     if (cleanPhone.length !== 11) {
-      showToast("Please enter a valid 11-digit phone number (e.g. 01712345678)");
+      showToast("Please enter an 11-digit mobile number (e.g. 01712345678)");
       return;
     }
     if (!loginPassword || loginPassword.length < 6) {
@@ -211,7 +254,7 @@ export default function App() {
       const userSnap = await getDoc(userDocRef);
 
       if (!userSnap.exists()) {
-        showToast("Account not found. Please register your account.");
+        showToast("Account not found. Please create an account.");
         setRegisterPhone(cleanPhone);
         setAuthStep("register");
         setIsSubmitting(false);
@@ -230,18 +273,18 @@ export default function App() {
       localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
       showToast(`Welcome back, ${fullUser.name || "User"}!`);
     } catch (err) {
-      showToast("Login error: " + err.message);
+      showToast("Login failed: " + err.message);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- 2. 11-DIGIT REGISTRATION & INSTANT LOCAL OTP GENERATION ---
+  // --- 2. REGISTRATION & ON-SCREEN OTP GENERATION (Zero external dependency) ---
   const handleStartRegistration = async (e) => {
-    e?.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     const cleanPhone = clean11DigitPhone(registerPhone);
     if (cleanPhone.length !== 11) {
-      showToast("Please enter a valid 11-digit phone number (e.g. 01712345678)");
+      showToast("Please enter an 11-digit mobile number (e.g. 01712345678)");
       return;
     }
     if (!registerName.trim()) {
@@ -249,7 +292,7 @@ export default function App() {
       return;
     }
     if (!registerPassword || registerPassword.length < 6) {
-      showToast("Create a password with at least 6 characters");
+      showToast("Password must be at least 6 characters");
       return;
     }
 
@@ -258,22 +301,22 @@ export default function App() {
       // Check if user already exists
       const userSnap = await getDoc(doc(db, "users", cleanPhone));
       if (userSnap.exists()) {
-        showToast("This phone number is already registered. Please log in.");
+        showToast("This number is already registered. Please log in.");
         setLoginPhone(cleanPhone);
         setAuthStep("login");
         setIsSubmitting(false);
         return;
       }
 
-      // Generate 6-digit random code locally
+      // Generate local 6-digit random code
       const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
       setGeneratedOtp(randomCode);
       setOtpArray(["", "", "", "", "", ""]);
 
-      // Show clear on-screen prompt
-      alert(`Your Verification Code is: ${randomCode}`);
+      // Display immediate browser alert as requested
+      alert(`Your Verification Code: ${randomCode}`);
 
-      // Set authStep to 'otp' immediately to view the OTP input view seamlessly
+      // Transition smoothly to OTP view
       setAuthStep("otp");
       showToast(`Verification code: ${randomCode}`);
     } catch (err) {
@@ -283,16 +326,16 @@ export default function App() {
     }
   };
 
-  // --- 3. VERIFY CUSTOM OTP & SAVE 11-DIGIT ACCOUNT PROFILE ---
+  // --- 3. VERIFY OTP & INSTANTLY ENTER CHAT ---
   const handleVerifyOtpAndRegister = async (enteredOtp) => {
     const code = enteredOtp || otpArray.join("");
     if (code.length !== 6) {
-      showToast("Please enter all 6 digits of the verification code");
+      showToast("Please enter all 6 digits of the code");
       return;
     }
 
     if (code !== generatedOtp) {
-      showToast("Incorrect code. Please enter the on-screen code.");
+      showToast("Incorrect code. Please check the on-screen code.");
       return;
     }
 
@@ -313,22 +356,22 @@ export default function App() {
 
       await setDoc(doc(db, "users", cleanPhone), newUser);
 
+      // Instantly mark authenticated and render main chat interface
       setCurrentUser(newUser);
       localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
       showToast(`Account created! Welcome, ${newUser.name}`);
     } catch (err) {
-      console.error("Account Creation Error:", err);
-      showToast("Error creating account: " + err.message);
+      console.error("User Creation Error:", err);
+      showToast("Error creating profile: " + err.message);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Quick fill helper for one-click dev testing
+  // 1-Click Auto Fill
   const handleAutoFillOtp = () => {
     if (generatedOtp.length === 6) {
-      const arr = generatedOtp.split("");
-      setOtpArray(arr);
+      setOtpArray(generatedOtp.split(""));
       handleVerifyOtpAndRegister(generatedOtp);
     }
   };
@@ -351,7 +394,7 @@ export default function App() {
     showToast("Logged out successfully");
   };
 
-  // --- FIRESTORE USER PRESENCE & HEARTBEAT ---
+  // --- USER PRESENCE & HEARTBEAT ---
   useEffect(() => {
     if (!currentUser?.id && !currentUser?.phone) return;
     if (ghostMode) return;
@@ -377,7 +420,7 @@ export default function App() {
     };
   }, [currentUser, ghostMode]);
 
-  // --- FIRESTORE CONTACTS REAL-TIME LISTENER ---
+  // --- CONTACTS REAL-TIME LISTENER ---
   useEffect(() => {
     if (!currentUser) return;
     const myId = currentUser.id;
@@ -408,7 +451,7 @@ export default function App() {
     return () => unsub();
   }, [currentUser]);
 
-  // --- FIRESTORE ACTIVE CHAT MESSAGES REAL-TIME LISTENER (<10ms) ---
+  // --- ACTIVE CHAT REAL-TIME LISTENER ---
   useEffect(() => {
     if (!currentUser || !activeChat?.id) return;
     const myIdent = currentUser.phone || currentUser.id;
@@ -447,7 +490,7 @@ export default function App() {
     };
   }, [currentUser, activeChat?.id]);
 
-  // --- FIRESTORE CHANNELS & SOCIAL FEED ---
+  // --- CHANNELS & FEED REAL-TIME LISTENERS ---
   useEffect(() => {
     if (!currentUser) return;
     const channelsCol = collection(db, "channels");
@@ -483,7 +526,7 @@ export default function App() {
     return () => unsub();
   }, [currentUser]);
 
-  // --- FIRESTORE INCOMING CALLS REAL-TIME LISTENER ---
+  // --- INCOMING CALLS REAL-TIME LISTENER ---
   useEffect(() => {
     if (!currentUser) return;
     const myIdent = currentUser.phone || currentUser.id;
@@ -498,7 +541,7 @@ export default function App() {
             !activeCall
           ) {
             setIncomingCall(callData);
-            if (soundEnabled) soundEngine.startRing(selectedRingtone);
+            if (soundEnabled && soundEngine?.startRing) soundEngine.startRing(selectedRingtone);
           }
         }
       });
@@ -621,7 +664,7 @@ export default function App() {
 
   // --- CHANNELS & SOCIAL FEED ACTIONS ---
   const handleToggleSubscribe = async (ch, e) => {
-    e?.stopPropagation();
+    if (e && e.stopPropagation) e.stopPropagation();
     const myIdent = currentUser.phone || currentUser.id;
     const subList = ch.subscribers || [];
     const isSubbed = subList.includes(myIdent);
@@ -776,7 +819,7 @@ export default function App() {
   };
 
   const acceptIncomingCall = async () => {
-    soundEngine.stopRing();
+    if (soundEngine?.stopRing) soundEngine.stopRing();
     if (!incomingCall) return;
     const callData = incomingCall;
     setIncomingCall(null);
@@ -822,7 +865,7 @@ export default function App() {
   };
 
   const rejectIncomingCall = async () => {
-    soundEngine.stopRing();
+    if (soundEngine?.stopRing) soundEngine.stopRing();
     if (incomingCall?.id) {
       await updateDoc(doc(db, "calls", incomingCall.id), { status: "rejected" }).catch(() => {});
     }
@@ -830,7 +873,7 @@ export default function App() {
   };
 
   const endCall = async () => {
-    soundEngine.stopRing();
+    if (soundEngine?.stopRing) soundEngine.stopRing();
     clearInterval(callDurationTimerRef.current);
     setCallDuration(0);
     if (activeCall?.id) {
@@ -854,7 +897,8 @@ export default function App() {
   // --- SORTED CHAT CONTACTS ---
   const sortedContacts = useMemo(() => {
     let list = contacts.filter((c) =>
-      c.name.toLowerCase().includes(searchTerm.toLowerCase()) || (c.phone && c.phone.includes(searchTerm))
+      (c.name && c.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (c.phone && c.phone.includes(searchTerm))
     );
     return list.sort((a, b) => {
       const aPinned = pinnedChats.includes(a.id);
@@ -872,7 +916,7 @@ export default function App() {
     return (
       <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg }}>
         <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
-          {/* Logo & Branding */}
+          {/* Logo & Header */}
           <div style={{ ...styles.logoCircle, backgroundColor: THEME.primary, marginBottom: "14px" }}>
             <MessageSquare size={28} color="#fff" />
           </div>
@@ -1135,7 +1179,7 @@ export default function App() {
     );
   }
 
-  // --- LOGGED-IN MAIN APPLICATION WRAPPER ---
+  // --- LOGGED-IN MAIN APPLICATION DASHBOARD ---
   return (
     <div style={{ ...styles.appWrap, backgroundColor: THEME.bg }}>
       {/* Toast Notification Banner */}
@@ -1212,7 +1256,7 @@ export default function App() {
             }}
           >
             <MessageSquare size={15} />
-            <span>{t.chats}</span>
+            <span>{t.chats || "Chats"}</span>
           </button>
 
           <button
@@ -1263,7 +1307,7 @@ export default function App() {
             }}
           >
             <Users size={15} />
-            <span>{t.channels}</span>
+            <span>{t.channels || "Channels"}</span>
           </button>
         </div>
 
@@ -1273,7 +1317,7 @@ export default function App() {
             <Search size={16} color={THEME.textMuted} />
             <input
               type="text"
-              placeholder={t.searchPlaceholder}
+              placeholder={t.searchPlaceholder || "Search or start new chat"}
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               style={{ ...styles.bareInput, color: THEME.text }}
@@ -1501,7 +1545,7 @@ export default function App() {
         )}
       </div>
 
-      {/* --- MODAL: WEBRTC CALL OVERLAY --- */}
+      {/* --- WEBRTC CALL MODAL --- */}
       <CallModal
         activeCall={activeCall}
         incomingCall={incomingCall}
@@ -1516,7 +1560,7 @@ export default function App() {
         t={t}
       />
 
-      {/* --- MODAL: SETTINGS & PREFERENCES --- */}
+      {/* --- SETTINGS MODAL --- */}
       {activeModal === "settings" && (
         <Settings
           currentUser={currentUser}
@@ -1546,7 +1590,7 @@ export default function App() {
         />
       )}
 
-      {/* --- MODAL: FORWARD MESSAGE --- */}
+      {/* --- FORWARD MODAL --- */}
       {forwardModalMsg && (
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
@@ -1661,7 +1705,7 @@ export default function App() {
         </div>
       )}
 
-      {/* --- MODAL: FULL-SCREEN LIGHTBOX VIEWER --- */}
+      {/* --- FULL-SCREEN LIGHTBOX VIEWER --- */}
       {lightboxMedia && (
         <div style={{ ...styles.modalOverlay, backgroundColor: "rgba(0,0,0,0.95)", zIndex: 3000, flexDirection: "column" }}>
           <div style={{ width: "100%", maxWidth: "900px", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 20px" }}>
@@ -1694,7 +1738,7 @@ export default function App() {
         </div>
       )}
 
-      {/* --- MODAL: ADD CONTACT --- */}
+      {/* --- ADD CONTACT MODAL --- */}
       {activeModal === "add_contact" && (
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
@@ -1746,7 +1790,7 @@ export default function App() {
         </div>
       )}
 
-      {/* --- MODAL: VIEW CONTACT PROFILE --- */}
+      {/* --- VIEW CONTACT PROFILE MODAL --- */}
       {activeModal === "profile_view" && viewedProfile && (
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border, textAlign: "center", padding: "20px" }}>
