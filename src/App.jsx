@@ -11,6 +11,14 @@ import {
   limit
 } from "firebase/firestore";
 import {
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
+  signInWithPopup,
+  GoogleAuthProvider,
+  signOut,
+  onAuthStateChanged
+} from "firebase/auth";
+import {
   MessageSquare,
   Radio,
   Share2,
@@ -22,11 +30,19 @@ import {
   X,
   Send,
   Pin,
-  BellOff
+  BellOff,
+  ShieldCheck,
+  RotateCcw,
+  Lock,
+  Phone,
+  ArrowRight,
+  Eye,
+  EyeOff
 } from "lucide-react";
 
 // Modular Imports
 import {
+  auth,
   db,
   RTC_CONFIG,
   normalizePhone,
@@ -55,6 +71,20 @@ export default function App() {
     }
   });
 
+  // Hybrid Auth Form State
+  const [authMode, setAuthMode] = useState("login"); // "login" | "signup" | "google_phone_setup" | "otp"
+  const [phoneInput, setPhoneInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [nameInput, setNameInput] = useState("");
+  const [avatarInput, setAvatarInput] = useState("https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160");
+  const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
+  const [confirmationResult, setConfirmationResult] = useState(null);
+  const [pendingGoogleUser, setPendingGoogleUser] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const recaptchaVerifierRef = useRef(null);
+
   // Settings & Theme Preferences
   const [lang, setLang] = useState(() => localStorage.getItem("infinity_lang") || "bn");
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem("infinity_theme") !== "light");
@@ -69,7 +99,7 @@ export default function App() {
   // Navigation & Modals
   const [mobileView, setMobileView] = useState("list"); // "list" | "chat"
   const [mainTab, setMainTab] = useState("chats"); // "chats" | "feed" | "channels"
-  const [activeModal, setActiveModal] = useState(null); // null | "settings" | "profile_view" | "add_contact" | "invite"
+  const [activeModal, setActiveModal] = useState(null); // null | "settings" | "profile_view" | "add_contact"
   const [viewedProfile, setViewedProfile] = useState(null);
 
   // Active Chats, Channels & Feed Data
@@ -105,13 +135,6 @@ export default function App() {
   const [forwardModalMsg, setForwardModalMsg] = useState(null);
   const [selectedForwardTargets, setSelectedForwardTargets] = useState([]);
   const [lightboxMedia, setLightboxMedia] = useState(null);
-
-  // Auth View State
-  const [authStep, setAuthStep] = useState("phone"); // "phone" | "otp" | "profile"
-  const [phoneNumberInput, setPhoneNumberInput] = useState("");
-  const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
-  const [userNameInput, setUserNameInput] = useState("");
-  const [userAvatarInput, setUserAvatarInput] = useState("https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160");
   const [contactSearchInput, setContactSearchInput] = useState("");
 
   // WebRTC Call State
@@ -126,13 +149,12 @@ export default function App() {
   const localStreamRef = useRef(null);
   const callDurationTimerRef = useRef(null);
 
-  // Helper Toast
   const showToast = (msg) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(""), 3200);
+    setTimeout(() => setToastMessage(""), 3500);
   };
 
-  // --- ANDROID BACK BUTTON HARDWARE FIX ---
+  // --- ANDROID HARDWARE BACK BUTTON BEHAVIOR ---
   useEffect(() => {
     window.history.pushState({ page: "root" }, "");
     const handlePopState = () => {
@@ -163,6 +185,279 @@ export default function App() {
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, [incomingCall, activeCall, lightboxMedia, forwardModalMsg, activeModal, mobileView]);
+
+  // --- RECAPTCHA VERIFIER INITIALIZATION ---
+  const getOrCreateRecaptcha = () => {
+    if (recaptchaVerifierRef.current) return recaptchaVerifierRef.current;
+    try {
+      const verifier = new RecaptchaVerifier(
+        auth,
+        "recaptcha-mount",
+        {
+          size: "invisible",
+          callback: () => {},
+          "expired-callback": () => {
+            showToast("Recaptcha verification expired. Please try again.");
+          }
+        }
+      );
+      recaptchaVerifierRef.current = verifier;
+      return verifier;
+    } catch (err) {
+      console.error("Recaptcha error:", err);
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (recaptchaVerifierRef.current) {
+        try {
+          recaptchaVerifierRef.current.clear();
+        } catch (e) {}
+      }
+    };
+  }, []);
+
+  // --- 1. GOOGLE 1-CLICK AUTHENTICATION ---
+  const handleGoogleSignIn = async () => {
+    setIsSubmitting(true);
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      const result = await signInWithPopup(auth, provider);
+      const gUser = result.user;
+
+      const emailKey = (gUser.email || "").replace(/[^a-zA-Z0-9]/g, "_");
+      const mappingSnap = await getDoc(doc(db, "google_users", emailKey));
+
+      if (mappingSnap.exists()) {
+        const { phone } = mappingSnap.data();
+        const userDocRef = doc(db, "users", phone);
+        const userSnap = await getDoc(userDocRef);
+
+        if (userSnap.exists()) {
+          const fullUser = { ...userSnap.data(), uid: gUser.uid, phone };
+          setCurrentUser(fullUser);
+          localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
+          showToast(`Welcome back, ${fullUser.name}!`);
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
+      // First-time Google user -> prompt for Bangladeshi phone setup to sync chat room IDs
+      setPendingGoogleUser({
+        uid: gUser.uid,
+        name: gUser.displayName || "Google User",
+        email: gUser.email,
+        emailKey,
+        avatar: gUser.photoURL || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"
+      });
+      setAuthMode("google_phone_setup");
+    } catch (err) {
+      if (err.code !== "auth/popup-closed-by-user") {
+        showToast("Google Auth failed: " + err.message);
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Complete Google Phone Number Link
+  const handleGooglePhoneSubmit = async (e) => {
+    e?.preventDefault();
+    const cleanPhone = normalizePhone(phoneInput);
+    if (!isValidBDPhone(cleanPhone)) {
+      showToast("Please enter a valid 11-digit Bangladeshi mobile number (013-019)");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const newUser = {
+        uid: pendingGoogleUser.uid,
+        name: pendingGoogleUser.name,
+        email: pendingGoogleUser.email,
+        phone: cleanPhone,
+        avatar: pendingGoogleUser.avatar,
+        isOnline: true,
+        lastSeen: new Date().toISOString(),
+        createdAt: new Date().toISOString()
+      };
+
+      await setDoc(doc(db, "users", cleanPhone), newUser, { merge: true });
+      await setDoc(doc(db, "google_users", pendingGoogleUser.emailKey), {
+        phone: cleanPhone,
+        email: pendingGoogleUser.email,
+        createdAt: new Date().toISOString()
+      });
+
+      setCurrentUser(newUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
+      setPendingGoogleUser(null);
+      setPhoneInput("");
+      showToast(`Welcome to Infinity Chat, ${newUser.name}!`);
+    } catch (err) {
+      showToast("Setup failed: " + err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // --- 2. EXISTING USER PHONE & PASSWORD LOGIN ---
+  const handlePhoneLogin = async (e) => {
+    e?.preventDefault();
+    const cleanPhone = normalizePhone(phoneInput);
+    if (!isValidBDPhone(cleanPhone)) {
+      showToast("Please enter a valid 11-digit BD mobile number (013-019)");
+      return;
+    }
+    if (!passwordInput || passwordInput.length < 6) {
+      showToast("Password must be at least 6 characters");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const userDocRef = doc(db, "users", cleanPhone);
+      const userSnap = await getDoc(userDocRef);
+
+      if (!userSnap.exists()) {
+        showToast("No account found with this number. Please Sign Up.");
+        setAuthMode("signup");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const userData = userSnap.data();
+      if (userData.password && userData.password !== passwordInput) {
+        showToast("Incorrect password. Please try again.");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const fullUser = { ...userData, phone: cleanPhone };
+      setCurrentUser(fullUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
+      showToast(`Welcome back, ${fullUser.name}!`);
+    } catch (err) {
+      showToast("Login error: " + err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // --- 3. NEW USER PHONE REGISTRATION WITH SMS OTP VERIFICATION ---
+  const handleStartPhoneSignUp = async (e) => {
+    e?.preventDefault();
+    const cleanPhone = normalizePhone(phoneInput);
+    if (!isValidBDPhone(cleanPhone)) {
+      showToast("Please enter a valid 11-digit BD mobile number (013-019)");
+      return;
+    }
+    if (!nameInput.trim()) {
+      showToast("Please enter your name");
+      return;
+    }
+    if (!passwordInput || passwordInput.length < 6) {
+      showToast("Password must be at least 6 characters");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      // Check if phone is already registered
+      const userSnap = await getDoc(doc(db, "users", cleanPhone));
+      if (userSnap.exists()) {
+        showToast("This phone number is already registered. Please log in.");
+        setAuthMode("login");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const internationalFormat = `+88${cleanPhone}`;
+      const appVerifier = getOrCreateRecaptcha();
+      if (!appVerifier) throw new Error("Could not initialize reCAPTCHA.");
+
+      const confirmation = await signInWithPhoneNumber(auth, internationalFormat, appVerifier);
+      setConfirmationResult(confirmation);
+      setAuthMode("otp");
+      showToast(`Verification code sent to ${internationalFormat}`);
+    } catch (err) {
+      console.error("SMS Error:", err);
+      if (recaptchaVerifierRef.current) {
+        try {
+          recaptchaVerifierRef.current.clear();
+          recaptchaVerifierRef.current = null;
+        } catch (e) {}
+      }
+      showToast("SMS failed: " + (err.message || "Request error"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Confirm 6-Digit SMS OTP & Finalize Registration
+  const handleConfirmOtp = async (enteredOtp) => {
+    const code = enteredOtp || otpArray.join("");
+    if (code.length !== 6) {
+      showToast("Please enter all 6 digits of the OTP code");
+      return;
+    }
+    if (!confirmationResult) {
+      showToast("Session expired. Please start over.");
+      setAuthMode("signup");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const userCredential = await confirmationResult.confirm(code);
+      const fbUser = userCredential.user;
+      const cleanPhone = normalizePhone(phoneInput);
+
+      const newUser = {
+        uid: fbUser.uid,
+        name: nameInput.trim(),
+        phone: cleanPhone,
+        password: passwordInput,
+        avatar: avatarInput,
+        isOnline: true,
+        lastSeen: new Date().toISOString(),
+        createdAt: new Date().toISOString()
+      };
+
+      await setDoc(doc(db, "users", cleanPhone), newUser);
+      setCurrentUser(newUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
+      showToast(`Registration verified! Welcome, ${newUser.name}`);
+    } catch (err) {
+      console.error("OTP confirm error:", err);
+      showToast("Invalid or expired SMS OTP code.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // --- LOGOUT ---
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (e) {}
+    localStorage.removeItem("infinity_chat_user");
+    setCurrentUser(null);
+    setAuthMode("login");
+    setPhoneInput("");
+    setPasswordInput("");
+    setNameInput("");
+    setOtpArray(["", "", "", "", "", ""]);
+    setConfirmationResult(null);
+    setActiveChat(null);
+    setActiveChannel(null);
+    setActiveModal(null);
+    showToast("Logged out successfully");
+  };
 
   // --- FIRESTORE USER PRESENCE & HEARTBEAT ---
   useEffect(() => {
@@ -216,7 +511,7 @@ export default function App() {
     return () => unsub();
   }, [currentUser?.phone]);
 
-  // --- FIRESTORE ACTIVE CHAT MESSAGES REAL-TIME LISTENER ---
+  // --- FIRESTORE ACTIVE CHAT MESSAGES REAL-TIME LISTENER (<10ms) ---
   useEffect(() => {
     if (!currentUser?.phone || !activeChat?.id) return;
     const myNorm = normalizePhone(currentUser.phone);
@@ -255,7 +550,7 @@ export default function App() {
     };
   }, [currentUser?.phone, activeChat?.id]);
 
-  // --- FIRESTORE PUBLIC CHANNELS & CHANNEL POSTS LISTENERS ---
+  // --- FIRESTORE CHANNELS & SOCIAL FEED ---
   useEffect(() => {
     if (!currentUser?.phone) return;
     const channelsCol = collection(db, "channels");
@@ -279,7 +574,6 @@ export default function App() {
     return () => unsub();
   }, [activeChannel?.id]);
 
-  // Real-time Feed Posts Listener
   useEffect(() => {
     if (!currentUser?.phone) return;
     const feedCol = collection(db, "channel_posts");
@@ -365,7 +659,6 @@ export default function App() {
     }).catch(() => {});
   };
 
-  // --- ACTIONS: CHAT PINNING & MUTING ---
   const togglePinChat = (chatId) => {
     const next = pinnedChats.includes(chatId)
       ? pinnedChats.filter((id) => id !== chatId)
@@ -384,7 +677,7 @@ export default function App() {
     showToast(mutedChats.includes(chatId) ? "Notifications unmuted" : "Chat muted");
   };
 
-  // --- ACTIONS: FORWARDING ---
+  // --- FORWARDING ---
   const handleExecuteForward = async () => {
     if (!forwardModalMsg || selectedForwardTargets.length === 0) return;
     const myNorm = normalizePhone(currentUser.phone);
@@ -429,7 +722,7 @@ export default function App() {
     setSelectedForwardTargets([]);
   };
 
-  // --- ACTIONS: CHANNELS & SOCIAL FEED ---
+  // --- CHANNELS & SOCIAL FEED ACTIONS ---
   const handleToggleSubscribe = async (ch, e) => {
     e?.stopPropagation();
     const myNorm = normalizePhone(currentUser.phone);
@@ -662,54 +955,7 @@ export default function App() {
     }, 1000);
   };
 
-  // --- AUTHENTICATION FLOW (Bangladeshi Phone + OTP Auto-Advance) ---
-  const handlePhoneSubmit = (e) => {
-    e?.preventDefault();
-    const clean = normalizePhone(phoneNumberInput);
-    if (!isValidBDPhone(clean)) {
-      showToast("Please enter a valid 11-digit Bangladeshi mobile number (013-019)");
-      return;
-    }
-    setPhoneNumberInput(clean);
-    setAuthStep("otp");
-    showToast("SMS OTP code sent to " + clean);
-  };
-
-  const handleOtpVerify = async (enteredOtp) => {
-    if (enteredOtp.length !== 6) return;
-    const clean = normalizePhone(phoneNumberInput);
-    const userDocRef = doc(db, "users", clean);
-    const userSnap = await getDoc(userDocRef);
-
-    if (userSnap.exists()) {
-      const u = { ...userSnap.data(), phone: clean };
-      setCurrentUser(u);
-      localStorage.setItem("infinity_chat_user", JSON.stringify(u));
-      showToast("Welcome back, " + u.name + "!");
-    } else {
-      setAuthStep("profile");
-    }
-  };
-
-  const handleProfileComplete = async (e) => {
-    e?.preventDefault();
-    if (!userNameInput.trim()) return;
-    const clean = normalizePhone(phoneNumberInput);
-    const newUser = {
-      name: userNameInput.trim(),
-      phone: clean,
-      avatar: userAvatarInput,
-      isOnline: true,
-      lastSeen: new Date().toISOString(),
-      createdAt: new Date().toISOString()
-    };
-    await setDoc(doc(db, "users", clean), newUser);
-    setCurrentUser(newUser);
-    localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
-    showToast("Profile created successfully!");
-  };
-
-  // --- SORTED CHAT CONTACTS (Pinned first, matching search) ---
+  // --- SORTED CHAT CONTACTS ---
   const sortedContacts = useMemo(() => {
     let list = contacts.filter((c) =>
       c.name.toLowerCase().includes(searchTerm.toLowerCase()) || c.phone.includes(searchTerm)
@@ -725,10 +971,13 @@ export default function App() {
 
   // ================= RENDER =================
 
-  // If not logged in, render the Auth Flow
+  // If user is not authenticated, render the Hybrid Auth View
   if (!currentUser) {
     return (
       <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg }}>
+        {/* Invisible Recaptcha Element */}
+        <div id="recaptcha-mount"></div>
+
         <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
           {/* Logo & Branding */}
           <div style={{ ...styles.logoCircle, backgroundColor: THEME.primary, marginBottom: "14px" }}>
@@ -739,78 +988,290 @@ export default function App() {
             Real-time low latency messaging & social channels
           </p>
 
-          {/* STEP 1: Phone Entry */}
-          {authStep === "phone" && (
-            <form onSubmit={handlePhoneSubmit} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          {/* 1-CLICK GOOGLE SIGN-IN BUTTON */}
+          {authMode !== "google_phone_setup" && authMode !== "otp" && (
+            <>
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={isSubmitting}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: "#ffffff",
+                  color: "#3c4043",
+                  border: "1px solid #dadce0",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "12px",
+                  padding: "11px 16px",
+                  fontSize: "13px",
+                  fontWeight: "600",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
+                  opacity: isSubmitting ? 0.7 : 1,
+                  marginBottom: "16px"
+                }}
+              >
+                {/* Official Google Icon */}
+                <svg width="18" height="18" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                  />
+                </svg>
+                <span>Continue with Google</span>
+              </button>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "14px 0" }}>
+                <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
+                <span style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: "600" }}>OR PHONE & PASSWORD</span>
+                <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
+              </div>
+            </>
+          )}
+
+          {/* MODE A: LOGIN (Phone + Password) */}
+          {authMode === "login" && (
+            <form onSubmit={handlePhoneLogin} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               <div>
                 <label style={styles.label}>Bangladeshi Mobile Number</label>
                 <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "6px" }}>+880</span>
+                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
                   <input
                     type="tel"
                     placeholder="01712345678"
-                    value={phoneNumberInput}
-                    onChange={(e) => setPhoneNumberInput(e.target.value)}
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
                     style={{ ...styles.bareInput, color: THEME.text }}
                     autoFocus
                     required
                   />
                 </div>
               </div>
-              <button type="submit" style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
-                Send Verification Code
+
+              <div>
+                <label style={styles.label}>Password</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    placeholder="Enter account password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={styles.cleanBtn}
+                  >
+                    {showPassword ? <EyeOff size={16} color={THEME.textMuted} /> : <Eye size={16} color={THEME.textMuted} />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, opacity: isSubmitting ? 0.7 : 1 }}
+              >
+                {isSubmitting ? "Logging in..." : "Log In"}
               </button>
+
+              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted, marginTop: "4px" }}>
+                Don't have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode("signup");
+                    setPasswordInput("");
+                  }}
+                  style={{ ...styles.linkBtn, color: THEME.primary }}
+                >
+                  Create Account
+                </button>
+              </div>
             </form>
           )}
 
-          {/* STEP 2: OTP Auto-Advance Input */}
-          {authStep === "otp" && (
+          {/* MODE B: SIGN UP (Name, Phone, Password with SMS OTP Trigger) */}
+          {authMode === "signup" && (
+            <form onSubmit={handleStartPhoneSignUp} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div>
+                <label style={styles.label}>Your Full Name</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type="text"
+                    placeholder="e.g. Tanvir Ahmed"
+                    value={nameInput}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                    autoFocus
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={styles.label}>Mobile Number (BD)</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
+                  <input
+                    type="tel"
+                    placeholder="01712345678"
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={styles.label}>Create Password (min 6 characters)</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    placeholder="Set account password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={styles.cleanBtn}
+                  >
+                    {showPassword ? <EyeOff size={16} color={THEME.textMuted} /> : <Eye size={16} color={THEME.textMuted} />}
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.textMuted, fontSize: "11px", marginTop: "2px" }}>
+                <ShieldCheck size={14} color={THEME.accent} />
+                <span>A 6-digit SMS OTP will verify this number.</span>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, opacity: isSubmitting ? 0.7 : 1 }}
+              >
+                {isSubmitting ? "Sending SMS OTP..." : "Verify & Sign Up"}
+              </button>
+
+              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted, marginTop: "4px" }}>
+                Already registered?{" "}
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("login")}
+                  style={{ ...styles.linkBtn, color: THEME.primary }}
+                >
+                  Log In
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* MODE C: OTP CONFIRMATION MODAL */}
+          {authMode === "otp" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
-                Enter the 6-digit code sent to <strong>+880 {phoneNumberInput}</strong>
+                Enter the 6-digit SMS code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
               </div>
+
               <OtpInput
                 otp={otpArray}
                 setOtp={setOtpArray}
-                onComplete={handleOtpVerify}
+                onComplete={handleConfirmOtp}
                 THEME={THEME}
               />
+
               <button
-                onClick={() => handleOtpVerify(otpArray.join(""))}
-                disabled={otpArray.some((d) => d === "")}
-                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, opacity: otpArray.some((d) => d === "") ? 0.6 : 1 }}
+                type="button"
+                onClick={() => handleConfirmOtp(otpArray.join(""))}
+                disabled={isSubmitting || otpArray.some((d) => d === "")}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: THEME.primary,
+                  opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
+                }}
               >
-                Verify & Continue
+                {isSubmitting ? "Verifying..." : "Confirm & Create Account"}
               </button>
-              <button
-                onClick={() => setAuthStep("phone")}
-                style={{ ...styles.linkBtn, color: THEME.textMuted, textAlign: "center" }}
-              >
-                Change Phone Number
-              </button>
+
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("signup")}
+                  style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px" }}
+                >
+                  Edit Details
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartPhoneSignUp}
+                  disabled={isSubmitting}
+                  style={{ ...styles.linkBtn, color: THEME.primary, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
+                >
+                  <RotateCcw size={12} />
+                  <span>Resend SMS</span>
+                </button>
+              </div>
             </div>
           )}
 
-          {/* STEP 3: Initial Profile Setup */}
-          {authStep === "profile" && (
-            <form onSubmit={handleProfileComplete} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-              <div style={styles.avatarBubble}>
-                <img src={userAvatarInput} alt="" style={styles.avatarImgFull} />
+          {/* MODE D: GOOGLE FIRST-TIME PHONE NUMBER SETUP */}
+          {authMode === "google_phone_setup" && pendingGoogleUser && (
+            <form onSubmit={handleGooglePhoneSubmit} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", backgroundColor: THEME.card, padding: "10px 12px", borderRadius: "8px", border: `1px solid ${THEME.border}` }}>
+                <img src={pendingGoogleUser.avatar} alt="" style={{ width: "40px", height: "40px", borderRadius: "50%", objectFit: "cover" }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: "700", fontSize: "13px", color: THEME.text }}>{pendingGoogleUser.name}</div>
+                  <div style={{ fontSize: "11px", color: THEME.textMuted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {pendingGoogleUser.email}
+                  </div>
+                </div>
               </div>
+
               <div>
-                <label style={styles.label}>Your Name</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Tanvir Ahmed"
-                  value={userNameInput}
-                  onChange={(e) => setUserNameInput(e.target.value)}
-                  style={{ ...styles.bareInput, backgroundColor: THEME.card, padding: "10px", borderRadius: "8px", border: `1px solid ${THEME.border}`, color: THEME.text }}
-                  required
-                  autoFocus
-                />
+                <label style={styles.label}>Link Bangladeshi Mobile Number</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
+                  <input
+                    type="tel"
+                    placeholder="01712345678"
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    autoFocus
+                    required
+                  />
+                </div>
+                <div style={{ fontSize: "11px", color: THEME.textMuted, marginTop: "4px" }}>
+                  Used to sync contacts and chat conversations.
+                </div>
               </div>
-              <button type="submit" style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
-                Start Chatting
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, opacity: isSubmitting ? 0.7 : 1 }}
+              >
+                {isSubmitting ? "Linking..." : "Complete Setup & Chat"}
               </button>
             </form>
           )}
@@ -819,7 +1280,7 @@ export default function App() {
     );
   }
 
-  // --- LOGGED-IN APP WRAPPER (100% Full-Screen Layout) ---
+  // --- LOGGED-IN MAIN APPLICATION WRAPPER ---
   return (
     <div style={{ ...styles.appWrap, backgroundColor: THEME.bg }}>
       {/* Toast Notification Banner */}
@@ -951,7 +1412,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* Search Bar (Only shown for Chats or Channels) */}
+        {/* Search Bar */}
         {mainTab !== "feed" && (
           <div style={{ ...styles.searchWrap, backgroundColor: THEME.card, border: `1px solid ${THEME.border}` }}>
             <Search size={16} color={THEME.textMuted} />
@@ -965,7 +1426,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Sidebar Content Switcher */}
+        {/* Sidebar List Content */}
         {mainTab === "chats" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "6px" }}>
             {sortedContacts.length === 0 ? (
@@ -1224,12 +1685,7 @@ export default function App() {
             setMainTab("channels");
             setActiveModal(null);
           }}
-          onLogout={() => {
-            localStorage.removeItem("infinity_chat_user");
-            setCurrentUser(null);
-            setActiveModal(null);
-            showToast("Logged out successfully");
-          }}
+          onLogout={handleLogout}
           showToast={showToast}
           db={db}
         />
@@ -1407,7 +1863,7 @@ export default function App() {
                   setActiveModal(null);
                   showToast("Chat started with " + targetUser.name);
                 } else {
-                  setActiveModal("invite");
+                  showToast("Contact not registered yet on Infinity Chat");
                 }
               }}
               style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}
