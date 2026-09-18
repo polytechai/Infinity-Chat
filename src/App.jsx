@@ -201,13 +201,13 @@ export default function App() {
       if (window.recaptchaVerifier) {
         try {
           window.recaptchaVerifier.clear();
-          window.recaptchaVerifier = null;
         } catch (e) {}
+        window.recaptchaVerifier = null;
       }
     };
   }, []);
 
-  // --- 1. PHONE NUMBER + PASSWORD LOGIN ---
+  // --- 1. PHONE NUMBER + PASSWORD DIRECT LOGIN ---
   const handlePhonePasswordLogin = async (e) => {
     e?.preventDefault();
     const cleanPhone = normalizePhone(phoneInput);
@@ -226,7 +226,7 @@ export default function App() {
       const userSnap = await getDoc(userDocRef);
 
       if (!userSnap.exists()) {
-        showToast("Account not found. Please create an account.");
+        showToast("Account not found. Please register your account.");
         setAuthMode("register");
         setIsSubmitting(false);
         return;
@@ -250,7 +250,7 @@ export default function App() {
     }
   };
 
-  // --- 2. REGISTRATION: SEND SMS OTP (ROBUST RECAPTCHA HANDLING) ---
+  // --- 2. ROBUST SMS OTP SEND HANDLER ---
   const handleStartRegistration = async (e) => {
     e?.preventDefault();
     const cleanPhone = normalizePhone(phoneInput);
@@ -269,20 +269,27 @@ export default function App() {
 
     setIsSubmitting(true);
     try {
-      // Fast check if user already exists
+      // Check if user already exists
       const userSnap = await getDoc(doc(db, "users", cleanPhone));
       if (userSnap.exists()) {
-        showToast("This number is already registered. Please log in.");
+        showToast("This phone number is already registered. Please log in.");
         setAuthMode("login");
         setIsSubmitting(false);
         return;
       }
 
-      // Initialize or clear window.recaptchaVerifier cleanly
+      // Initialize or reset window.recaptchaVerifier cleanly
       if (window.recaptchaVerifier) {
         try {
           window.recaptchaVerifier.clear();
         } catch (e) {}
+        window.recaptchaVerifier = null;
+      }
+
+      // Ensure explicit recaptcha element container is present
+      const container = document.getElementById("recaptcha-container");
+      if (!container) {
+        throw new Error("Recaptcha container element missing.");
       }
 
       window.recaptchaVerifier = new RecaptchaVerifier(
@@ -293,6 +300,10 @@ export default function App() {
           callback: () => {},
           "expired-callback": () => {
             showToast("Recaptcha expired. Please try sending OTP again.");
+            if (window.recaptchaVerifier) {
+              try { window.recaptchaVerifier.clear(); } catch (e) {}
+              window.recaptchaVerifier = null;
+            }
             setIsSubmitting(false);
           }
         }
@@ -309,16 +320,16 @@ export default function App() {
       if (window.recaptchaVerifier) {
         try {
           window.recaptchaVerifier.clear();
-          window.recaptchaVerifier = null;
         } catch (e) {}
+        window.recaptchaVerifier = null;
       }
-      showToast("Failed to send SMS: " + (err.message || "Please check your network or number."));
+      showToast("SMS failed: " + (err.message || "Please check your network or number."));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- 3. REGISTRATION: CONFIRM SMS OTP & FINALIZE ACCOUNT ---
+  // --- 3. CONFIRM SMS OTP & FINALIZE REGISTRATION ---
   const handleVerifyOtpAndRegister = async (enteredOtp) => {
     const code = enteredOtp || otpArray.join("");
     if (code.length !== 6) {
@@ -986,7 +997,7 @@ export default function App() {
             Real-time low latency messaging & social channels
           </p>
 
-          {/* 1-Click Google Sign-In */}
+          {/* 1-Click Google Sign-In (Hidden when verifying OTP) */}
           {!otpSent && (
             <>
               <button
@@ -1063,7 +1074,7 @@ export default function App() {
                   opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
                 }}
               >
-                {isSubmitting ? "Verifying..." : "Verify & Create Account"}
+                {isSubmitting ? "Verifying..." : "Verify Code & Sign In"}
               </button>
 
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1089,7 +1100,7 @@ export default function App() {
               </div>
             </div>
           ) : authMode === "login" ? (
-            /* VIEW 2: PHONE + PASSWORD LOGIN */
+            /* VIEW 2: PHONE + PASSWORD DIRECT LOGIN */
             <form onSubmit={handlePhonePasswordLogin} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               <div>
                 <label style={styles.label}>Bangladeshi Mobile Number</label>
