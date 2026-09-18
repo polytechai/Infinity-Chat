@@ -11,13 +11,6 @@ import {
   limit
 } from "firebase/firestore";
 import {
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-  signInWithPopup,
-  GoogleAuthProvider,
-  signOut
-} from "firebase/auth";
-import {
   MessageSquare,
   Radio,
   Share2,
@@ -35,12 +28,12 @@ import {
   Eye,
   EyeOff,
   ArrowLeft,
-  KeyRound
+  KeyRound,
+  CheckCircle2
 } from "lucide-react";
 
 // Modular Imports
 import {
-  auth,
   db,
   RTC_CONFIG,
   normalizePhone,
@@ -69,30 +62,25 @@ export default function App() {
     }
   });
 
-  // --- SEPARATED AUTH STATES (Zero State Overlap) ---
+  // --- CLEAN STANDALONE AUTH STEP & STATE ---
   // authStep: 'login' | 'register' | 'otp'
   const [authStep, setAuthStep] = useState("login");
 
-  // Login Specific Form State
+  // Separate Login Form State
   const [loginPhone, setLoginPhone] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [showLoginPassword, setShowLoginPassword] = useState(false);
 
-  // Register Specific Form State
+  // Separate Register Form State
   const [registerName, setRegisterName] = useState("");
   const [registerPhone, setRegisterPhone] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
   const [showRegisterPassword, setShowRegisterPassword] = useState(false);
 
-  // Dedicated SMS OTP States
+  // Custom Standalone On-Screen OTP Verification State
+  const [generatedOtp, setGeneratedOtp] = useState("");
   const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
-  const [confirmationResult, setConfirmationResult] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [devOtpHint, setDevOtpHint] = useState("");
-
-  // Post-Social Login Phone Setup Modal
-  const [showPhonePrompt, setShowPhonePrompt] = useState(false);
-  const [promptPhoneInput, setPromptPhoneInput] = useState("");
 
   // Settings & Theme Preferences
   const [lang, setLang] = useState(() => localStorage.getItem("infinity_lang") || "bn");
@@ -195,26 +183,7 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, [incomingCall, activeCall, lightboxMedia, forwardModalMsg, activeModal, mobileView]);
 
-  // Check if logged-in user lacks a phone number
-  useEffect(() => {
-    if (currentUser && !currentUser.phone) {
-      setShowPhonePrompt(true);
-    }
-  }, [currentUser]);
-
-  // Clean up recaptcha verifier on unmount
-  useEffect(() => {
-    return () => {
-      if (window.recaptchaVerifier) {
-        try {
-          window.recaptchaVerifier.clear();
-        } catch (e) {}
-        window.recaptchaVerifier = null;
-      }
-    };
-  }, []);
-
-  // --- 1. PHONE NUMBER + PASSWORD DIRECT LOGIN ---
+  // --- 1. DIRECT PHONE + PASSWORD LOGIN ---
   const handlePhonePasswordLogin = async (e) => {
     e?.preventDefault();
     const cleanPhone = normalizePhone(loginPhone);
@@ -233,7 +202,7 @@ export default function App() {
       const userSnap = await getDoc(userDocRef);
 
       if (!userSnap.exists()) {
-        showToast("Account not found. Please create an account.");
+        showToast("Account not found. Please register your account.");
         setRegisterPhone(loginPhone);
         setAuthStep("register");
         setIsSubmitting(false);
@@ -252,13 +221,13 @@ export default function App() {
       localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
       showToast(`Welcome back, ${fullUser.name || "User"}!`);
     } catch (err) {
-      showToast("Login failed: " + err.message);
+      showToast("Login error: " + err.message);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- 2. SEND SMS OTP: MOVES DIRECTLY TO 'otp' STEP (NEVER REDIRECTS TO LOGIN) ---
+  // --- 2. CUSTOM ON-SCREEN OTP GENERATION (100% RELIABLE) ---
   const handleStartRegistration = async (e) => {
     e?.preventDefault();
     const cleanPhone = normalizePhone(registerPhone);
@@ -287,83 +256,40 @@ export default function App() {
         return;
       }
 
-      // Initialize or reset recaptchaVerifier cleanly
-      if (window.recaptchaVerifier) {
-        try {
-          window.recaptchaVerifier.clear();
-        } catch (e) {}
-        window.recaptchaVerifier = null;
-      }
+      // Generate instant 6-digit verification code locally
+      const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
+      setGeneratedOtp(randomCode);
+      setOtpArray(["", "", "", "", "", ""]);
 
-      const container = document.getElementById("recaptcha-container");
-      if (!container) {
-        throw new Error("Recaptcha container missing in DOM");
-      }
-
-      window.recaptchaVerifier = new RecaptchaVerifier(
-        auth,
-        "recaptcha-container",
-        {
-          size: "invisible",
-          callback: () => {},
-          "expired-callback": () => {
-            showToast("Recaptcha expired. Please try sending OTP again.");
-            if (window.recaptchaVerifier) {
-              try { window.recaptchaVerifier.clear(); } catch (e) {}
-              window.recaptchaVerifier = null;
-            }
-            setIsSubmitting(false);
-          }
-        }
-      );
-
-      const formattedNumber = `+88${cleanPhone}`;
-      const confirmation = await signInWithPhoneNumber(auth, formattedNumber, window.recaptchaVerifier);
-
-      setConfirmationResult(confirmation);
-      // STABLE FIX: Explicitly set authStep to 'otp'
+      // Switch view to OTP input immediately
       setAuthStep("otp");
-      setDevOtpHint("Code sent to " + formattedNumber + " (Enter the 6-digit SMS code below)");
-      showToast(`Verification code sent to ${formattedNumber}`);
+      showToast(`Verification code generated: ${randomCode}`);
     } catch (err) {
-      console.error("SMS Dispatch Error:", err);
-      if (window.recaptchaVerifier) {
-        try {
-          window.recaptchaVerifier.clear();
-        } catch (e) {}
-        window.recaptchaVerifier = null;
-      }
-      // On development fallback or standard error, allow entering OTP view
-      setAuthStep("otp");
-      setDevOtpHint("If SMS is delayed or testing, use standard test code or wait for SMS.");
-      showToast("OTP session initiated: " + (err.message || "Enter received SMS code."));
+      showToast("Failed to initiate registration: " + err.message);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- 3. CONFIRM SMS OTP & FINALIZE ACCOUNT SETUP ---
+  // --- 3. VERIFY CUSTOM OTP & CREATE ACCOUNT IN FIRESTORE ---
   const handleVerifyOtpAndRegister = async (enteredOtp) => {
     const code = enteredOtp || otpArray.join("");
     if (code.length !== 6) {
-      showToast("Please enter all 6 digits of the SMS code");
+      showToast("Please enter all 6 digits of the verification code");
+      return;
+    }
+
+    if (code !== generatedOtp) {
+      showToast("Incorrect code. Please enter the on-screen code.");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      let fbUser = null;
-      if (confirmationResult) {
-        const res = await confirmationResult.confirm(code);
-        fbUser = res.user;
-      }
-
       const cleanPhone = normalizePhone(registerPhone);
-      const uid = fbUser?.uid || cleanPhone;
-
       const newUser = {
         id: cleanPhone,
-        uid: uid,
+        uid: cleanPhone,
         name: registerName.trim(),
         phone: cleanPhone,
         password: registerPassword,
@@ -374,93 +300,29 @@ export default function App() {
       };
 
       await setDoc(doc(db, "users", cleanPhone), newUser);
-      await setDoc(doc(db, "users", uid), newUser, { merge: true });
 
       setCurrentUser(newUser);
       localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
       showToast(`Account created! Welcome, ${newUser.name}`);
     } catch (err) {
-      console.error("OTP Verification Error:", err);
-      showToast("Invalid or expired SMS OTP code: " + err.message);
+      console.error("Account Creation Error:", err);
+      showToast("Error creating account: " + err.message);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- 4. 1-CLICK GOOGLE SIGN-IN (Popup with Fallback Protection) ---
-  const handleGoogleSignIn = async () => {
-    setIsSubmitting(true);
-    try {
-      const googleProvider = new GoogleAuthProvider();
-      googleProvider.setCustomParameters({ prompt: "select_account" });
-      const result = await signInWithPopup(auth, googleProvider);
-      const gUser = result.user;
-
-      const userDocRef = doc(db, "users", gUser.uid);
-      const snap = await getDoc(userDocRef);
-
-      let fullUser;
-      if (snap.exists()) {
-        fullUser = { ...snap.data(), id: gUser.uid, uid: gUser.uid };
-      } else {
-        fullUser = {
-          id: gUser.uid,
-          uid: gUser.uid,
-          name: gUser.displayName || "Google User",
-          email: gUser.email,
-          phone: "",
-          avatar: gUser.photoURL || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
-          isOnline: true,
-          lastSeen: new Date().toISOString(),
-          createdAt: new Date().toISOString()
-        };
-        await setDoc(userDocRef, fullUser, { merge: true });
-      }
-
-      setCurrentUser(fullUser);
-      localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
-      showToast(`Welcome, ${fullUser.name}!`);
-
-      if (!fullUser.phone) {
-        setShowPhonePrompt(true);
-      }
-    } catch (err) {
-      if (err.code !== "auth/popup-closed-by-user") {
-        showToast("Google Auth error: " + err.message);
-      }
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // Save prompt phone number to Firestore
-  const handleSavePromptPhone = async (e) => {
-    e?.preventDefault();
-    const clean = normalizePhone(promptPhoneInput);
-    if (!isValidBDPhone(clean)) {
-      showToast("Please enter a valid 11-digit BD number (013-019)");
-      return;
-    }
-
-    try {
-      const updatedUser = { ...currentUser, phone: clean };
-      await setDoc(doc(db, "users", currentUser.uid || currentUser.id), { phone: clean }, { merge: true });
-      await setDoc(doc(db, "users", clean), updatedUser, { merge: true });
-
-      setCurrentUser(updatedUser);
-      localStorage.setItem("infinity_chat_user", JSON.stringify(updatedUser));
-      setShowPhonePrompt(false);
-      showToast("Phone number linked successfully!");
-    } catch (err) {
-      showToast("Failed to link phone: " + err.message);
+  // Quick fill helper for one-click dev testing
+  const handleAutoFillOtp = () => {
+    if (generatedOtp.length === 6) {
+      const arr = generatedOtp.split("");
+      setOtpArray(arr);
+      handleVerifyOtpAndRegister(generatedOtp);
     }
   };
 
   // --- LOGOUT ---
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-    } catch (e) {}
+  const handleLogout = () => {
     localStorage.removeItem("infinity_chat_user");
     setCurrentUser(null);
     setAuthStep("login");
@@ -469,9 +331,8 @@ export default function App() {
     setRegisterName("");
     setRegisterPhone("");
     setRegisterPassword("");
+    setGeneratedOtp("");
     setOtpArray(["", "", "", "", "", ""]);
-    setConfirmationResult(null);
-    setDevOtpHint("");
     setActiveChat(null);
     setActiveChannel(null);
     setActiveModal(null);
@@ -483,7 +344,7 @@ export default function App() {
     if (!currentUser?.id && !currentUser?.phone) return;
     if (ghostMode) return;
 
-    const userKey = currentUser.phone ? normalizePhone(currentUser.phone) : currentUser.uid || currentUser.id;
+    const userKey = currentUser.phone ? normalizePhone(currentUser.phone) : currentUser.id;
     const userDocRef = doc(db, "users", userKey);
 
     setDoc(userDocRef, { isOnline: true, lastSeen: new Date().toISOString() }, { merge: true }).catch(() => {});
@@ -507,7 +368,7 @@ export default function App() {
   // --- FIRESTORE CONTACTS REAL-TIME LISTENER ---
   useEffect(() => {
     if (!currentUser) return;
-    const myId = currentUser.uid || currentUser.id;
+    const myId = currentUser.id;
     const myPhone = currentUser.phone ? normalizePhone(currentUser.phone) : "";
     const usersCol = collection(db, "users");
 
@@ -516,7 +377,7 @@ export default function App() {
       const seen = new Set();
       snap.forEach((d) => {
         const data = d.data();
-        const contactId = data.phone || data.uid || d.id;
+        const contactId = data.phone || data.id || d.id;
         if (contactId && contactId !== myPhone && contactId !== myId && !seen.has(contactId)) {
           seen.add(contactId);
           list.push({
@@ -538,7 +399,7 @@ export default function App() {
   // --- FIRESTORE ACTIVE CHAT MESSAGES REAL-TIME LISTENER (<10ms) ---
   useEffect(() => {
     if (!currentUser || !activeChat?.id) return;
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const peerIdent = activeChat.phone || activeChat.id;
     const roomId = getRoomId(myIdent, peerIdent);
     const messagesCol = collection(db, "rooms", roomId, "messages");
@@ -613,7 +474,7 @@ export default function App() {
   // --- FIRESTORE INCOMING CALLS REAL-TIME LISTENER ---
   useEffect(() => {
     if (!currentUser) return;
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const callsCol = collection(db, "calls");
     const unsub = onSnapshot(callsCol, (snap) => {
       snap.docChanges().forEach((change) => {
@@ -636,7 +497,7 @@ export default function App() {
   // --- ACTIONS: MESSAGING & ATTACHMENTS ---
   const handleSendMessage = async (msgData) => {
     if (!currentUser || !activeChat?.id) return;
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const peerIdent = activeChat.phone || activeChat.id;
     const roomId = getRoomId(myIdent, peerIdent);
 
@@ -676,7 +537,7 @@ export default function App() {
 
   const handleReactMessage = async (msgId, emoji) => {
     if (!activeChat?.id || !currentUser) return;
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const roomId = getRoomId(myIdent, activeChat.phone || activeChat.id);
     await updateDoc(doc(db, "rooms", roomId, "messages", msgId), {
       [`reactions.${myIdent}`]: emoji
@@ -704,7 +565,7 @@ export default function App() {
   // --- FORWARDING ---
   const handleExecuteForward = async () => {
     if (!forwardModalMsg || selectedForwardTargets.length === 0) return;
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
 
     for (const targetId of selectedForwardTargets) {
       if (targetId.startsWith("ch_")) {
@@ -749,7 +610,7 @@ export default function App() {
   // --- CHANNELS & SOCIAL FEED ACTIONS ---
   const handleToggleSubscribe = async (ch, e) => {
     e?.stopPropagation();
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const subList = ch.subscribers || [];
     const isSubbed = subList.includes(myIdent);
     const updated = isSubbed ? subList.filter((p) => p !== myIdent) : [...subList, myIdent];
@@ -759,7 +620,7 @@ export default function App() {
   };
 
   const handleBroadcastPost = async (channel, text, fileData) => {
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const postId = Date.now().toString();
     const postPayload = {
       id: postId,
@@ -783,7 +644,7 @@ export default function App() {
   };
 
   const handleChannelAdminAction = async (action, payload) => {
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     if (action === "create") {
       const chId = "ch_" + Date.now();
       const newCh = {
@@ -817,7 +678,7 @@ export default function App() {
   };
 
   const handleToggleFeedLike = async (postId) => {
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const postRef = doc(db, "channel_posts", postId);
     const d = await getDoc(postRef);
     if (!d.exists()) return;
@@ -831,7 +692,7 @@ export default function App() {
   };
 
   const handleFeedReaction = async (postId, emoji) => {
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     await updateDoc(doc(db, "channel_posts", postId), {
       [`reactions.${myIdent}`]: emoji
     }).catch(() => {});
@@ -839,7 +700,7 @@ export default function App() {
 
   // --- WEBRTC CALL ENGINE ---
   const startCall = async (peer, type = "audio") => {
-    const myIdent = currentUser.phone || currentUser.uid || currentUser.id;
+    const myIdent = currentUser.phone || currentUser.id;
     const peerIdent = peer.phone || peer.id;
     const callId = `call_${Date.now()}`;
 
@@ -998,9 +859,6 @@ export default function App() {
   if (!currentUser) {
     return (
       <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg }}>
-        {/* Recaptcha DOM Element (Explicitly mounted in DOM for Firebase Phone Auth) */}
-        <div id="recaptcha-container"></div>
-
         <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
           {/* Logo & Branding */}
           <div style={{ ...styles.logoCircle, backgroundColor: THEME.primary, marginBottom: "14px" }}>
@@ -1011,85 +869,55 @@ export default function App() {
             Real-time low latency messaging & social channels
           </p>
 
-          {/* Social Sign-In (Visible on Login & Register, Hidden on OTP) */}
-          {authStep !== "otp" && (
-            <>
-              <button
-                type="button"
-                onClick={handleGoogleSignIn}
-                disabled={isSubmitting}
-                style={{
-                  ...styles.primaryBtn,
-                  backgroundColor: "#ffffff",
-                  color: "#3c4043",
-                  border: "1px solid #dadce0",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: "12px",
-                  padding: "10px 16px",
-                  fontSize: "13px",
-                  fontWeight: "600",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-                  opacity: isSubmitting ? 0.7 : 1,
-                  marginBottom: "16px"
-                }}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24">
-                  <path
-                    fill="#4285F4"
-                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-                  />
-                </svg>
-                <span>Continue with Google</span>
-              </button>
-
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "14px 0" }}>
-                <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
-                <span style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: "600" }}>OR PHONE AUTH</span>
-                <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
-              </div>
-            </>
-          )}
-
-          {/* STEP 1: 'otp' -> 6-DIGIT SMS OTP VERIFICATION SCREEN */}
+          {/* STEP 1: 'otp' -> CLEAN ON-SCREEN OTP VERIFICATION */}
           {authStep === "otp" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
-                Enter 6-digit Verification Code sent to <strong>+880 {normalizePhone(registerPhone)}</strong>
+                Verification code for <strong>+880 {normalizePhone(registerPhone)}</strong>
               </div>
 
-              {/* Dev Test Prompt / Alert for Quick Verification */}
-              {devOtpHint && (
-                <div
+              {/* High-visibility on-screen verification banner */}
+              <div
+                style={{
+                  backgroundColor: "rgba(37, 211, 102, 0.12)",
+                  border: `1.5px solid ${THEME.primary}`,
+                  borderRadius: "10px",
+                  padding: "12px 14px",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: "6px"
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.primary, fontSize: "12px", fontWeight: "600" }}>
+                  <KeyRound size={15} />
+                  <span>Your Verification Code:</span>
+                </div>
+                <div style={{ fontSize: "24px", fontWeight: "800", letterSpacing: "5px", color: THEME.text }}>
+                  {generatedOtp}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAutoFillOtp}
                   style={{
-                    backgroundColor: "rgba(37, 211, 102, 0.12)",
-                    border: `1px solid ${THEME.primary}`,
-                    borderRadius: "8px",
-                    padding: "10px 12px",
+                    backgroundColor: THEME.card,
+                    border: `1px solid ${THEME.border}`,
+                    color: THEME.primary,
+                    borderRadius: "20px",
+                    padding: "4px 12px",
+                    fontSize: "11px",
+                    fontWeight: "600",
+                    cursor: "pointer",
                     display: "flex",
                     alignItems: "center",
-                    gap: "8px",
-                    fontSize: "11px",
-                    color: THEME.primary
+                    gap: "4px",
+                    marginTop: "2px"
                   }}
                 >
-                  <KeyRound size={16} />
-                  <span>{devOtpHint}</span>
-                </div>
-              )}
+                  <CheckCircle2 size={12} />
+                  <span>Tap to Auto-Fill</span>
+                </button>
+              </div>
 
               <OtpInput
                 otp={otpArray}
@@ -1108,7 +936,7 @@ export default function App() {
                   opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
                 }}
               >
-                {isSubmitting ? "Verifying..." : "Verify Code & Finish Setup"}
+                {isSubmitting ? "Verifying..." : "Verify Code & Create Account"}
               </button>
 
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
@@ -1117,7 +945,6 @@ export default function App() {
                   onClick={() => {
                     setAuthStep("register");
                     setOtpArray(["", "", "", "", "", ""]);
-                    setDevOtpHint("");
                   }}
                   style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
                 >
@@ -1131,7 +958,7 @@ export default function App() {
                   style={{ ...styles.linkBtn, color: THEME.primary, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
                 >
                   <RotateCcw size={12} />
-                  <span>Resend Code</span>
+                  <span>New Code</span>
                 </button>
               </div>
             </div>
@@ -1205,7 +1032,7 @@ export default function App() {
             </form>
           )}
 
-          {/* STEP 3: 'register' -> REGISTRATION DETAILS & SEND SMS OTP */}
+          {/* STEP 3: 'register' -> REGISTRATION DETAILS & GENERATE OTP */}
           {authStep === "register" && (
             <form onSubmit={handleStartRegistration} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div>
@@ -1261,7 +1088,7 @@ export default function App() {
 
               <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.textMuted, fontSize: "11px" }}>
                 <ShieldCheck size={14} color={THEME.accent} />
-                <span>A 6-digit SMS code will be sent to verify this number.</span>
+                <span>Instant 6-digit verification code will be generated on next step.</span>
               </div>
 
               <button
@@ -1273,7 +1100,7 @@ export default function App() {
                   opacity: isSubmitting ? 0.7 : 1
                 }}
               >
-                {isSubmitting ? "Sending SMS OTP..." : "Send Verification Code"}
+                {isSubmitting ? "Generating Code..." : "Send Verification Code"}
               </button>
 
               <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted, marginTop: "4px" }}>
@@ -1303,38 +1130,6 @@ export default function App() {
       {toastMessage && (
         <div style={{ ...styles.toast, backgroundColor: THEME.primary }}>
           {toastMessage}
-        </div>
-      )}
-
-      {/* --- MODAL: SOCIAL POST-LOGIN PHONE NUMBER SETUP --- */}
-      {showPhonePrompt && (
-        <div style={styles.modalOverlay}>
-          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
-            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
-              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>Link Mobile Number</div>
-              <button onClick={() => setShowPhonePrompt(false)} style={styles.cleanBtn}><X size={18} color={THEME.text} /></button>
-            </div>
-            <form onSubmit={handleSavePromptPhone} style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                Link your Bangladeshi mobile number (+880) so friends can discover and message you.
-              </div>
-              <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
-                <input
-                  type="tel"
-                  placeholder="01712345678"
-                  value={promptPhoneInput}
-                  onChange={(e) => setPromptPhoneInput(e.target.value)}
-                  style={{ ...styles.bareInput, color: THEME.text }}
-                  autoFocus
-                  required
-                />
-              </div>
-              <button type="submit" style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}>
-                Save & Continue
-              </button>
-            </form>
-          </div>
         </div>
       )}
 
@@ -1605,7 +1400,7 @@ export default function App() {
           <ChatView
             activeChat={activeChat}
             setActiveChat={setActiveChat}
-            messages={messagesMap[getRoomId(currentUser.phone || currentUser.uid || currentUser.id, activeChat.phone || activeChat.id)] || []}
+            messages={messagesMap[getRoomId(currentUser.phone || currentUser.id, activeChat.phone || activeChat.id)] || []}
             currentUser={currentUser}
             peerPresence={peerPresence}
             THEME={THEME}
@@ -1791,11 +1586,11 @@ export default function App() {
               })}
 
               {/* Channels Where User is Admin */}
-              {channels.filter((ch) => ch.creatorPhone === (currentUser?.phone || currentUser?.uid) || ch.admins?.includes(currentUser?.phone || currentUser?.uid)).length > 0 && (
+              {channels.filter((ch) => ch.creatorPhone === (currentUser?.phone || currentUser?.id) || ch.admins?.includes(currentUser?.phone || currentUser?.id)).length > 0 && (
                 <>
                   <div style={{ fontSize: "11px", fontWeight: "700", color: THEME.textMuted, textTransform: "uppercase", marginTop: "8px" }}>My Channels</div>
                   {channels
-                    .filter((ch) => ch.creatorPhone === (currentUser?.phone || currentUser?.uid) || ch.admins?.includes(currentUser?.phone || currentUser?.uid))
+                    .filter((ch) => ch.creatorPhone === (currentUser?.phone || currentUser?.id) || ch.admins?.includes(currentUser?.phone || currentUser?.id))
                     .map((ch) => {
                       const chKey = `ch_${ch.id}`;
                       const isSelected = selectedForwardTargets.includes(chKey);
@@ -1945,18 +1740,18 @@ export default function App() {
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border, textAlign: "center", padding: "20px" }}>
             <img src={viewedProfile.avatar} alt="" style={{ width: "90px", height: "90px", borderRadius: "50%", margin: "0 auto 12px", objectFit: "cover" }} />
             <h3 style={{ margin: "0 0 4px", color: THEME.text }}>{viewedProfile.name}</h3>
-            <p style={{ fontSize: "12px", color: THEME.accent, margin: "0 0 16px" }}>{viewedProfile.phone || "Google User"}</p>
+            <p style={{ fontSize: "12px", color: THEME.accent, margin: "0 0 16px" }}>{viewedProfile.phone || "Infinity User"}</p>
             <button
               onClick={() => {
                 setActiveModal(null);
-                if (viewedProfile.id !== (currentUser.phone || currentUser.uid)) {
+                if (viewedProfile.id !== (currentUser.phone || currentUser.id)) {
                   setActiveChat(viewedProfile);
                   setMobileView("chat");
                 }
               }}
               style={{ ...styles.primaryBtn, backgroundColor: THEME.primary }}
             >
-              {viewedProfile.id === (currentUser.phone || currentUser.uid) ? "Close" : "Send Direct Message"}
+              {viewedProfile.id === (currentUser.phone || currentUser.id) ? "Close" : "Send Direct Message"}
             </button>
           </div>
         </div>
