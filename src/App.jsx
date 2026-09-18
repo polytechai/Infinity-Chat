@@ -15,8 +15,7 @@ import {
   signInWithPhoneNumber,
   signInWithPopup,
   GoogleAuthProvider,
-  signOut,
-  onAuthStateChanged
+  signOut
 } from "firebase/auth";
 import {
   MessageSquare,
@@ -33,8 +32,11 @@ import {
   BellOff,
   ShieldCheck,
   RotateCcw,
+  Eye,
+  EyeOff,
+  Lock,
   Phone,
-  ArrowRight
+  User
 } from "lucide-react";
 
 // Modular Imports
@@ -68,14 +70,17 @@ export default function App() {
     }
   });
 
-  // Auth Form State
-  const [authStep, setAuthStep] = useState("login"); // "login" | "otp"
+  // Auth View Modes: "login" | "register" | "otp"
+  const [authMode, setAuthMode] = useState("login");
   const [phoneInput, setPhoneInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+  const [nameInput, setNameInput] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
   const [confirmationResult, setConfirmationResult] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Post-login prompt for Google users without a phone number
+  // Post-Google Login Phone Setup Modal
   const [showPhonePrompt, setShowPhonePrompt] = useState(false);
   const [promptPhoneInput, setPromptPhoneInput] = useState("");
 
@@ -150,7 +155,7 @@ export default function App() {
     setTimeout(() => setToastMessage(""), 3500);
   };
 
-  // --- ANDROID BACK BUTTON HARDWARE BEHAVIOR ---
+  // --- ANDROID HARDWARE BACK BUTTON NAVIGATION ---
   useEffect(() => {
     window.history.pushState({ page: "root" }, "");
     const handlePopState = () => {
@@ -182,7 +187,7 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, [incomingCall, activeCall, lightboxMedia, forwardModalMsg, activeModal, mobileView]);
 
-  // Check if logged-in user needs a phone number setup
+  // Check if logged-in user lacks a phone number
   useEffect(() => {
     if (currentUser && !currentUser.phone) {
       setShowPhonePrompt(true);
@@ -212,7 +217,7 @@ export default function App() {
       recaptchaVerifierRef.current = verifier;
       return verifier;
     } catch (err) {
-      console.error("Recaptcha init failed:", err);
+      console.error("Recaptcha init error:", err);
       return null;
     }
   };
@@ -227,7 +232,146 @@ export default function App() {
     };
   }, []);
 
-  // --- 1. 1-CLICK GOOGLE SIGN-IN ---
+  // --- 1. PHONE NUMBER + PASSWORD LOGIN ---
+  const handlePhonePasswordLogin = async (e) => {
+    e?.preventDefault();
+    const cleanPhone = normalizePhone(phoneInput);
+    if (!isValidBDPhone(cleanPhone)) {
+      showToast("Please enter a valid 11-digit Bangladeshi number (013-019)");
+      return;
+    }
+    if (!passwordInput || passwordInput.length < 6) {
+      showToast("Password must be at least 6 characters");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const userDocRef = doc(db, "users", cleanPhone);
+      const userSnap = await getDoc(userDocRef);
+
+      if (!userSnap.exists()) {
+        showToast("Account not found. Please create an account.");
+        setAuthMode("register");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const userData = userSnap.data();
+      if (userData.password && userData.password !== passwordInput) {
+        showToast("Incorrect password. Please try again.");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const fullUser = { ...userData, id: cleanPhone, phone: cleanPhone };
+      setCurrentUser(fullUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
+      showToast(`Welcome back, ${fullUser.name || "User"}!`);
+    } catch (err) {
+      showToast("Login failed: " + err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // --- 2. REGISTRATION: SEND SMS OTP ---
+  const handleStartRegistration = async (e) => {
+    e?.preventDefault();
+    const cleanPhone = normalizePhone(phoneInput);
+    if (!isValidBDPhone(cleanPhone)) {
+      showToast("Please enter a valid 11-digit Bangladeshi number (013-019)");
+      return;
+    }
+    if (!nameInput.trim()) {
+      showToast("Please enter your name");
+      return;
+    }
+    if (!passwordInput || passwordInput.length < 6) {
+      showToast("Create a password with at least 6 characters");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const userSnap = await getDoc(doc(db, "users", cleanPhone));
+      if (userSnap.exists()) {
+        showToast("This number is already registered. Please log in.");
+        setAuthMode("login");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const verifier = initRecaptcha();
+      if (!verifier) {
+        throw new Error("reCAPTCHA verifier not initialized.");
+      }
+
+      const formattedNumber = `+88${cleanPhone}`;
+      const confirmation = await signInWithPhoneNumber(auth, formattedNumber, verifier);
+      setConfirmationResult(confirmation);
+      setAuthMode("otp");
+      showToast(`6-Digit SMS verification code sent to ${formattedNumber}`);
+    } catch (err) {
+      console.error("SMS Error:", err);
+      if (recaptchaVerifierRef.current) {
+        try {
+          recaptchaVerifierRef.current.clear();
+          recaptchaVerifierRef.current = null;
+        } catch (e) {}
+      }
+      showToast("Failed to send SMS: " + (err.message || "Please try again."));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // --- 3. REGISTRATION: VERIFY SMS OTP & CREATE ACCOUNT ---
+  const handleVerifyOtpAndRegister = async (enteredOtp) => {
+    const code = enteredOtp || otpArray.join("");
+    if (code.length !== 6) {
+      showToast("Please enter all 6 digits of the SMS code");
+      return;
+    }
+    if (!confirmationResult) {
+      showToast("Session expired. Please request a new code.");
+      setAuthMode("register");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await confirmationResult.confirm(code);
+      const fbUser = res.user;
+      const cleanPhone = normalizePhone(phoneInput);
+
+      const newUser = {
+        id: cleanPhone,
+        uid: fbUser.uid,
+        name: nameInput.trim(),
+        phone: cleanPhone,
+        password: passwordInput,
+        avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+        isOnline: true,
+        lastSeen: new Date().toISOString(),
+        createdAt: new Date().toISOString()
+      };
+
+      await setDoc(doc(db, "users", cleanPhone), newUser);
+      await setDoc(doc(db, "users", fbUser.uid), newUser, { merge: true });
+
+      setCurrentUser(newUser);
+      localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
+      showToast(`Account created! Welcome, ${newUser.name}`);
+    } catch (err) {
+      console.error("OTP Error:", err);
+      showToast("Invalid or expired SMS OTP code.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // --- 4. 1-CLICK GOOGLE SIGN-IN ---
   const handleGoogleSignIn = async () => {
     setIsSubmitting(true);
     try {
@@ -246,7 +390,7 @@ export default function App() {
         fullUser = {
           id: gUser.uid,
           uid: gUser.uid,
-          name: gUser.displayName || "Infinity User",
+          name: gUser.displayName || "Google User",
           email: gUser.email,
           phone: "",
           avatar: gUser.photoURL || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
@@ -266,97 +410,8 @@ export default function App() {
       }
     } catch (err) {
       if (err.code !== "auth/popup-closed-by-user") {
-        showToast("Google Login failed: " + err.message);
+        showToast("Google Auth failed: " + err.message);
       }
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // --- 2. PHONE SMS OTP: SEND CODE ---
-  const handleSendOtp = async (e) => {
-    e?.preventDefault();
-    const clean = normalizePhone(phoneInput);
-    if (!isValidBDPhone(clean)) {
-      showToast("Please enter a valid 11-digit Bangladeshi mobile number (013-019)");
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const verifier = initRecaptcha();
-      if (!verifier) {
-        throw new Error("reCAPTCHA element not ready in DOM.");
-      }
-
-      const formattedNumber = `+88${clean}`;
-      const confirmation = await signInWithPhoneNumber(auth, formattedNumber, verifier);
-      setConfirmationResult(confirmation);
-      setAuthStep("otp");
-      showToast(`6-Digit OTP sent via SMS to ${formattedNumber}`);
-    } catch (err) {
-      console.error("SMS OTP error:", err);
-      if (recaptchaVerifierRef.current) {
-        try {
-          recaptchaVerifierRef.current.clear();
-          recaptchaVerifierRef.current = null;
-        } catch (e) {}
-      }
-      showToast("Failed to send OTP: " + (err.message || "Request rejected."));
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // --- 2. PHONE SMS OTP: VERIFY CODE ---
-  const handleVerifyOtp = async (enteredOtp) => {
-    const code = enteredOtp || otpArray.join("");
-    if (code.length !== 6) {
-      showToast("Please enter the complete 6-digit OTP code");
-      return;
-    }
-
-    if (!confirmationResult) {
-      showToast("Verification session expired. Please send OTP again.");
-      setAuthStep("login");
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const res = await confirmationResult.confirm(code);
-      const fbUser = res.user;
-      const clean = normalizePhone(phoneInput);
-
-      const userDocRef = doc(db, "users", fbUser.uid);
-      const snap = await getDoc(userDocRef);
-
-      let fullUser;
-      if (snap.exists()) {
-        fullUser = { ...snap.data(), id: fbUser.uid, uid: fbUser.uid, phone: clean };
-      } else {
-        fullUser = {
-          id: fbUser.uid,
-          uid: fbUser.uid,
-          name: `User ${clean.slice(-4)}`,
-          phone: clean,
-          avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
-          isOnline: true,
-          lastSeen: new Date().toISOString(),
-          createdAt: new Date().toISOString()
-        };
-        await setDoc(userDocRef, fullUser, { merge: true });
-      }
-
-      // Also index by phone for fast contact lookups
-      await setDoc(doc(db, "users", clean), fullUser, { merge: true });
-
-      setCurrentUser(fullUser);
-      localStorage.setItem("infinity_chat_user", JSON.stringify(fullUser));
-      showToast(`Verified! Welcome, ${fullUser.name}`);
-    } catch (err) {
-      console.error("OTP confirmation error:", err);
-      showToast("Invalid or expired verification code.");
     } finally {
       setIsSubmitting(false);
     }
@@ -392,8 +447,10 @@ export default function App() {
     } catch (e) {}
     localStorage.removeItem("infinity_chat_user");
     setCurrentUser(null);
-    setAuthStep("login");
+    setAuthMode("login");
     setPhoneInput("");
+    setPasswordInput("");
+    setNameInput("");
     setOtpArray(["", "", "", "", "", ""]);
     setConfirmationResult(null);
     setActiveChat(null);
@@ -918,11 +975,11 @@ export default function App() {
 
   // ================= RENDER =================
 
-  // If user is not authenticated, render Login Form
+  // If user is not authenticated, render Login / Register / OTP screens
   if (!currentUser) {
     return (
       <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg }}>
-        {/* Real Invisible Recaptcha DOM Element (Always Present) */}
+        {/* Visible or Invisible Recaptcha DOM Element (Required by Firebase) */}
         <div id="recaptcha-container"></div>
 
         <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
@@ -935,10 +992,9 @@ export default function App() {
             Real-time low latency messaging & social channels
           </p>
 
-          {/* STEP 1: LOGIN (Google or Phone) */}
-          {authStep === "login" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              {/* 1-Click Google Sign-In */}
+          {/* 1-Click Google Sign-In */}
+          {authMode !== "otp" && (
+            <>
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
@@ -956,7 +1012,8 @@ export default function App() {
                   fontSize: "13px",
                   fontWeight: "600",
                   boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
-                  opacity: isSubmitting ? 0.7 : 1
+                  opacity: isSubmitting ? 0.7 : 1,
+                  marginBottom: "16px"
                 }}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24">
@@ -980,67 +1037,183 @@ export default function App() {
                 <span>Continue with Google</span>
               </button>
 
-              <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "4px 0" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", margin: "14px 0" }}>
                 <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
-                <span style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: "600" }}>OR SMS OTP</span>
+                <span style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: "600" }}>OR PHONE AUTH</span>
                 <div style={{ flex: 1, height: "1px", backgroundColor: THEME.border }} />
               </div>
-
-              {/* Phone OTP Form */}
-              <form onSubmit={handleSendOtp} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-                <div>
-                  <label style={styles.label}>Bangladeshi Mobile Number</label>
-                  <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                    <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
-                    <input
-                      type="tel"
-                      placeholder="01712345678"
-                      value={phoneInput}
-                      onChange={(e) => setPhoneInput(e.target.value)}
-                      style={{ ...styles.bareInput, color: THEME.text }}
-                      autoFocus
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.textMuted, fontSize: "11px" }}>
-                  <ShieldCheck size={14} color={THEME.accent} />
-                  <span>A 6-digit SMS verification code will be sent to your phone.</span>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  style={{
-                    ...styles.primaryBtn,
-                    backgroundColor: THEME.primary,
-                    opacity: isSubmitting ? 0.7 : 1
-                  }}
-                >
-                  {isSubmitting ? "Sending SMS OTP..." : "Send Verification Code"}
-                </button>
-              </form>
-            </div>
+            </>
           )}
 
-          {/* STEP 2: 6-DIGIT OTP VERIFICATION */}
-          {authStep === "otp" && (
+          {/* MODE A: LOGIN (Phone + Password) */}
+          {authMode === "login" && (
+            <form onSubmit={handlePhonePasswordLogin} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <div>
+                <label style={styles.label}>Bangladeshi Mobile Number</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
+                  <input
+                    type="tel"
+                    placeholder="01712345678"
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    autoFocus
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={styles.label}>Password</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    placeholder="Enter your password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={styles.cleanBtn}
+                  >
+                    {showPassword ? <EyeOff size={16} color={THEME.textMuted} /> : <Eye size={16} color={THEME.textMuted} />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: THEME.primary,
+                  opacity: isSubmitting ? 0.7 : 1
+                }}
+              >
+                {isSubmitting ? "Logging In..." : "Log In"}
+              </button>
+
+              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted, marginTop: "6px" }}>
+                Don't have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode("register");
+                    setPasswordInput("");
+                  }}
+                  style={{ ...styles.linkBtn, color: THEME.primary }}
+                >
+                  Create an Account
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* MODE B: REGISTER (Phone, Name, Password & Send SMS OTP) */}
+          {authMode === "register" && (
+            <form onSubmit={handleStartRegistration} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div>
+                <label style={styles.label}>Your Name</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type="text"
+                    placeholder="e.g. Tanvir Ahmed"
+                    value={nameInput}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                    autoFocus
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={styles.label}>Mobile Number (+880)</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
+                  <input
+                    type="tel"
+                    placeholder="01712345678"
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={styles.label}>Create Password (min 6 characters)</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    placeholder="Set your password"
+                    value={passwordInput}
+                    onChange={(e) => setPasswordInput(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={styles.cleanBtn}
+                  >
+                    {showPassword ? <EyeOff size={16} color={THEME.textMuted} /> : <Eye size={16} color={THEME.textMuted} />}
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", color: THEME.textMuted, fontSize: "11px" }}>
+                <ShieldCheck size={14} color={THEME.accent} />
+                <span>A 6-digit SMS code will be sent to verify this number.</span>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: THEME.primary,
+                  opacity: isSubmitting ? 0.7 : 1
+                }}
+              >
+                {isSubmitting ? "Sending SMS OTP..." : "Send Verification Code"}
+              </button>
+
+              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted, marginTop: "4px" }}>
+                Already have an account?{" "}
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("login")}
+                  style={{ ...styles.linkBtn, color: THEME.primary }}
+                >
+                  Log In
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* MODE C: 6-DIGIT SMS OTP CONFIRMATION */}
+          {authMode === "otp" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
-                Enter the 6-digit code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
+                Enter the 6-digit SMS code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
               </div>
 
               <OtpInput
                 otp={otpArray}
                 setOtp={setOtpArray}
-                onComplete={handleVerifyOtp}
+                onComplete={handleVerifyOtpAndRegister}
                 THEME={THEME}
               />
 
               <button
                 type="button"
-                onClick={() => handleVerifyOtp(otpArray.join(""))}
+                onClick={() => handleVerifyOtpAndRegister(otpArray.join(""))}
                 disabled={isSubmitting || otpArray.some((d) => d === "")}
                 style={{
                   ...styles.primaryBtn,
@@ -1048,20 +1221,20 @@ export default function App() {
                   opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
                 }}
               >
-                {isSubmitting ? "Verifying..." : "Verify & Sign In"}
+                {isSubmitting ? "Verifying..." : "Verify & Create Account"}
               </button>
 
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <button
                   type="button"
-                  onClick={() => setAuthStep("login")}
+                  onClick={() => setAuthMode("register")}
                   style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px" }}
                 >
-                  Edit Number
+                  Edit Details
                 </button>
                 <button
                   type="button"
-                  onClick={handleSendOtp}
+                  onClick={handleStartRegistration}
                   disabled={isSubmitting}
                   style={{ ...styles.linkBtn, color: THEME.primary, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
                 >
@@ -1086,7 +1259,7 @@ export default function App() {
         </div>
       )}
 
-      {/* --- MODAL: POST-LOGIN PHONE NUMBER PROMPT --- */}
+      {/* --- MODAL: GOOGLE POST-LOGIN PHONE NUMBER SETUP --- */}
       {showPhonePrompt && (
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
@@ -1096,7 +1269,7 @@ export default function App() {
             </div>
             <form onSubmit={handleSavePromptPhone} style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
               <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                Link your Bangladeshi mobile number so contacts can discover you and start encrypted chats.
+                Link your Bangladeshi mobile number (+880) so friends can discover and message you.
               </div>
               <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
                 <span style={{ fontSize: "14px", fontWeight: "bold", color: THEME.primary, paddingRight: "4px" }}>+880</span>
