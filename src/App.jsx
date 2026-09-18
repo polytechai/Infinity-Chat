@@ -70,12 +70,15 @@ export default function App() {
     }
   });
 
-  // Auth View Modes: "login" | "register" | "otp"
+  // Auth View Modes: "login" | "register"
   const [authMode, setAuthMode] = useState("login");
   const [phoneInput, setPhoneInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [nameInput, setNameInput] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+
+  // Dedicated SMS OTP States
+  const [otpSent, setOtpSent] = useState(false);
   const [otpArray, setOtpArray] = useState(["", "", "", "", "", ""]);
   const [confirmationResult, setConfirmationResult] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -83,8 +86,6 @@ export default function App() {
   // Post-Google Login Phone Setup Modal
   const [showPhonePrompt, setShowPhonePrompt] = useState(false);
   const [promptPhoneInput, setPromptPhoneInput] = useState("");
-
-  const recaptchaVerifierRef = useRef(null);
 
   // Settings & Theme Preferences
   const [lang, setLang] = useState(() => localStorage.getItem("infinity_lang") || "bn");
@@ -194,39 +195,13 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // --- RECAPTCHA INITIALIZER ---
-  const initRecaptcha = () => {
-    if (recaptchaVerifierRef.current) {
-      return recaptchaVerifierRef.current;
-    }
-    const container = document.getElementById("recaptcha-container");
-    if (!container) return null;
-
-    try {
-      const verifier = new RecaptchaVerifier(
-        auth,
-        "recaptcha-container",
-        {
-          size: "invisible",
-          callback: () => {},
-          "expired-callback": () => {
-            showToast("Recaptcha expired. Please try sending OTP again.");
-          }
-        }
-      );
-      recaptchaVerifierRef.current = verifier;
-      return verifier;
-    } catch (err) {
-      console.error("Recaptcha init error:", err);
-      return null;
-    }
-  };
-
+  // --- CLEAN UP RECAPTCHA ON UNMOUNT ---
   useEffect(() => {
     return () => {
-      if (recaptchaVerifierRef.current) {
+      if (window.recaptchaVerifier) {
         try {
-          recaptchaVerifierRef.current.clear();
+          window.recaptchaVerifier.clear();
+          window.recaptchaVerifier = null;
         } catch (e) {}
       }
     };
@@ -275,7 +250,7 @@ export default function App() {
     }
   };
 
-  // --- 2. REGISTRATION: SEND SMS OTP ---
+  // --- 2. REGISTRATION: SEND SMS OTP (ROBUST RECAPTCHA HANDLING) ---
   const handleStartRegistration = async (e) => {
     e?.preventDefault();
     const cleanPhone = normalizePhone(phoneInput);
@@ -294,6 +269,7 @@ export default function App() {
 
     setIsSubmitting(true);
     try {
+      // Fast check if user already exists
       const userSnap = await getDoc(doc(db, "users", cleanPhone));
       if (userSnap.exists()) {
         showToast("This number is already registered. Please log in.");
@@ -302,31 +278,47 @@ export default function App() {
         return;
       }
 
-      const verifier = initRecaptcha();
-      if (!verifier) {
-        throw new Error("reCAPTCHA verifier not initialized.");
-      }
-
-      const formattedNumber = `+88${cleanPhone}`;
-      const confirmation = await signInWithPhoneNumber(auth, formattedNumber, verifier);
-      setConfirmationResult(confirmation);
-      setAuthMode("otp");
-      showToast(`6-Digit SMS verification code sent to ${formattedNumber}`);
-    } catch (err) {
-      console.error("SMS Error:", err);
-      if (recaptchaVerifierRef.current) {
+      // Initialize or clear window.recaptchaVerifier cleanly
+      if (window.recaptchaVerifier) {
         try {
-          recaptchaVerifierRef.current.clear();
-          recaptchaVerifierRef.current = null;
+          window.recaptchaVerifier.clear();
         } catch (e) {}
       }
-      showToast("Failed to send SMS: " + (err.message || "Please try again."));
+
+      window.recaptchaVerifier = new RecaptchaVerifier(
+        auth,
+        "recaptcha-container",
+        {
+          size: "invisible",
+          callback: () => {},
+          "expired-callback": () => {
+            showToast("Recaptcha expired. Please try sending OTP again.");
+            setIsSubmitting(false);
+          }
+        }
+      );
+
+      const formattedNumber = `+88${cleanPhone}`;
+      const confirmation = await signInWithPhoneNumber(auth, formattedNumber, window.recaptchaVerifier);
+
+      setConfirmationResult(confirmation);
+      setOtpSent(true);
+      showToast(`6-Digit SMS verification code sent to ${formattedNumber}`);
+    } catch (err) {
+      console.error("SMS Dispatch Error:", err);
+      if (window.recaptchaVerifier) {
+        try {
+          window.recaptchaVerifier.clear();
+          window.recaptchaVerifier = null;
+        } catch (e) {}
+      }
+      showToast("Failed to send SMS: " + (err.message || "Please check your network or number."));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- 3. REGISTRATION: VERIFY SMS OTP & CREATE ACCOUNT ---
+  // --- 3. REGISTRATION: CONFIRM SMS OTP & FINALIZE ACCOUNT ---
   const handleVerifyOtpAndRegister = async (enteredOtp) => {
     const code = enteredOtp || otpArray.join("");
     if (code.length !== 6) {
@@ -335,7 +327,7 @@ export default function App() {
     }
     if (!confirmationResult) {
       showToast("Session expired. Please request a new code.");
-      setAuthMode("register");
+      setOtpSent(false);
       return;
     }
 
@@ -362,9 +354,10 @@ export default function App() {
 
       setCurrentUser(newUser);
       localStorage.setItem("infinity_chat_user", JSON.stringify(newUser));
+      setOtpSent(false);
       showToast(`Account created! Welcome, ${newUser.name}`);
     } catch (err) {
-      console.error("OTP Error:", err);
+      console.error("OTP Verification Error:", err);
       showToast("Invalid or expired SMS OTP code.");
     } finally {
       setIsSubmitting(false);
@@ -448,6 +441,7 @@ export default function App() {
     localStorage.removeItem("infinity_chat_user");
     setCurrentUser(null);
     setAuthMode("login");
+    setOtpSent(false);
     setPhoneInput("");
     setPasswordInput("");
     setNameInput("");
@@ -979,7 +973,7 @@ export default function App() {
   if (!currentUser) {
     return (
       <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg }}>
-        {/* Visible or Invisible Recaptcha DOM Element (Required by Firebase) */}
+        {/* Recaptcha DOM Element (Explicitly mounted in DOM for Firebase Phone Auth) */}
         <div id="recaptcha-container"></div>
 
         <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
@@ -993,7 +987,7 @@ export default function App() {
           </p>
 
           {/* 1-Click Google Sign-In */}
-          {authMode !== "otp" && (
+          {!otpSent && (
             <>
               <button
                 type="button"
@@ -1045,8 +1039,57 @@ export default function App() {
             </>
           )}
 
-          {/* MODE A: LOGIN (Phone + Password) */}
-          {authMode === "login" && (
+          {/* VIEW 1: 6-DIGIT SMS OTP CONFIRMATION (ACTIVE WHEN otpSent === true) */}
+          {otpSent ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
+                Enter the 6-digit SMS code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
+              </div>
+
+              <OtpInput
+                otp={otpArray}
+                setOtp={setOtpArray}
+                onComplete={handleVerifyOtpAndRegister}
+                THEME={THEME}
+              />
+
+              <button
+                type="button"
+                onClick={() => handleVerifyOtpAndRegister(otpArray.join(""))}
+                disabled={isSubmitting || otpArray.some((d) => d === "")}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: THEME.primary,
+                  opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
+                }}
+              >
+                {isSubmitting ? "Verifying..." : "Verify & Create Account"}
+              </button>
+
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOtpSent(false);
+                    setOtpArray(["", "", "", "", "", ""]);
+                  }}
+                  style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px" }}
+                >
+                  Edit Details
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartRegistration}
+                  disabled={isSubmitting}
+                  style={{ ...styles.linkBtn, color: THEME.primary, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
+                >
+                  <RotateCcw size={12} />
+                  <span>Resend Code</span>
+                </button>
+              </div>
+            </div>
+          ) : authMode === "login" ? (
+            /* VIEW 2: PHONE + PASSWORD LOGIN */
             <form onSubmit={handlePhonePasswordLogin} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
               <div>
                 <label style={styles.label}>Bangladeshi Mobile Number</label>
@@ -1111,10 +1154,8 @@ export default function App() {
                 </button>
               </div>
             </form>
-          )}
-
-          {/* MODE B: REGISTER (Phone, Name, Password & Send SMS OTP) */}
-          {authMode === "register" && (
+          ) : (
+            /* VIEW 3: REGISTRATION (Phone, Name, Password & Send SMS OTP) */
             <form onSubmit={handleStartRegistration} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div>
                 <label style={styles.label}>Your Name</label>
@@ -1195,54 +1236,6 @@ export default function App() {
                 </button>
               </div>
             </form>
-          )}
-
-          {/* MODE C: 6-DIGIT SMS OTP CONFIRMATION */}
-          {authMode === "otp" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              <div style={{ textAlign: "center", fontSize: "12px", color: THEME.textMuted }}>
-                Enter the 6-digit SMS code sent to <strong>+880 {normalizePhone(phoneInput)}</strong>
-              </div>
-
-              <OtpInput
-                otp={otpArray}
-                setOtp={setOtpArray}
-                onComplete={handleVerifyOtpAndRegister}
-                THEME={THEME}
-              />
-
-              <button
-                type="button"
-                onClick={() => handleVerifyOtpAndRegister(otpArray.join(""))}
-                disabled={isSubmitting || otpArray.some((d) => d === "")}
-                style={{
-                  ...styles.primaryBtn,
-                  backgroundColor: THEME.primary,
-                  opacity: isSubmitting || otpArray.some((d) => d === "") ? 0.6 : 1
-                }}
-              >
-                {isSubmitting ? "Verifying..." : "Verify & Create Account"}
-              </button>
-
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <button
-                  type="button"
-                  onClick={() => setAuthMode("register")}
-                  style={{ ...styles.linkBtn, color: THEME.textMuted, fontSize: "11px" }}
-                >
-                  Edit Details
-                </button>
-                <button
-                  type="button"
-                  onClick={handleStartRegistration}
-                  disabled={isSubmitting}
-                  style={{ ...styles.linkBtn, color: THEME.primary, fontSize: "11px", display: "flex", alignItems: "center", gap: "4px" }}
-                >
-                  <RotateCcw size={12} />
-                  <span>Resend Code</span>
-                </button>
-              </div>
-            </div>
           )}
         </div>
       </div>
