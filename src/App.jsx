@@ -8,8 +8,7 @@ import {
   onSnapshot,
   query,
   orderBy,
-  limit,
-  serverTimestamp
+  limit
 } from "firebase/firestore";
 import {
   MessageSquare,
@@ -20,15 +19,13 @@ import {
   Plus,
   Search,
   Users,
-  Check,
-  CheckCheck,
   X,
   Send,
   Pin,
   BellOff
 } from "lucide-react";
 
-// Independent Modular Imports
+// Modular Imports
 import {
   db,
   RTC_CONFIG,
@@ -219,7 +216,7 @@ export default function App() {
     return () => unsub();
   }, [currentUser?.phone]);
 
-  // --- FIRESTORE ACTIVE CHAT MESSAGES REAL-TIME LISTENER (<10ms updates) ---
+  // --- FIRESTORE ACTIVE CHAT MESSAGES REAL-TIME LISTENER ---
   useEffect(() => {
     if (!currentUser?.phone || !activeChat?.id) return;
     const myNorm = normalizePhone(currentUser.phone);
@@ -234,7 +231,6 @@ export default function App() {
         const m = { id: d.id, ...d.data() };
         msgs.push(m);
 
-        // Mark incoming messages as read
         if (normalizePhone(m.senderPhone) !== myNorm && m.status !== "read") {
           updateDoc(doc(db, "rooms", roomId, "messages", d.id), { status: "read" }).catch(() => {});
         }
@@ -242,7 +238,6 @@ export default function App() {
       setMessagesMap((prev) => ({ ...prev, [roomId]: msgs }));
     });
 
-    // Also listen to peer presence
     const peerDocRef = doc(db, "users", peerNorm);
     const unsubPeer = onSnapshot(peerDocRef, (d) => {
       if (d.exists()) {
@@ -396,7 +391,6 @@ export default function App() {
 
     for (const targetId of selectedForwardTargets) {
       if (targetId.startsWith("ch_")) {
-        // Forwarding to a channel
         const chId = targetId.replace("ch_", "");
         const targetChannel = channels.find((c) => c.id === chId);
         if (targetChannel) {
@@ -412,7 +406,6 @@ export default function App() {
           );
         }
       } else {
-        // Forwarding to contact chat
         const roomId = getRoomId(myNorm, targetId);
         const newMsg = {
           senderPhone: myNorm,
@@ -468,7 +461,6 @@ export default function App() {
       createdAt: new Date().toISOString()
     };
 
-    // Write to channel subcollection and global social feed
     await setDoc(doc(db, "channels", channel.id, "posts", postId), postPayload);
     await setDoc(doc(db, "channel_posts", postId), postPayload);
   };
@@ -576,7 +568,6 @@ export default function App() {
         createdAt: new Date().toISOString()
       });
 
-      // Listen for answer and status changes
       const unsub = onSnapshot(callDocRef, (snap) => {
         if (!snap.exists()) return;
         const data = snap.data();
@@ -1249,7 +1240,7 @@ export default function App() {
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
             <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
-              <div style={{ fontWeight: "700", fontSize: "15px", display: "flex", alignItems: "center", gap: "6px" }}>
+              <div style={{ fontWeight: "700", fontSize: "15px", display: "flex", alignItems: "center", gap: "6px", color: THEME.text }}>
                 <Share2 size={16} color={THEME.primary} />
                 <span>Forward to...</span>
               </div>
