@@ -4,6 +4,7 @@ import {
   doc,
   setDoc,
   getDoc,
+  updateDoc,
   query,
   where,
   onSnapshot,
@@ -76,6 +77,16 @@ export default function Channels({
   // View Filter: 'active' | 'archived'
   const [viewFilter, setViewFilter] = useState("active");
 
+  // Local unread counts fallback state
+  const [readChatIds, setReadChatIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`infinity_read_${currentUserId}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
   // Local persistence for Pinned, Muted, Archived, and Deleted per current user
   const [userPinnedIds, setUserPinnedIds] = useState(() => {
     try {
@@ -128,6 +139,21 @@ export default function Channels({
     return digits.slice(0, 11);
   };
 
+  // Helper to parse date / timestamp to epoch milliseconds for accurate sorting
+  const getTimestampMillis = (item) => {
+    const raw =
+      item.lastMessageTimestamp ||
+      item.updatedAt ||
+      item.lastMessageTime ||
+      item.createdAt;
+    if (!raw) return 0;
+    if (typeof raw === "number") return raw;
+    if (raw?.toMillis) return raw.toMillis();
+    if (raw?.seconds) return raw.seconds * 1000;
+    const parsed = new Date(raw).getTime();
+    return isNaN(parsed) ? 0 : parsed;
+  };
+
   // --- 1. STRICT PRIVATE CONVERSATION QUERY ---
   useEffect(() => {
     if (!currentUserId) return;
@@ -137,7 +163,6 @@ export default function Channels({
     const q = query(
       convCol,
       where("participants", "array-contains", currentUserId),
-      orderBy("updatedAt", "desc"),
       limit(50)
     );
 
@@ -157,13 +182,7 @@ export default function Channels({
       },
       (error) => {
         console.warn("Private query fallback:", error.message);
-        const fallbackQ = query(convCol, where("participants", "array-contains", currentUserId));
-        onSnapshot(fallbackQ, (snap) => {
-          const list = [];
-          snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
-          setPrivateConversations(list);
-          setIsLoadingChats(false);
-        });
+        setIsLoadingChats(false);
       }
     );
 
@@ -187,7 +206,7 @@ export default function Channels({
     return combined.filter((item) => !userDeletedIds.includes(item.id));
   }, [channels, privateConversations, currentUserId, userDeletedIds]);
 
-  // Filter into Active vs Archived, Apply Search, and Sort with Pinned on Top
+  // Filter Active vs Archived, Apply Search, and SORT BY LATEST TIMESTAMP & PINNED
   const displayedItems = useMemo(() => {
     let list = userIsolatedItems.filter((item) => {
       const isArchived = userArchivedIds.includes(item.id);
@@ -204,17 +223,70 @@ export default function Channels({
       });
     }
 
-    // Sort: Pinned items stay strictly on top
+    // --- SORTING LOGIC: Pinned on top, then strictly by Latest Message Timestamp descending ---
     return list.sort((a, b) => {
       const aPinned = userPinnedIds.includes(a.id);
       const bPinned = userPinnedIds.includes(b.id);
       if (aPinned && !bPinned) return -1;
       if (!aPinned && bPinned) return 1;
-      return 0;
+
+      const timeA = getTimestampMillis(a);
+      const timeB = getTimestampMillis(b);
+      return timeB - timeA;
     });
   }, [userIsolatedItems, userArchivedIds, userPinnedIds, viewFilter, searchTerm]);
 
-  // --- 2. LONG-PRESS TOUCH & MOUSE EVENT HANDLERS (~500ms) ---
+  // Calculate unread count for a given item
+  const getUnreadCount = (item) => {
+    if (activeChannel?.id === item.id) return 0;
+    if (readChatIds.includes(item.id)) return 0;
+
+    // Check Firestore unread count map: unreadCount[currentUserId]
+    if (item.unreadCount && typeof item.unreadCount === "object") {
+      const count = item.unreadCount[currentUserId];
+      if (typeof count === "number") return count;
+    }
+
+    if (typeof item.unreadCount === "number" && item.lastSender !== currentUserId) {
+      return item.unreadCount;
+    }
+
+    return 0;
+  };
+
+  // --- 2. OPEN CHAT & CLEAR UNREAD BADGE ---
+  const handleItemClick = async (item) => {
+    if (isLongPressTriggered.current) {
+      isLongPressTriggered.current = false;
+      return;
+    }
+
+    // Mark as read locally
+    if (!readChatIds.includes(item.id)) {
+      const updated = [...readChatIds, item.id];
+      setReadChatIds(updated);
+      try {
+        localStorage.setItem(`infinity_read_${currentUserId}`, JSON.stringify(updated));
+      } catch (e) {}
+    }
+
+    // Reset unread count in Firestore conversation doc if present
+    if (item.isPrivateChat && item.unreadCount && item.unreadCount[currentUserId]) {
+      try {
+        const convDocRef = doc(db, "conversations", item.id);
+        await updateDoc(convDocRef, {
+          [`unreadCount.${currentUserId}`]: 0
+        });
+      } catch (err) {
+        // Safe fail
+      }
+    }
+
+    setActiveChannel(item);
+    if (setMobileView) setMobileView("chat");
+  };
+
+  // --- 3. LONG-PRESS TOUCH & MOUSE EVENT HANDLERS (~500ms) ---
   const handleTouchStart = (e, item) => {
     isLongPressTriggered.current = false;
     if (e.touches && e.touches[0]) {
@@ -235,7 +307,6 @@ export default function Channels({
     const deltaX = Math.abs(e.touches[0].clientX - touchStartPos.current.x);
     const deltaY = Math.abs(e.touches[0].clientY - touchStartPos.current.y);
 
-    // If user scrolls or moves finger more than 10px, cancel long-press
     if (deltaX > 10 || deltaY > 10) {
       if (pressTimer.current) {
         clearTimeout(pressTimer.current);
@@ -251,16 +322,7 @@ export default function Channels({
     }
   };
 
-  const handleItemClick = (item) => {
-    if (isLongPressTriggered.current) {
-      isLongPressTriggered.current = false;
-      return;
-    }
-    setActiveChannel(item);
-    if (setMobileView) setMobileView("chat");
-  };
-
-  // --- 3. CONTEXT ACTION HANDLERS ---
+  // --- 4. CONTEXT ACTION HANDLERS ---
   const handleTogglePin = (id) => {
     const isCurrentlyPinned = userPinnedIds.includes(id);
     let nextPinned;
@@ -333,7 +395,7 @@ export default function Channels({
     setContextItem(null);
   };
 
-  // --- 4. START NEW CHAT ---
+  // --- 5. START NEW CHAT ---
   const handleStartNewChat = async (e) => {
     e.preventDefault();
     const phone = cleanPhone(contactPhoneInput);
@@ -369,8 +431,13 @@ export default function Channels({
           [phone]: { name: targetData.name || phone, phone: phone }
         },
         lastMessage: initialMessageText.trim() || "Started a private conversation",
+        lastMessageTimestamp: Date.now(),
         updatedAt: new Date().toISOString(),
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        unreadCount: {
+          [phone]: initialMessageText.trim() ? 1 : 0,
+          [currentUserId]: 0
+        }
       };
 
       await setDoc(convDocRef, conversationPayload, { merge: true });
@@ -391,8 +458,7 @@ export default function Channels({
       setShowNewChatModal(false);
       setContactPhoneInput("");
       setInitialMessageText("");
-      setActiveChannel(conversationPayload);
-      if (setMobileView) setMobileView("chat");
+      handleItemClick(conversationPayload);
       if (showToast) showToast(`Private chat started with ${targetData.name || phone}`);
     } catch (err) {
       console.error("Error creating conversation:", err);
@@ -528,7 +594,7 @@ export default function Channels({
           </div>
         </div>
 
-        {/* Scrollable Isolated List with Long-Press Event Detection */}
+        {/* Scrollable Isolated List with Dynamic Sorting & Unread Badges */}
         <div
           style={{
             flex: 1,
@@ -558,6 +624,7 @@ export default function Channels({
               const isSelected = activeChannel?.id === item.id;
               const isPinned = userPinnedIds.includes(item.id);
               const isMuted = userMutedIds.includes(item.id);
+              const unreadCount = getUnreadCount(item);
               const displayName = item.name || item.phone || "Chat";
               const avatarUrl = item.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${item.id}`;
 
@@ -581,35 +648,89 @@ export default function Channels({
                     borderLeft: isSelected ? `3px solid ${THEME.primary}` : "3px solid transparent",
                     userSelect: "none",
                     WebkitUserSelect: "none",
-                    position: "relative"
+                    position: "relative",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "10px",
+                    padding: "10px 8px"
                   }}
                 >
                   <img
                     src={avatarUrl}
                     alt=""
-                    style={{ width: "42px", height: "42px", borderRadius: "50%", objectFit: "cover" }}
+                    style={{ width: "42px", height: "42px", borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontWeight: "700", fontSize: "13px", color: THEME.text }}>{displayName}</span>
-                      <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                        {isPinned && <Pin size={13} color={THEME.primary} />}
-                        {isMuted && <BellOff size={13} color={THEME.danger} />}
-                        <span style={{ fontSize: "10px", color: THEME.textMuted }}>
-                          {item.updatedAt ? new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2px" }}>
+                      <span
+                        style={{
+                          fontWeight: unreadCount > 0 ? "800" : "700",
+                          fontSize: "13px",
+                          color: THEME.text,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis"
+                        }}
+                      >
+                        {displayName}
+                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                        {isPinned && <Pin size={12} color={THEME.primary} />}
+                        {isMuted && <BellOff size={12} color={THEME.danger} />}
+                        <span
+                          style={{
+                            fontSize: "10px",
+                            color: unreadCount > 0 ? THEME.primary : THEME.textMuted,
+                            fontWeight: unreadCount > 0 ? "700" : "normal"
+                          }}
+                        >
+                          {item.lastMessageTimestamp
+                            ? new Date(getTimestampMillis(item)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                            : item.updatedAt
+                            ? new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                            : ""}
                         </span>
                       </div>
                     </div>
-                    <div
-                      style={{
-                        fontSize: "11px",
-                        color: THEME.textMuted,
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis"
-                      }}
-                    >
-                      {item.lastMessage || item.desc || "ব্যক্তিগত বার্তা"}
+
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          color: unreadCount > 0 ? THEME.text : THEME.textMuted,
+                          fontWeight: unreadCount > 0 ? "600" : "normal",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          flex: 1,
+                          marginRight: "6px"
+                        }}
+                      >
+                        {item.lastMessage || item.desc || "ব্যক্তিগত বার্তা"}
+                      </span>
+
+                      {/* Green Circular Unread Message Counter Badge */}
+                      {unreadCount > 0 && (
+                        <span
+                          style={{
+                            backgroundColor: THEME.primary || "#22c55e",
+                            color: "#fff",
+                            fontSize: "10px",
+                            fontWeight: "800",
+                            minWidth: "18px",
+                            height: "18px",
+                            borderRadius: "10px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            padding: "0 5px",
+                            flexShrink: 0,
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.3)"
+                          }}
+                        >
+                          {unreadCount > 99 ? "99+" : unreadCount}
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -621,7 +742,8 @@ export default function Channels({
                     style={{
                       ...styles.cleanBtn,
                       color: THEME.textMuted,
-                      padding: "6px"
+                      padding: "6px",
+                      flexShrink: 0
                     }}
                     title="অপশন"
                   >
