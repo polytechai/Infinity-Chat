@@ -6,8 +6,6 @@ import {
   MoreVertical,
   Paperclip,
   Send,
-  Mic,
-  Smile,
   Check,
   CheckCheck,
   Pin,
@@ -17,9 +15,13 @@ import {
   Reply,
   Share2,
   X,
-  Download,
+  Copy,
+  Trash2,
+  Edit2,
+  CheckCircle,
+  FileText,
   Image as ImageIcon,
-  FileText
+  AlertCircle
 } from "lucide-react";
 import { styles } from "../firebase";
 
@@ -52,9 +54,14 @@ export default function ChatView({
   showToast
 }) {
   const [inputText, setInputText] = useState("");
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showChatOptions, setShowChatOptions] = useState(false);
+
+  // --- LONG-PRESS CONTEXT SELECTION STATE ---
+  const [selectedMessage, setSelectedMessage] = useState(null);
+  const [pinnedMessage, setPinnedMessage] = useState(null);
+  const [editingMessage, setEditingMessage] = useState(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // References for scrolling
   const messagesContainerRef = useRef(null);
@@ -62,34 +69,37 @@ export default function ChatView({
   const isInitialScrollDone = useRef(false);
   const prevMessagesLength = useRef(0);
 
-  const myIdent = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
+  // Long press timer ref
+  const pressTimerRef = useRef(null);
+  const isLongPressTriggered = useRef(false);
 
-  // Common quick emoji reaction list
-  const quickEmojis = ["❤️", "👍", "😂", "😮", "😢", "🔥"];
+  // Swipe gesture tracking
+  const touchStartPos = useRef({ x: 0, y: 0 });
+  const [swipeOffsets, setSwipeOffsets] = useState({}); // { [msgId]: number }
+
+  const myIdent = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
 
   // --- 1. AUTO-SCROLL TO BOTTOM ON MOUNT & NEW MESSAGES ---
   useEffect(() => {
     isInitialScrollDone.current = false;
+    setSelectedMessage(null);
+    setEditingMessage(null);
   }, [activeChat?.id]);
 
   useEffect(() => {
     if (!messagesContainerRef.current) return;
-
     const container = messagesContainerRef.current;
     const isNewMessage = messages.length > prevMessagesLength.current;
     prevMessagesLength.current = messages.length;
 
-    // Check if user is already near bottom (within 150px)
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
     const isNearBottom = distanceFromBottom < 150;
 
     if (!isInitialScrollDone.current) {
-      // First load: instantly snap to bottom
       container.scrollTop = container.scrollHeight;
       isInitialScrollDone.current = true;
     } else if (isNewMessage && isNearBottom) {
-      // Smooth scroll if user was already at the bottom or sent a message
       container.scrollTo({
         top: container.scrollHeight,
         behavior: "smooth"
@@ -97,10 +107,20 @@ export default function ChatView({
     }
   }, [messages]);
 
-  // --- 2. SEND MESSAGE HANDLER ---
+  // --- 2. SEND / EDIT MESSAGE HANDLER ---
   const handleSend = (e) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!inputText.trim()) return;
+
+    if (editingMessage) {
+      // Inline edit mode: update existing message
+      editingMessage.content = inputText.trim();
+      editingMessage.isEdited = true;
+      if (showToast) showToast("Message updated");
+      setEditingMessage(null);
+      setInputText("");
+      return;
+    }
 
     const payload = {
       content: inputText.trim(),
@@ -119,7 +139,6 @@ export default function ChatView({
     setInputText("");
     setReplyingTo(null);
 
-    // Scroll to bottom immediately on user send
     setTimeout(() => {
       if (messagesContainerRef.current) {
         messagesContainerRef.current.scrollTo({
@@ -130,7 +149,7 @@ export default function ChatView({
     }, 50);
   };
 
-  // --- 3. ATTACHMENT UPLOAD HANDLER ---
+  // --- 3. ATTACHMENT HANDLER ---
   const handleFileSelect = (e, fileType) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -155,6 +174,126 @@ export default function ChatView({
     reader.readAsDataURL(file);
   };
 
+  // --- 4. SWIPE-TO-REPLY GESTURE HANDLERS ---
+  const handleTouchStart = (e, msg) => {
+    isLongPressTriggered.current = false;
+    const touch = e.touches[0];
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY };
+
+    // Long press trigger after 400ms
+    pressTimerRef.current = setTimeout(() => {
+      isLongPressTriggered.current = true;
+      if (window.navigator?.vibrate) {
+        window.navigator.vibrate(40);
+      }
+      setSelectedMessage(msg);
+    }, 400);
+  };
+
+  const handleTouchMove = (e, msgId) => {
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - touchStartPos.current.x;
+    const deltaY = touch.clientY - touchStartPos.current.y;
+
+    // If vertical scroll detected, cancel long-press
+    if (Math.abs(deltaY) > 8 && pressTimerRef.current) {
+      clearTimeout(pressTimerRef.current);
+      pressTimerRef.current = null;
+    }
+
+    // Horizontal swipe gesture for reply (up to 80px translation)
+    if (Math.abs(deltaX) > 15 && Math.abs(deltaY) < 25) {
+      if (pressTimerRef.current) {
+        clearTimeout(pressTimerRef.current);
+        pressTimerRef.current = null;
+      }
+      const boundedOffset = Math.max(-80, Math.min(80, deltaX));
+      setSwipeOffsets((prev) => ({ ...prev, [msgId]: boundedOffset }));
+    }
+  };
+
+  const handleTouchEnd = (e, msg) => {
+    if (pressTimerRef.current) {
+      clearTimeout(pressTimerRef.current);
+      pressTimerRef.current = null;
+    }
+
+    const currentOffset = swipeOffsets[msg.id] || 0;
+    // If swiped horizontally more than 45px, trigger Reply
+    if (Math.abs(currentOffset) >= 45) {
+      if (window.navigator?.vibrate) {
+        window.navigator.vibrate(25);
+      }
+      setReplyingTo({
+        id: msg.id,
+        content: msg.content || (msg.fileUrl ? "Media file" : ""),
+        senderName: msg.senderName || "User"
+      });
+      if (showToast) showToast(`Replying to ${msg.senderName || "message"}`);
+    }
+
+    // Reset translation with bounce back
+    setSwipeOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
+  };
+
+  // --- 5. TOP CONTEXT ACTION HANDLERS ---
+  const handleCopySelected = () => {
+    if (!selectedMessage) return;
+    navigator.clipboard.writeText(selectedMessage.content || "");
+    if (showToast) showToast("Message copied to clipboard");
+    setSelectedMessage(null);
+  };
+
+  const handleReplySelected = () => {
+    if (!selectedMessage) return;
+    setReplyingTo({
+      id: selectedMessage.id,
+      content: selectedMessage.content,
+      senderName: selectedMessage.senderName || "User"
+    });
+    setSelectedMessage(null);
+  };
+
+  const handleForwardSelected = () => {
+    if (!selectedMessage) return;
+    if (onForwardMessage) onForwardMessage(selectedMessage);
+    setSelectedMessage(null);
+  };
+
+  const handleEditSelected = () => {
+    if (!selectedMessage) return;
+    setEditingMessage(selectedMessage);
+    setInputText(selectedMessage.content || "");
+    setSelectedMessage(null);
+  };
+
+  const handlePinSelected = () => {
+    if (!selectedMessage) return;
+    if (pinnedMessage?.id === selectedMessage.id) {
+      setPinnedMessage(null);
+      if (showToast) showToast("Message unpinned");
+    } else {
+      setPinnedMessage(selectedMessage);
+      if (showToast) showToast("Message pinned to top");
+    }
+    setSelectedMessage(null);
+  };
+
+  const handleDeleteSelected = (forEveryone = false) => {
+    if (!selectedMessage) return;
+    // Mark as deleted in local memory or broadcast deletion
+    selectedMessage.content = forEveryone
+      ? "🚫 This message was deleted"
+      : "🚫 You deleted this message";
+    selectedMessage.type = "deleted";
+    selectedMessage.fileUrl = null;
+    if (showToast) showToast(forEveryone ? "Deleted for everyone" : "Deleted for you");
+    setShowDeleteConfirm(false);
+    setSelectedMessage(null);
+  };
+
+  const isSelectedSentByMe = selectedMessage && (selectedMessage.senderPhone === myIdent || selectedMessage.senderId === myIdent);
+
   return (
     <div
       style={{
@@ -167,200 +306,322 @@ export default function ChatView({
         overflow: "hidden"
       }}
     >
-      {/* --- CHAT TOP HEADER --- */}
-      <div
-        style={{
-          ...styles.headerBar,
-          backgroundColor: THEME.header,
-          borderColor: THEME.border,
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "8px 14px",
-          zIndex: 10
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
-          <button
-            onClick={() => {
-              setActiveChat(null);
-              if (setMobileView) setMobileView("list");
-            }}
-            style={{
-              ...styles.cleanBtn,
-              color: THEME.text,
-              display: "flex",
-              alignItems: "center",
-              padding: "4px"
-            }}
-            title="Back to chats"
-          >
-            <ArrowLeft size={20} />
-          </button>
+      {/* --- TOP HEADER (STANDARD CHAT BAR OR LONG-PRESS ACTION BAR) --- */}
+      {selectedMessage ? (
+        /* CONTEXTUAL ACTION BAR ON SELECTION */
+        <div
+          style={{
+            ...styles.headerBar,
+            backgroundColor: THEME.sidebar,
+            borderColor: THEME.primary,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "8px 14px",
+            zIndex: 20,
+            borderBottom: `2px solid ${THEME.primary}`
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <button
+              onClick={() => {
+                setSelectedMessage(null);
+                setShowDeleteConfirm(false);
+              }}
+              style={{ ...styles.cleanBtn, color: THEME.text }}
+            >
+              <X size={20} />
+            </button>
+            <span style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+              1 message selected
+            </span>
+          </div>
 
-          <div
-            onClick={() => openProfile && openProfile(activeChat)}
-            style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", minWidth: 0 }}
-          >
-            <div style={{ position: "relative", flexShrink: 0 }}>
-              <img
-                src={activeChat.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
-                alt=""
-                style={styles.roundAvatar}
-              />
-              {peerPresence.isOnline && (
-                <span
-                  style={{
-                    position: "absolute",
-                    bottom: "1px",
-                    right: "1px",
-                    width: "10px",
-                    height: "10px",
-                    borderRadius: "50%",
-                    backgroundColor: THEME.accent,
-                    border: `2px solid ${THEME.header}`
-                  }}
+          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+            {/* Reply Action */}
+            <button
+              onClick={handleReplySelected}
+              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+              title="Reply"
+            >
+              <Reply size={18} />
+            </button>
+
+            {/* Copy Action */}
+            <button
+              onClick={handleCopySelected}
+              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+              title="Copy"
+            >
+              <Copy size={18} />
+            </button>
+
+            {/* Forward Action */}
+            <button
+              onClick={handleForwardSelected}
+              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+              title="Forward"
+            >
+              <Share2 size={18} />
+            </button>
+
+            {/* Pin Action */}
+            <button
+              onClick={handlePinSelected}
+              style={{
+                ...styles.cleanBtn,
+                color: pinnedMessage?.id === selectedMessage.id ? THEME.primary : THEME.text,
+                padding: "8px"
+              }}
+              title="Pin message"
+            >
+              <Pin size={18} />
+            </button>
+
+            {/* Edit Action (Sender Only) */}
+            {isSelectedSentByMe && selectedMessage.type === "text" && (
+              <button
+                onClick={handleEditSelected}
+                style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+                title="Edit message"
+              >
+                <Edit2 size={18} />
+              </button>
+            )}
+
+            {/* Delete Action */}
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              style={{ ...styles.cleanBtn, color: THEME.danger, padding: "8px" }}
+              title="Delete"
+            >
+              <Trash2 size={18} />
+            </button>
+          </div>
+        </div>
+      ) : (
+        /* STANDARD CHAT TOP HEADER */
+        <div
+          style={{
+            ...styles.headerBar,
+            backgroundColor: THEME.header,
+            borderColor: THEME.border,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "8px 14px",
+            zIndex: 10
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
+            <button
+              onClick={() => {
+                setActiveChat(null);
+                if (setMobileView) setMobileView("list");
+              }}
+              style={{
+                ...styles.cleanBtn,
+                color: THEME.text,
+                display: "flex",
+                alignItems: "center",
+                padding: "4px"
+              }}
+              title="Back to chats"
+            >
+              <ArrowLeft size={20} />
+            </button>
+
+            <div
+              onClick={() => openProfile && openProfile(activeChat)}
+              style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", minWidth: 0 }}
+            >
+              <div style={{ position: "relative", flexShrink: 0 }}>
+                <img
+                  src={activeChat.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
+                  alt=""
+                  style={styles.roundAvatar}
                 />
-              )}
-            </div>
+                {peerPresence.isOnline && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      bottom: "1px",
+                      right: "1px",
+                      width: "10px",
+                      height: "10px",
+                      borderRadius: "50%",
+                      backgroundColor: THEME.accent,
+                      border: `2px solid ${THEME.header}`
+                    }}
+                  />
+                )}
+              </div>
 
-            <div style={{ minWidth: 0 }}>
-              <div
+              <div style={{ minWidth: 0 }}>
+                <div
+                  style={{
+                    fontWeight: "700",
+                    fontSize: "14px",
+                    color: THEME.text,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis"
+                  }}
+                >
+                  {activeChat.name}
+                </div>
+                <div style={{ fontSize: "11px", color: peerPresence.isOnline ? THEME.accent : THEME.textMuted }}>
+                  {peerPresence.isOnline ? "Online" : peerPresence.lastSeen ? `Last seen ${peerPresence.lastSeen}` : activeChat.phone || ""}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Header Buttons */}
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <button
+              onClick={() => startCall && startCall(activeChat, "audio")}
+              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+              title="Audio Call"
+            >
+              <Phone size={18} />
+            </button>
+
+            <button
+              onClick={() => startCall && startCall(activeChat, "video")}
+              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+              title="Video Call"
+            >
+              <Video size={18} />
+            </button>
+
+            <button
+              onClick={() => setShowChatOptions(!showChatOptions)}
+              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+              title="More Options"
+            >
+              <MoreVertical size={18} />
+            </button>
+          </div>
+
+          {/* Three-Dot Dropdown Options Menu */}
+          {showChatOptions && (
+            <div
+              style={{
+                position: "absolute",
+                top: "56px",
+                right: "14px",
+                backgroundColor: THEME.sidebar,
+                border: `1px solid ${THEME.border}`,
+                borderRadius: "10px",
+                padding: "6px 0",
+                boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+                zIndex: 100,
+                minWidth: "180px"
+              }}
+            >
+              <button
+                onClick={() => {
+                  onTogglePin && onTogglePin(activeChat.id);
+                  setShowChatOptions(false);
+                }}
                 style={{
-                  fontWeight: "700",
-                  fontSize: "14px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  width: "100%",
+                  padding: "10px 14px",
+                  border: "none",
+                  background: "none",
                   color: THEME.text,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis"
+                  fontSize: "13px",
+                  cursor: "pointer",
+                  textAlign: "left"
                 }}
               >
-                {activeChat.name}
-              </div>
-              <div style={{ fontSize: "11px", color: peerPresence.isOnline ? THEME.accent : THEME.textMuted }}>
-                {peerPresence.isOnline ? "Online" : peerPresence.lastSeen ? `Last seen ${peerPresence.lastSeen}` : activeChat.phone || ""}
-              </div>
+                <Pin size={15} color={isPinned ? THEME.primary : THEME.textMuted} />
+                <span>{isPinned ? "Unpin Chat" : "Pin Chat"}</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  onToggleMute && onToggleMute(activeChat.id);
+                  setShowChatOptions(false);
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  width: "100%",
+                  padding: "10px 14px",
+                  border: "none",
+                  background: "none",
+                  color: THEME.text,
+                  fontSize: "13px",
+                  cursor: "pointer",
+                  textAlign: "left"
+                }}
+              >
+                <BellOff size={15} color={isMuted ? THEME.danger : THEME.textMuted} />
+                <span>{isMuted ? "Unmute Notifications" : "Mute Notifications"}</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setVanishMode && setVanishMode(!vanishMode);
+                  setShowChatOptions(false);
+                  if (showToast) showToast(!vanishMode ? "Vanish Mode ON: Messages vanish in 15s" : "Vanish Mode OFF");
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  width: "100%",
+                  padding: "10px 14px",
+                  border: "none",
+                  background: "none",
+                  color: vanishMode ? THEME.accent : THEME.text,
+                  fontSize: "13px",
+                  cursor: "pointer",
+                  textAlign: "left"
+                }}
+              >
+                <Flame size={15} color={vanishMode ? THEME.accent : THEME.textMuted} />
+                <span>Vanish Mode (15s)</span>
+              </button>
             </div>
-          </div>
+          )}
         </div>
+      )}
 
-        {/* Right Action Icons: Audio Call, Video Call, Menu */}
-        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          <button
-            onClick={() => startCall && startCall(activeChat, "audio")}
-            style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-            title="Audio Call"
-          >
-            <Phone size={18} />
-          </button>
-
-          <button
-            onClick={() => startCall && startCall(activeChat, "video")}
-            style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-            title="Video Call"
-          >
-            <Video size={18} />
-          </button>
-
-          <button
-            onClick={() => setShowChatOptions(!showChatOptions)}
-            style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-            title="More Options"
-          >
-            <MoreVertical size={18} />
+      {/* --- PINNED MESSAGE BANNER --- */}
+      {pinnedMessage && (
+        <div
+          style={{
+            backgroundColor: "rgba(34, 197, 94, 0.12)",
+            borderBottom: `1px solid ${THEME.primary}`,
+            padding: "6px 14px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            fontSize: "12px",
+            zIndex: 5
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
+            <Pin size={14} color={THEME.primary} />
+            <span style={{ fontWeight: "700", color: THEME.primary }}>Pinned:</span>
+            <span style={{ color: THEME.text, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+              {pinnedMessage.content || "Media file"}
+            </span>
+          </div>
+          <button onClick={() => setPinnedMessage(null)} style={styles.cleanBtn}>
+            <X size={14} color={THEME.textMuted} />
           </button>
         </div>
+      )}
 
-        {/* Options Dropdown Menu */}
-        {showChatOptions && (
-          <div
-            style={{
-              position: "absolute",
-              top: "56px",
-              right: "14px",
-              backgroundColor: THEME.sidebar,
-              border: `1px solid ${THEME.border}`,
-              borderRadius: "10px",
-              padding: "6px 0",
-              boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-              zIndex: 100,
-              minWidth: "180px"
-            }}
-          >
-            <button
-              onClick={() => {
-                onTogglePin && onTogglePin(activeChat.id);
-                setShowChatOptions(false);
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "10px",
-                width: "100%",
-                padding: "10px 14px",
-                border: "none",
-                background: "none",
-                color: THEME.text,
-                fontSize: "13px",
-                cursor: "pointer",
-                textAlign: "left"
-              }}
-            >
-              <Pin size={15} color={isPinned ? THEME.primary : THEME.textMuted} />
-              <span>{isPinned ? "Unpin Chat" : "Pin Chat"}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                onToggleMute && onToggleMute(activeChat.id);
-                setShowChatOptions(false);
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "10px",
-                width: "100%",
-                padding: "10px 14px",
-                border: "none",
-                background: "none",
-                color: THEME.text,
-                fontSize: "13px",
-                cursor: "pointer",
-                textAlign: "left"
-              }}
-            >
-              <BellOff size={15} color={isMuted ? THEME.danger : THEME.textMuted} />
-              <span>{isMuted ? "Unmute Notifications" : "Mute Notifications"}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                setVanishMode && setVanishMode(!vanishMode);
-                setShowChatOptions(false);
-                if (showToast) showToast(!vanishMode ? "Vanish Mode ON: Messages vanish in 15s" : "Vanish Mode OFF");
-              }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "10px",
-                width: "100%",
-                padding: "10px 14px",
-                border: "none",
-                background: "none",
-                color: vanishMode ? THEME.accent : THEME.text,
-                fontSize: "13px",
-                cursor: "pointer",
-                textAlign: "left"
-              }}
-            >
-              <Flame size={15} color={vanishMode ? THEME.accent : THEME.textMuted} />
-              <span>Vanish Mode (15s)</span>
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Vanish / View Once Active Banners */}
+      {/* Vanish Banner */}
       {vanishMode && (
         <div
           style={{
@@ -376,11 +637,11 @@ export default function ChatView({
           }}
         >
           <Flame size={13} />
-          <span>Vanish Mode Active: New messages self-destruct after 15 seconds</span>
+          <span>Vanish Mode Active: New messages vanish in 15 seconds</span>
         </div>
       )}
 
-      {/* --- 4. SMOOTH SCROLLABLE MESSAGE HISTORY CONTAINER --- */}
+      {/* --- 6. SCROLLABLE MESSAGE HISTORY & SWIPE-TO-REPLY --- */}
       <div
         ref={messagesContainerRef}
         style={{
@@ -407,25 +668,58 @@ export default function ChatView({
                 border: `1px solid ${THEME.border}`
               }}
             >
-              🔒 Messages are end-to-end synced. Send a greeting to start chatting!
+              🔒 Swipe message to reply or long-press for options.
             </div>
           </div>
         ) : (
           messages.map((msg) => {
             const isMe = msg.senderPhone === myIdent || msg.senderId === myIdent;
             const isVanished = msg.type === "vanished";
+            const isDeleted = msg.type === "deleted";
+            const isSelected = selectedMessage?.id === msg.id;
+            const currentSwipeOffset = swipeOffsets[msg.id] || 0;
 
             return (
               <div
                 key={msg.id}
+                onTouchStart={(e) => handleTouchStart(e, msg)}
+                onTouchMove={(e) => handleTouchMove(e, msg.id)}
+                onTouchEnd={(e) => handleTouchEnd(e, msg)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setSelectedMessage(msg);
+                }}
                 style={{
                   display: "flex",
                   flexDirection: "column",
                   alignItems: isMe ? "flex-end" : "flex-start",
                   width: "100%",
-                  marginBottom: "2px"
+                  marginBottom: "2px",
+                  position: "relative",
+                  transition: currentSwipeOffset === 0 ? "transform 0.25s cubic-bezier(0.18, 0.89, 0.32, 1.28)" : "none",
+                  transform: `translateX(${currentSwipeOffset}px)`
                 }}
               >
+                {/* Visual Indicator Behind Bubble When Swiped */}
+                {Math.abs(currentSwipeOffset) > 20 && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      [isMe ? "right" : "left"]: "-36px",
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      color: THEME.primary,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      opacity: Math.min(1, Math.abs(currentSwipeOffset) / 45)
+                    }}
+                  >
+                    <Reply size={20} />
+                  </div>
+                )}
+
+                {/* Message Bubble Card */}
                 <div
                   style={{
                     maxWidth: "80%",
@@ -433,15 +727,22 @@ export default function ChatView({
                     borderTopRightRadius: isMe ? "2px" : "12px",
                     borderTopLeftRadius: !isMe ? "2px" : "12px",
                     padding: "8px 12px",
-                    backgroundColor: isMe ? THEME.primary : THEME.card,
+                    backgroundColor: isSelected
+                      ? "rgba(34, 197, 94, 0.35)"
+                      : isMe
+                      ? THEME.primary
+                      : THEME.card,
+                    border: isSelected ? `1.5px solid ${THEME.primary}` : "1.5px solid transparent",
                     color: "#fff",
                     boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
                     position: "relative",
-                    wordBreak: "break-word"
+                    wordBreak: "break-word",
+                    userSelect: "none",
+                    WebkitUserSelect: "none"
                   }}
                 >
-                  {/* Replied Quote Header */}
-                  {msg.replyTo && (
+                  {/* Replied Message Quote Preview */}
+                  {msg.replyTo && !isDeleted && (
                     <div
                       style={{
                         backgroundColor: "rgba(0,0,0,0.2)",
@@ -460,7 +761,7 @@ export default function ChatView({
                   )}
 
                   {/* Media Content */}
-                  {msg.fileUrl && !isVanished && (
+                  {msg.fileUrl && !isVanished && !isDeleted && (
                     <div
                       onClick={() => onLightbox && onLightbox({ url: msg.fileUrl, type: msg.type, name: msg.fileName })}
                       style={{ cursor: "pointer", borderRadius: "8px", overflow: "hidden", marginBottom: "6px" }}
@@ -487,12 +788,12 @@ export default function ChatView({
                     </div>
                   )}
 
-                  {/* Message Text */}
-                  <div style={{ fontSize: "13px", lineHeight: "1.4" }}>
+                  {/* Message Text Content */}
+                  <div style={{ fontSize: "13px", lineHeight: "1.4", fontStyle: isDeleted ? "italic" : "normal", opacity: isDeleted ? 0.7 : 1 }}>
                     {msg.content}
                   </div>
 
-                  {/* Footer: Timestamp & Read Receipts */}
+                  {/* Footer: Timestamp, Edited badge & Read Status */}
                   <div
                     style={{
                       display: "flex",
@@ -504,36 +805,17 @@ export default function ChatView({
                       opacity: 0.75
                     }}
                   >
+                    {msg.isEdited && <span>(edited)</span>}
                     <span>
                       {msg.createdAt ? new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
                     </span>
-                    {isMe && (
+                    {isMe && !isDeleted && (
                       <span>
                         {msg.status === "read" ? <CheckCheck size={13} color="#53bdeb" /> : <Check size={13} />}
                       </span>
                     )}
                   </div>
                 </div>
-
-                {/* Quick Emoji Reaction Badges */}
-                {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                  <div style={{ display: "flex", gap: "2px", marginTop: "-6px", zIndex: 1 }}>
-                    {Object.entries(msg.reactions).map(([uid, emo]) => (
-                      <span
-                        key={uid}
-                        style={{
-                          backgroundColor: THEME.header,
-                          border: `1px solid ${THEME.border}`,
-                          borderRadius: "12px",
-                          padding: "1px 5px",
-                          fontSize: "11px"
-                        }}
-                      >
-                        {emo}
-                      </span>
-                    ))}
-                  </div>
-                )}
               </div>
             );
           })
@@ -541,21 +823,66 @@ export default function ChatView({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Replying Banner */}
+      {/* --- CONFIRMATION DIALOG FOR DELETE --- */}
+      {showDeleteConfirm && selectedMessage && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>Delete message?</div>
+              <button onClick={() => setShowDeleteConfirm(false)} style={styles.cleanBtn}>
+                <X size={16} color={THEME.textMuted} />
+              </button>
+            </div>
+            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div style={{ fontSize: "13px", color: THEME.textMuted }}>
+                Choose how you want to delete this message:
+              </div>
+              <button
+                onClick={() => handleDeleteSelected(false)}
+                style={{
+                  ...styles.pillBtn,
+                  backgroundColor: THEME.card,
+                  color: THEME.text,
+                  padding: "10px"
+                }}
+              >
+                Delete for Me
+              </button>
+              {isSelectedSentByMe && (
+                <button
+                  onClick={() => handleDeleteSelected(true)}
+                  style={{
+                    ...styles.pillBtn,
+                    backgroundColor: THEME.danger,
+                    color: "#fff",
+                    padding: "10px",
+                    fontWeight: "700"
+                  }}
+                >
+                  Delete for Everyone
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- REPLIED PREVIEW BANNER (ABOVE INPUT) --- */}
       {replyingTo && (
         <div
           style={{
             backgroundColor: THEME.card,
-            borderTop: `1px solid ${THEME.border}`,
+            borderTop: `1.5px solid ${THEME.primary}`,
             padding: "6px 14px",
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between"
+            justifyContent: "space-between",
+            animation: "fadeIn 0.2s ease"
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text }}>
-            <Reply size={14} color={THEME.primary} />
-            <div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text, minWidth: 0 }}>
+            <Reply size={15} color={THEME.primary} />
+            <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               <span style={{ color: THEME.primary, fontWeight: "700" }}>{replyingTo.senderName}: </span>
               <span style={{ color: THEME.textMuted }}>{replyingTo.content}</span>
             </div>
@@ -566,7 +893,35 @@ export default function ChatView({
         </div>
       )}
 
-      {/* --- 5. CHAT INPUT & COMPOSER BAR --- */}
+      {/* --- INLINE EDIT BANNER (ABOVE INPUT) --- */}
+      {editingMessage && (
+        <div
+          style={{
+            backgroundColor: THEME.card,
+            borderTop: `1.5px solid ${THEME.accent}`,
+            padding: "6px 14px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between"
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text }}>
+            <Edit2 size={14} color={THEME.accent} />
+            <span style={{ color: THEME.accent, fontWeight: "700" }}>Editing Message</span>
+          </div>
+          <button
+            onClick={() => {
+              setEditingMessage(null);
+              setInputText("");
+            }}
+            style={styles.cleanBtn}
+          >
+            <X size={16} color={THEME.textMuted} />
+          </button>
+        </div>
+      )}
+
+      {/* --- 7. CHAT INPUT & COMPOSER BAR --- */}
       <form
         onSubmit={handleSend}
         style={{
@@ -579,7 +934,7 @@ export default function ChatView({
           position: "relative"
         }}
       >
-        {/* Attachment Toggle */}
+        {/* Attachment Options */}
         <div style={{ position: "relative" }}>
           <button
             type="button"
@@ -688,7 +1043,7 @@ export default function ChatView({
             color: viewOnceMode ? THEME.primary : THEME.textMuted,
             padding: "6px"
           }}
-          title="View Once photo/message"
+          title="View Once message"
         >
           <Eye size={20} />
         </button>
@@ -707,7 +1062,7 @@ export default function ChatView({
         >
           <input
             type="text"
-            placeholder="Type a message..."
+            placeholder={editingMessage ? "Edit message..." : "Type a message..."}
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             style={{
@@ -719,12 +1074,12 @@ export default function ChatView({
           />
         </div>
 
-        {/* Send Button */}
+        {/* Send / Update Button */}
         <button
           type="submit"
           disabled={!inputText.trim()}
           style={{
-            backgroundColor: THEME.primary,
+            backgroundColor: editingMessage ? THEME.accent : THEME.primary,
             color: "#fff",
             border: "none",
             borderRadius: "50%",
@@ -737,9 +1092,9 @@ export default function ChatView({
             opacity: !inputText.trim() ? 0.6 : 1,
             flexShrink: 0
           }}
-          title="Send message"
+          title={editingMessage ? "Update message" : "Send message"}
         >
-          <Send size={17} />
+          {editingMessage ? <CheckCircle size={18} /> : <Send size={17} />}
         </button>
       </form>
     </div>
