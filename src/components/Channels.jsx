@@ -8,12 +8,10 @@ import {
   query,
   where,
   onSnapshot,
-  orderBy,
   limit
 } from "firebase/firestore";
 import {
   Users,
-  Plus,
   Send,
   Trash2,
   Archive,
@@ -58,14 +56,14 @@ export default function Channels({
 }) {
   const currentUserId = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
 
-  // Private isolated conversations
+  // Strictly isolated 1-on-1 direct phone conversations
   const [privateConversations, setPrivateConversations] = useState([]);
   const [isLoadingChats, setIsLoadingChats] = useState(true);
 
   // Search input state
   const [searchTerm, setSearchTerm] = useState("");
 
-  // New Chat modal state
+  // Manual Contact / Direct Number Modal state
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [contactPhoneInput, setContactPhoneInput] = useState("");
   const [isSearchingContact, setIsSearchingContact] = useState(false);
@@ -77,7 +75,7 @@ export default function Channels({
   // View Filter: 'active' | 'archived'
   const [viewFilter, setViewFilter] = useState("active");
 
-  // Local unread counts fallback state
+  // Read status tracking (clears unread badge on click)
   const [readChatIds, setReadChatIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`infinity_read_${currentUserId}`);
@@ -87,7 +85,7 @@ export default function Channels({
     }
   });
 
-  // Local persistence for Pinned, Muted, Archived, and Deleted per current user
+  // Local persistence for Pinned, Muted, Archived, and Deleted lists strictly per user
   const [userPinnedIds, setUserPinnedIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`infinity_pinned_${currentUserId}`);
@@ -139,7 +137,7 @@ export default function Channels({
     return digits.slice(0, 11);
   };
 
-  // Helper to parse date / timestamp to epoch milliseconds for accurate sorting
+  // Helper to parse timestamp to epoch milliseconds for accurate sorting
   const getTimestampMillis = (item) => {
     const raw =
       item.lastMessageTimestamp ||
@@ -154,7 +152,9 @@ export default function Channels({
     return isNaN(parsed) ? 0 : parsed;
   };
 
-  // --- 1. STRICT PRIVATE CONVERSATION QUERY ---
+  // --- 1. STRICT ISOLATED QUERY (WHATSAPP-STYLE ABSOLUTE PRIVACY) ---
+  // Queries ONLY conversations where the current user's UID or phone is explicitly in participants.
+  // Global directory users or unrelated threads are NEVER queried or leaked.
   useEffect(() => {
     if (!currentUserId) return;
     setIsLoadingChats(true);
@@ -181,7 +181,7 @@ export default function Channels({
         setIsLoadingChats(false);
       },
       (error) => {
-        console.warn("Private query fallback:", error.message);
+        console.warn("Private query error:", error.message);
         setIsLoadingChats(false);
       }
     );
@@ -189,7 +189,7 @@ export default function Channels({
     return () => unsubscribe();
   }, [currentUserId]);
 
-  // Combined isolated items: Private Chats + Channels where user participates
+  // Combine strictly isolated 1-on-1 conversations + official user channels
   const userIsolatedItems = useMemo(() => {
     const filteredChannels = channels.filter((ch) => {
       const isCreator = ch.creatorPhone === currentUserId || ch.creatorId === currentUserId;
@@ -206,7 +206,7 @@ export default function Channels({
     return combined.filter((item) => !userDeletedIds.includes(item.id));
   }, [channels, privateConversations, currentUserId, userDeletedIds]);
 
-  // Filter Active vs Archived, Apply Search, and SORT BY LATEST TIMESTAMP & PINNED
+  // Filter Active vs Archived, Apply Search, and Sort with Pinned & Latest Timestamp Descending
   const displayedItems = useMemo(() => {
     let list = userIsolatedItems.filter((item) => {
       const isArchived = userArchivedIds.includes(item.id);
@@ -223,7 +223,7 @@ export default function Channels({
       });
     }
 
-    // --- SORTING LOGIC: Pinned on top, then strictly by Latest Message Timestamp descending ---
+    // Sort: Pinned items stay on top, followed immediately by latest message timestamp descending
     return list.sort((a, b) => {
       const aPinned = userPinnedIds.includes(a.id);
       const bPinned = userPinnedIds.includes(b.id);
@@ -236,12 +236,11 @@ export default function Channels({
     });
   }, [userIsolatedItems, userArchivedIds, userPinnedIds, viewFilter, searchTerm]);
 
-  // Calculate unread count for a given item
+  // Get unread count for current user
   const getUnreadCount = (item) => {
     if (activeChannel?.id === item.id) return 0;
     if (readChatIds.includes(item.id)) return 0;
 
-    // Check Firestore unread count map: unreadCount[currentUserId]
     if (item.unreadCount && typeof item.unreadCount === "object") {
       const count = item.unreadCount[currentUserId];
       if (typeof count === "number") return count;
@@ -261,7 +260,7 @@ export default function Channels({
       return;
     }
 
-    // Mark as read locally
+    // Clear badge locally
     if (!readChatIds.includes(item.id)) {
       const updated = [...readChatIds, item.id];
       setReadChatIds(updated);
@@ -270,16 +269,14 @@ export default function Channels({
       } catch (e) {}
     }
 
-    // Reset unread count in Firestore conversation doc if present
+    // Clear badge in Firestore conversation document
     if (item.isPrivateChat && item.unreadCount && item.unreadCount[currentUserId]) {
       try {
         const convDocRef = doc(db, "conversations", item.id);
         await updateDoc(convDocRef, {
           [`unreadCount.${currentUserId}`]: 0
         });
-      } catch (err) {
-        // Safe fail
-      }
+      } catch (err) {}
     }
 
     setActiveChannel(item);
@@ -395,7 +392,7 @@ export default function Channels({
     setContextItem(null);
   };
 
-  // --- 5. START NEW CHAT ---
+  // --- 5. START DIRECT NUMBER CHAT ---
   const handleStartNewChat = async (e) => {
     e.preventDefault();
     const phone = cleanPhone(contactPhoneInput);
@@ -555,7 +552,7 @@ export default function Channels({
           </div>
         </div>
 
-        {/* Search Bar */}
+        {/* Direct Number Search Bar */}
         <div
           style={{
             padding: "8px 12px",
