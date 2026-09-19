@@ -20,10 +20,11 @@ import {
   Edit2,
   CheckCircle,
   FileText,
-  Image as ImageIcon,
-  AlertCircle
+  Image as ImageIcon
 } from "lucide-react";
 import { styles } from "../firebase";
+
+const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 export default function ChatView({
   activeChat,
@@ -57,55 +58,60 @@ export default function ChatView({
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showChatOptions, setShowChatOptions] = useState(false);
 
-  // --- LONG-PRESS CONTEXT SELECTION STATE ---
+  // Reaction picker popup state: { messageId, position: { x, y } }
+  const [reactionPicker, setReactionPicker] = useState(null);
+
+  // Context selection state
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [pinnedMessage, setPinnedMessage] = useState(null);
   const [editingMessage, setEditingMessage] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
-  // References for scrolling
+  // References for scrolling and input focus
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
-  const isInitialScrollDone = useRef(false);
-  const prevMessagesLength = useRef(0);
+  const inputRef = useRef(null);
 
-  // Long press timer ref
-  const pressTimerRef = useRef(null);
-  const isLongPressTriggered = useRef(false);
-
-  // Swipe gesture tracking
-  const touchStartPos = useRef({ x: 0, y: 0 });
+  // Gesture tracking
+  const touchStartPos = useRef({ x: 0, y: 0, time: 0 });
+  const lastTapRef = useRef({ time: 0, msgId: null });
+  const longPressTimerRef = useRef(null);
+  const isSwipeGesture = useRef(false);
   const [swipeOffsets, setSwipeOffsets] = useState({}); // { [msgId]: number }
 
   const myIdent = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
 
-  // --- 1. AUTO-SCROLL TO BOTTOM ON MOUNT & NEW MESSAGES ---
+  // --- 1. AUTO-SCROLL TO LATEST MESSAGE ON ENTRY & ON RECEIVING NEW MESSAGES ---
   useEffect(() => {
-    isInitialScrollDone.current = false;
+    // Immediate scroll when opening a new chat
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "auto" });
+    }
     setSelectedMessage(null);
     setEditingMessage(null);
+    setReactionPicker(null);
   }, [activeChat?.id]);
 
   useEffect(() => {
     if (!messagesContainerRef.current) return;
     const container = messagesContainerRef.current;
-    const isNewMessage = messages.length > prevMessagesLength.current;
-    prevMessagesLength.current = messages.length;
-
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    const isNearBottom = distanceFromBottom < 150;
 
-    if (!isInitialScrollDone.current) {
-      container.scrollTop = container.scrollHeight;
-      isInitialScrollDone.current = true;
-    } else if (isNewMessage && isNearBottom) {
-      container.scrollTo({
-        top: container.scrollHeight,
-        behavior: "smooth"
-      });
+    // If near bottom (within 200px) or on initial render, smoothly scroll to bottom
+    if (distanceFromBottom < 200) {
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+      }
     }
-  }, [messages]);
+  }, [messages.length]);
+
+  // Focus input automatically whenever replyingTo changes
+  useEffect(() => {
+    if (replyingTo && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [replyingTo]);
 
   // --- 2. SEND / EDIT MESSAGE HANDLER ---
   const handleSend = (e) => {
@@ -113,7 +119,6 @@ export default function ChatView({
     if (!inputText.trim()) return;
 
     if (editingMessage) {
-      // Inline edit mode: update existing message
       editingMessage.content = inputText.trim();
       editingMessage.isEdited = true;
       if (showToast) showToast("Message updated");
@@ -139,12 +144,10 @@ export default function ChatView({
     setInputText("");
     setReplyingTo(null);
 
+    // Scroll to bottom immediately upon user send
     setTimeout(() => {
-      if (messagesContainerRef.current) {
-        messagesContainerRef.current.scrollTo({
-          top: messagesContainerRef.current.scrollHeight,
-          behavior: "smooth"
-        });
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
     }, 50);
   };
@@ -174,53 +177,68 @@ export default function ChatView({
     reader.readAsDataURL(file);
   };
 
-  // --- 4. SWIPE-TO-REPLY GESTURE HANDLERS ---
-  const handleTouchStart = (e, msg) => {
-    isLongPressTriggered.current = false;
+  // --- 4. TOUCH GESTURES: CONTROLLED RIGHT-SWIPE (MAX ~50px) & DOUBLE-TAP / LONG-PRESS ---
+  const handleBubbleTouchStart = (e, msg) => {
     const touch = e.touches[0];
-    touchStartPos.current = { x: touch.clientX, y: touch.clientY };
+    const now = Date.now();
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY, time: now };
+    isSwipeGesture.current = false;
 
-    // Long press trigger after 400ms
-    pressTimerRef.current = setTimeout(() => {
-      isLongPressTriggered.current = true;
+    // Double-tap detection for reaction popup
+    if (lastTapRef.current.msgId === msg.id && now - lastTapRef.current.time < 300) {
+      clearTimeout(longPressTimerRef.current);
+      openReactionPicker(msg.id, touch.clientX, touch.clientY);
+      lastTapRef.current = { time: 0, msgId: null };
+      return;
+    }
+    lastTapRef.current = { time: now, msgId: msg.id };
+
+    // Long-press timer (400ms) for reaction popup & selection
+    longPressTimerRef.current = setTimeout(() => {
       if (window.navigator?.vibrate) {
         window.navigator.vibrate(40);
       }
+      openReactionPicker(msg.id, touch.clientX, touch.clientY);
       setSelectedMessage(msg);
     }, 400);
   };
 
-  const handleTouchMove = (e, msgId) => {
+  const handleBubbleTouchMove = (e, msgId) => {
     const touch = e.touches[0];
     const deltaX = touch.clientX - touchStartPos.current.x;
     const deltaY = touch.clientY - touchStartPos.current.y;
 
-    // If vertical scroll detected, cancel long-press
-    if (Math.abs(deltaY) > 8 && pressTimerRef.current) {
-      clearTimeout(pressTimerRef.current);
-      pressTimerRef.current = null;
+    // If vertical scrolling detected, cancel long-press and horizontal swipe
+    if (Math.abs(deltaY) > 8) {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+      if (!isSwipeGesture.current) return;
     }
 
-    // Horizontal swipe gesture for reply (up to 80px translation)
-    if (Math.abs(deltaX) > 15 && Math.abs(deltaY) < 25) {
-      if (pressTimerRef.current) {
-        clearTimeout(pressTimerRef.current);
-        pressTimerRef.current = null;
+    // Controlled right-swipe only (deltaX > 0), strictly capped at 50px
+    if (deltaX > 10 && Math.abs(deltaY) < 20) {
+      isSwipeGesture.current = true;
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
       }
-      const boundedOffset = Math.max(-80, Math.min(80, deltaX));
+      const boundedOffset = Math.min(50, Math.max(0, deltaX));
       setSwipeOffsets((prev) => ({ ...prev, [msgId]: boundedOffset }));
     }
   };
 
-  const handleTouchEnd = (e, msg) => {
-    if (pressTimerRef.current) {
-      clearTimeout(pressTimerRef.current);
-      pressTimerRef.current = null;
+  const handleBubbleTouchEnd = (e, msg) => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
     }
 
     const currentOffset = swipeOffsets[msg.id] || 0;
-    // If swiped horizontally more than 45px, trigger Reply
-    if (Math.abs(currentOffset) >= 45) {
+
+    // If swiped right at least 35px, activate Reply and focus input immediately
+    if (currentOffset >= 35) {
       if (window.navigator?.vibrate) {
         window.navigator.vibrate(25);
       }
@@ -229,11 +247,31 @@ export default function ChatView({
         content: msg.content || (msg.fileUrl ? "Media file" : ""),
         senderName: msg.senderName || "User"
       });
-      if (showToast) showToast(`Replying to ${msg.senderName || "message"}`);
+      if (inputRef.current) {
+        inputRef.current.focus();
+      }
     }
 
-    // Reset translation with bounce back
+    // Elastic reset
     setSwipeOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
+    isSwipeGesture.current = false;
+  };
+
+  const openReactionPicker = (msgId, clientX, clientY) => {
+    setReactionPicker({
+      msgId,
+      x: Math.min(window.innerWidth - 220, Math.max(20, clientX - 80)),
+      y: Math.max(60, clientY - 60)
+    });
+  };
+
+  const handleApplyReaction = (emoji) => {
+    if (!reactionPicker) return;
+    if (onReactMessage) {
+      onReactMessage(reactionPicker.msgId, emoji);
+    }
+    setReactionPicker(null);
+    if (showToast) showToast(`Reacted ${emoji}`);
   };
 
   // --- 5. TOP CONTEXT ACTION HANDLERS ---
@@ -251,6 +289,9 @@ export default function ChatView({
       content: selectedMessage.content,
       senderName: selectedMessage.senderName || "User"
     });
+    if (inputRef.current) {
+      inputRef.current.focus();
+    }
     setSelectedMessage(null);
   };
 
@@ -264,6 +305,9 @@ export default function ChatView({
     if (!selectedMessage) return;
     setEditingMessage(selectedMessage);
     setInputText(selectedMessage.content || "");
+    if (inputRef.current) {
+      inputRef.current.focus();
+    }
     setSelectedMessage(null);
   };
 
@@ -281,7 +325,6 @@ export default function ChatView({
 
   const handleDeleteSelected = (forEveryone = false) => {
     if (!selectedMessage) return;
-    // Mark as deleted in local memory or broadcast deletion
     selectedMessage.content = forEveryone
       ? "🚫 This message was deleted"
       : "🚫 You deleted this message";
@@ -292,10 +335,15 @@ export default function ChatView({
     setSelectedMessage(null);
   };
 
-  const isSelectedSentByMe = selectedMessage && (selectedMessage.senderPhone === myIdent || selectedMessage.senderId === myIdent);
+  const isSelectedSentByMe =
+    selectedMessage &&
+    (selectedMessage.senderPhone === myIdent || selectedMessage.senderId === myIdent);
 
   return (
     <div
+      onClick={() => {
+        if (reactionPicker) setReactionPicker(null);
+      }}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -306,9 +354,8 @@ export default function ChatView({
         overflow: "hidden"
       }}
     >
-      {/* --- TOP HEADER (STANDARD CHAT BAR OR LONG-PRESS ACTION BAR) --- */}
+      {/* --- TOP HEADER: ACTION BAR OR CHAT BAR --- */}
       {selectedMessage ? (
-        /* CONTEXTUAL ACTION BAR ON SELECTION */
         <div
           style={{
             ...styles.headerBar,
@@ -338,7 +385,6 @@ export default function ChatView({
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            {/* Reply Action */}
             <button
               onClick={handleReplySelected}
               style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
@@ -347,7 +393,6 @@ export default function ChatView({
               <Reply size={18} />
             </button>
 
-            {/* Copy Action */}
             <button
               onClick={handleCopySelected}
               style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
@@ -356,7 +401,6 @@ export default function ChatView({
               <Copy size={18} />
             </button>
 
-            {/* Forward Action */}
             <button
               onClick={handleForwardSelected}
               style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
@@ -365,7 +409,6 @@ export default function ChatView({
               <Share2 size={18} />
             </button>
 
-            {/* Pin Action */}
             <button
               onClick={handlePinSelected}
               style={{
@@ -378,7 +421,6 @@ export default function ChatView({
               <Pin size={18} />
             </button>
 
-            {/* Edit Action (Sender Only) */}
             {isSelectedSentByMe && selectedMessage.type === "text" && (
               <button
                 onClick={handleEditSelected}
@@ -389,7 +431,6 @@ export default function ChatView({
               </button>
             )}
 
-            {/* Delete Action */}
             <button
               onClick={() => setShowDeleteConfirm(true)}
               style={{ ...styles.cleanBtn, color: THEME.danger, padding: "8px" }}
@@ -400,7 +441,6 @@ export default function ChatView({
           </div>
         </div>
       ) : (
-        /* STANDARD CHAT TOP HEADER */
         <div
           style={{
             ...styles.headerBar,
@@ -426,7 +466,7 @@ export default function ChatView({
                 alignItems: "center",
                 padding: "4px"
               }}
-              title="Back to chats"
+              title="Back"
             >
               <ArrowLeft size={20} />
             </button>
@@ -477,7 +517,6 @@ export default function ChatView({
             </div>
           </div>
 
-          {/* Right Header Buttons */}
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             <button
               onClick={() => startCall && startCall(activeChat, "audio")}
@@ -498,13 +537,12 @@ export default function ChatView({
             <button
               onClick={() => setShowChatOptions(!showChatOptions)}
               style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-              title="More Options"
+              title="More"
             >
               <MoreVertical size={18} />
             </button>
           </div>
 
-          {/* Three-Dot Dropdown Options Menu */}
           {showChatOptions && (
             <div
               style={{
@@ -570,7 +608,7 @@ export default function ChatView({
                 onClick={() => {
                   setVanishMode && setVanishMode(!vanishMode);
                   setShowChatOptions(false);
-                  if (showToast) showToast(!vanishMode ? "Vanish Mode ON: Messages vanish in 15s" : "Vanish Mode OFF");
+                  if (showToast) showToast(!vanishMode ? "Vanish Mode ON (15s)" : "Vanish Mode OFF");
                 }}
                 style={{
                   display: "flex",
@@ -594,7 +632,7 @@ export default function ChatView({
         </div>
       )}
 
-      {/* --- PINNED MESSAGE BANNER --- */}
+      {/* Pinned Message Banner */}
       {pinnedMessage && (
         <div
           style={{
@@ -612,7 +650,7 @@ export default function ChatView({
             <Pin size={14} color={THEME.primary} />
             <span style={{ fontWeight: "700", color: THEME.primary }}>Pinned:</span>
             <span style={{ color: THEME.text, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
-              {pinnedMessage.content || "Media file"}
+              {pinnedMessage.content || "Media"}
             </span>
           </div>
           <button onClick={() => setPinnedMessage(null)} style={styles.cleanBtn}>
@@ -621,27 +659,7 @@ export default function ChatView({
         </div>
       )}
 
-      {/* Vanish Banner */}
-      {vanishMode && (
-        <div
-          style={{
-            backgroundColor: "rgba(241, 92, 109, 0.15)",
-            borderBottom: `1px solid ${THEME.danger}`,
-            padding: "4px 14px",
-            fontSize: "11px",
-            color: THEME.danger,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "6px"
-          }}
-        >
-          <Flame size={13} />
-          <span>Vanish Mode Active: New messages vanish in 15 seconds</span>
-        </div>
-      )}
-
-      {/* --- 6. SCROLLABLE MESSAGE HISTORY & SWIPE-TO-REPLY --- */}
+      {/* --- 6. DUAL-DIRECTION SMOOTH SCROLLING MESSAGE CONTAINER --- */}
       <div
         ref={messagesContainerRef}
         style={{
@@ -668,7 +686,7 @@ export default function ChatView({
                 border: `1px solid ${THEME.border}`
               }}
             >
-              🔒 Swipe message to reply or long-press for options.
+              🔒 Swipe right to reply, or double-tap/hold to react.
             </div>
           </div>
         ) : (
@@ -677,50 +695,46 @@ export default function ChatView({
             const isVanished = msg.type === "vanished";
             const isDeleted = msg.type === "deleted";
             const isSelected = selectedMessage?.id === msg.id;
-            const currentSwipeOffset = swipeOffsets[msg.id] || 0;
+            const currentOffset = swipeOffsets[msg.id] || 0;
 
             return (
               <div
                 key={msg.id}
-                onTouchStart={(e) => handleTouchStart(e, msg)}
-                onTouchMove={(e) => handleTouchMove(e, msg.id)}
-                onTouchEnd={(e) => handleTouchEnd(e, msg)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setSelectedMessage(msg);
-                }}
                 style={{
                   display: "flex",
                   flexDirection: "column",
                   alignItems: isMe ? "flex-end" : "flex-start",
                   width: "100%",
                   marginBottom: "2px",
-                  position: "relative",
-                  transition: currentSwipeOffset === 0 ? "transform 0.25s cubic-bezier(0.18, 0.89, 0.32, 1.28)" : "none",
-                  transform: `translateX(${currentSwipeOffset}px)`
+                  position: "relative"
                 }}
               >
-                {/* Visual Indicator Behind Bubble When Swiped */}
-                {Math.abs(currentSwipeOffset) > 20 && (
+                {/* Swipe Reply Indicator Behind Bubble */}
+                {currentOffset > 10 && (
                   <div
                     style={{
                       position: "absolute",
-                      [isMe ? "right" : "left"]: "-36px",
+                      left: "-30px",
                       top: "50%",
                       transform: "translateY(-50%)",
                       color: THEME.primary,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      opacity: Math.min(1, Math.abs(currentSwipeOffset) / 45)
+                      opacity: Math.min(1, currentOffset / 35),
+                      transition: "opacity 0.15s ease"
                     }}
                   >
-                    <Reply size={20} />
+                    <Reply size={18} />
                   </div>
                 )}
 
-                {/* Message Bubble Card */}
+                {/* Message Bubble with Controlled Right-Swipe (Max 50px) */}
                 <div
+                  onTouchStart={(e) => handleBubbleTouchStart(e, msg)}
+                  onTouchMove={(e) => handleBubbleTouchMove(e, msg.id)}
+                  onTouchEnd={(e) => handleBubbleTouchEnd(e, msg)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setSelectedMessage(msg);
+                  }}
                   style={{
                     maxWidth: "80%",
                     borderRadius: "12px",
@@ -738,10 +752,12 @@ export default function ChatView({
                     position: "relative",
                     wordBreak: "break-word",
                     userSelect: "none",
-                    WebkitUserSelect: "none"
+                    WebkitUserSelect: "none",
+                    transform: `translateX(${currentOffset}px)`,
+                    transition: currentOffset === 0 ? "transform 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28)" : "none"
                   }}
                 >
-                  {/* Replied Message Quote Preview */}
+                  {/* Quoted Message */}
                   {msg.replyTo && !isDeleted && (
                     <div
                       style={{
@@ -788,12 +804,12 @@ export default function ChatView({
                     </div>
                   )}
 
-                  {/* Message Text Content */}
+                  {/* Message Text */}
                   <div style={{ fontSize: "13px", lineHeight: "1.4", fontStyle: isDeleted ? "italic" : "normal", opacity: isDeleted ? 0.7 : 1 }}>
                     {msg.content}
                   </div>
 
-                  {/* Footer: Timestamp, Edited badge & Read Status */}
+                  {/* Timestamp & Read Receipts */}
                   <div
                     style={{
                       display: "flex",
@@ -816,6 +832,26 @@ export default function ChatView({
                     )}
                   </div>
                 </div>
+
+                {/* Emoji Reactions Badges Below Bubble */}
+                {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                  <div style={{ display: "flex", gap: "2px", marginTop: "-6px", zIndex: 2 }}>
+                    {Object.entries(msg.reactions).map(([uid, emo]) => (
+                      <span
+                        key={uid}
+                        style={{
+                          backgroundColor: THEME.header,
+                          border: `1px solid ${THEME.border}`,
+                          borderRadius: "12px",
+                          padding: "1px 5px",
+                          fontSize: "11px"
+                        }}
+                      >
+                        {emo}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })
@@ -823,7 +859,48 @@ export default function ChatView({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* --- CONFIRMATION DIALOG FOR DELETE --- */}
+      {/* --- FLOATING EMOJI REACTION PICKER POPUP --- */}
+      {reactionPicker && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: "fixed",
+            left: reactionPicker.x,
+            top: reactionPicker.y,
+            backgroundColor: THEME.sidebar,
+            border: `1px solid ${THEME.border}`,
+            borderRadius: "30px",
+            padding: "4px 8px",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.6)",
+            zIndex: 1000,
+            animation: "fadeIn 0.15s ease"
+          }}
+        >
+          {REACTION_EMOJIS.map((emoji) => (
+            <button
+              key={emoji}
+              onClick={() => handleApplyReaction(emoji)}
+              style={{
+                background: "none",
+                border: "none",
+                fontSize: "20px",
+                cursor: "pointer",
+                padding: "4px",
+                transition: "transform 0.1s ease"
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.transform = "scale(1.3)")}
+              onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
       {showDeleteConfirm && selectedMessage && (
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
@@ -834,30 +911,16 @@ export default function ChatView({
               </button>
             </div>
             <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px" }}>
-              <div style={{ fontSize: "13px", color: THEME.textMuted }}>
-                Choose how you want to delete this message:
-              </div>
               <button
                 onClick={() => handleDeleteSelected(false)}
-                style={{
-                  ...styles.pillBtn,
-                  backgroundColor: THEME.card,
-                  color: THEME.text,
-                  padding: "10px"
-                }}
+                style={{ ...styles.pillBtn, backgroundColor: THEME.card, color: THEME.text, padding: "10px" }}
               >
                 Delete for Me
               </button>
               {isSelectedSentByMe && (
                 <button
                   onClick={() => handleDeleteSelected(true)}
-                  style={{
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.danger,
-                    color: "#fff",
-                    padding: "10px",
-                    fontWeight: "700"
-                  }}
+                  style={{ ...styles.pillBtn, backgroundColor: THEME.danger, color: "#fff", padding: "10px", fontWeight: "700" }}
                 >
                   Delete for Everyone
                 </button>
@@ -867,7 +930,7 @@ export default function ChatView({
         </div>
       )}
 
-      {/* --- REPLIED PREVIEW BANNER (ABOVE INPUT) --- */}
+      {/* Replying Banner */}
       {replyingTo && (
         <div
           style={{
@@ -876,8 +939,7 @@ export default function ChatView({
             padding: "6px 14px",
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
-            animation: "fadeIn 0.2s ease"
+            justifyContent: "space-between"
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text, minWidth: 0 }}>
@@ -893,7 +955,7 @@ export default function ChatView({
         </div>
       )}
 
-      {/* --- INLINE EDIT BANNER (ABOVE INPUT) --- */}
+      {/* Inline Edit Banner */}
       {editingMessage && (
         <div
           style={{
@@ -934,13 +996,13 @@ export default function ChatView({
           position: "relative"
         }}
       >
-        {/* Attachment Options */}
+        {/* Attachment Button */}
         <div style={{ position: "relative" }}>
           <button
             type="button"
             onClick={() => setShowAttachMenu(!showAttachMenu)}
             style={{ ...styles.cleanBtn, color: THEME.textMuted, padding: "6px" }}
-            title="Attach file"
+            title="Attach"
           >
             <Paperclip size={20} />
           </button>
@@ -1043,12 +1105,12 @@ export default function ChatView({
             color: viewOnceMode ? THEME.primary : THEME.textMuted,
             padding: "6px"
           }}
-          title="View Once message"
+          title="View Once"
         >
           <Eye size={20} />
         </button>
 
-        {/* Text Input Field */}
+        {/* Message Input Box with auto-focus ref */}
         <div
           style={{
             flex: 1,
@@ -1061,6 +1123,7 @@ export default function ChatView({
           }}
         >
           <input
+            ref={inputRef}
             type="text"
             placeholder={editingMessage ? "Edit message..." : "Type a message..."}
             value={inputText}
@@ -1074,7 +1137,7 @@ export default function ChatView({
           />
         </div>
 
-        {/* Send / Update Button */}
+        {/* Send Button */}
         <button
           type="submit"
           disabled={!inputText.trim()}
