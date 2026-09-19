@@ -818,7 +818,15 @@ export default function App() {
   // If user is not authenticated, render Instant Direct Auth Screen with 1-Click Guest Access
   if (!currentUser) {
     return (
-      <div style={{ ...styles.centerContainer, backgroundColor: THEME.bg }}>
+      <div
+        className="min-h-screen h-full flex flex-col items-center justify-center p-4 overscroll-y-contain"
+        style={{
+          backgroundColor: THEME.bg,
+          minHeight: "100dvh",
+          overscrollBehaviorY: "contain",
+          WebkitOverflowScrolling: "touch"
+        }}
+      >
         <div style={{ ...styles.authCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
           {/* Logo & Header */}
           <div style={{ ...styles.logoCircle, backgroundColor: THEME.primary, marginBottom: "14px" }}>
@@ -965,7 +973,19 @@ export default function App() {
 
   // --- LOGGED-IN MAIN APPLICATION DASHBOARD ---
   return (
-    <div style={{ ...styles.appWrap, backgroundColor: THEME.bg }}>
+    <div
+      className="min-h-screen h-full flex flex-col overscroll-y-contain"
+      style={{
+        ...styles.appWrap,
+        backgroundColor: THEME.bg,
+        minHeight: "100dvh",
+        height: "100%",
+        display: "flex",
+        flexDirection: "row",
+        overscrollBehaviorY: "contain",
+        WebkitOverflowScrolling: "touch"
+      }}
+    >
       {/* Toast Notification Banner */}
       {toastMessage && (
         <div style={{ ...styles.toast, backgroundColor: THEME.primary }}>
@@ -975,11 +995,14 @@ export default function App() {
 
       {/* --- SIDEBAR --- */}
       <div
+        className="flex flex-col h-full overflow-hidden"
         style={{
           ...styles.sidebar,
           backgroundColor: THEME.sidebar,
           borderColor: THEME.border,
-          display: mobileView === "chat" ? "none" : "flex"
+          display: mobileView === "chat" ? "none" : "flex",
+          height: "100%",
+          overscrollBehaviorY: "contain"
         }}
       >
         {/* Sidebar Header */}
@@ -1111,7 +1134,16 @@ export default function App() {
 
         {/* Sidebar List Content */}
         {mainTab === "chats" && (
-          <div style={{ flex: 1, overflowY: "auto", padding: "6px" }}>
+          <div
+            className="flex-1 overflow-y-auto"
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: "6px",
+              WebkitOverflowScrolling: "touch",
+              overscrollBehaviorY: "contain"
+            }}
+          >
             {sortedContacts.length === 0 ? (
               <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted }}>
                 <MessageSquare size={36} style={{ margin: "0 auto 8px" }} />
@@ -1175,149 +1207,193 @@ export default function App() {
         )}
 
         {mainTab === "feed" && (
-          <Feed
-            feedPosts={feedPosts}
-            currentUser={currentUser}
-            channels={channels}
-            THEME={THEME}
-            t={t}
-            onOpenChannel={(chId) => {
-              const ch = channels.find((c) => c.id === chId);
-              if (ch) {
-                setActiveChannel(ch);
-                setMainTab("channels");
-                setMobileView("chat");
-              }
+          <div
+            className="flex-1 overflow-y-auto flex flex-col"
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              WebkitOverflowScrolling: "touch",
+              overscrollBehaviorY: "contain"
             }}
-            onToggleLike={handleToggleFeedLike}
-            onReaction={handleFeedReaction}
-            onForward={(post) => {
-              setForwardModalMsg(post);
-              setSelectedForwardTargets([]);
-            }}
-            onLightbox={(media) => setLightboxMedia(media)}
-            onBroadcastPost={handleBroadcastPost}
-            showToast={showToast}
-          />
+          >
+            <Feed
+              feedPosts={feedPosts}
+              currentUser={currentUser}
+              channels={channels}
+              THEME={THEME}
+              t={t}
+              onOpenChannel={(chId) => {
+                const ch = channels.find((c) => c.id === chId);
+                if (ch) {
+                  setActiveChannel(ch);
+                  setMainTab("channels");
+                  setMobileView("chat");
+                }
+              }}
+              onToggleLike={handleToggleFeedLike}
+              onReaction={handleFeedReaction}
+              onForward={(post) => {
+                setForwardModalMsg(post);
+                setSelectedForwardTargets([]);
+              }}
+              onLightbox={(media) => setLightboxMedia(media)}
+              onBroadcastPost={handleBroadcastPost}
+              showToast={showToast}
+            />
+          </div>
         )}
 
         {mainTab === "channels" && (
-          <Channels
-            channels={channels}
-            activeChannel={activeChannel}
-            setActiveChannel={setActiveChannel}
-            channelPosts={channelPosts}
-            currentUser={currentUser}
-            THEME={THEME}
-            t={t}
-            onToggleSubscribe={handleToggleSubscribe}
-            onBroadcastPost={handleBroadcastPost}
-            onPromoteAdmin={handleChannelAdminAction}
-            onDemoteAdmin={handleDemoteAdmin}
-            onToggleLike={handleToggleFeedLike}
-            onReaction={handleFeedReaction}
-            onForward={(post) => {
-              setForwardModalMsg(post);
-              setSelectedForwardTargets([]);
+          <div
+            className="flex-1 overflow-y-auto flex flex-col"
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              WebkitOverflowScrolling: "touch",
+              overscrollBehaviorY: "contain"
             }}
-            onLightbox={(media) => setLightboxMedia(media)}
-            setMobileView={setMobileView}
-            showToast={showToast}
-          />
+          >
+            <Channels
+              channels={channels}
+              activeChannel={activeChannel}
+              setActiveChannel={setActiveChannel}
+              channelPosts={channelPosts}
+              currentUser={currentUser}
+              THEME={THEME}
+              t={t}
+              onToggleSubscribe={handleToggleSubscribe}
+              onBroadcastPost={handleBroadcastPost}
+              onPromoteAdmin={handleChannelAdminAction}
+              onDemoteAdmin={handleDemoteAdmin}
+              onToggleLike={handleToggleFeedLike}
+              onReaction={handleFeedReaction}
+              onForward={(post) => {
+                setForwardModalMsg(post);
+                setSelectedForwardTargets([]);
+              }}
+              onLightbox={(media) => setLightboxMedia(media)}
+              setMobileView={setMobileView}
+              showToast={showToast}
+            />
+          </div>
         )}
       </div>
 
       {/* --- MAIN CONTENT AREA --- */}
       <div
+        className={`flex-1 flex flex-col h-full ${mobileView === "list" ? "mobile-only" : ""}`}
         style={{
           ...styles.chatMain,
           backgroundColor: THEME.bg,
-          display: mobileView === "list" ? "none" : "flex"
+          display: mobileView === "list" ? "none" : "flex",
+          height: "100%",
+          overflow: "hidden",
+          overscrollBehaviorY: "contain"
         }}
-        className={mobileView === "list" ? "mobile-only" : ""}
       >
         {activeChat ? (
-          <ChatView
-            activeChat={activeChat}
-            setActiveChat={setActiveChat}
-            messages={messagesMap[getRoomId(currentUser.phone || currentUser.id, activeChat.phone || activeChat.id)] || []}
-            currentUser={currentUser}
-            peerPresence={peerPresence}
-            THEME={THEME}
-            t={t}
-            isPinned={pinnedChats.includes(activeChat.id)}
-            isMuted={mutedChats.includes(activeChat.id)}
-            onTogglePin={togglePinChat}
-            onToggleMute={toggleMuteChat}
-            vanishMode={vanishMode}
-            setVanishMode={setVanishMode}
-            viewOnceMode={viewOnceMode}
-            setViewOnceMode={setViewOnceMode}
-            replyingTo={replyingTo}
-            setReplyingTo={setReplyingTo}
-            onSendMessage={handleSendMessage}
-            onSendMedia={handleSendMedia}
-            onReactMessage={handleReactMessage}
-            onForwardMessage={(msg) => {
-              setForwardModalMsg(msg);
-              setSelectedForwardTargets([]);
-            }}
-            onLightbox={(media) => setLightboxMedia(media)}
-            startCall={startCall}
-            openProfile={(peer) => {
-              setViewedProfile(peer);
-              setActiveModal("profile_view");
-            }}
-            setMobileView={setMobileView}
-            showToast={showToast}
-          />
+          <div
+            className="flex-1 flex flex-col overflow-hidden h-full"
+            style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column" }}
+          >
+            <ChatView
+              activeChat={activeChat}
+              setActiveChat={setActiveChat}
+              messages={messagesMap[getRoomId(currentUser.phone || currentUser.id, activeChat.phone || activeChat.id)] || []}
+              currentUser={currentUser}
+              peerPresence={peerPresence}
+              THEME={THEME}
+              t={t}
+              isPinned={pinnedChats.includes(activeChat.id)}
+              isMuted={mutedChats.includes(activeChat.id)}
+              onTogglePin={togglePinChat}
+              onToggleMute={toggleMuteChat}
+              vanishMode={vanishMode}
+              setVanishMode={setVanishMode}
+              viewOnceMode={viewOnceMode}
+              setViewOnceMode={setViewOnceMode}
+              replyingTo={replyingTo}
+              setReplyingTo={setReplyingTo}
+              onSendMessage={handleSendMessage}
+              onSendMedia={handleSendMedia}
+              onReactMessage={handleReactMessage}
+              onForwardMessage={(msg) => {
+                setForwardModalMsg(msg);
+                setSelectedForwardTargets([]);
+              }}
+              onLightbox={(media) => setLightboxMedia(media)}
+              startCall={startCall}
+              openProfile={(peer) => {
+                setViewedProfile(peer);
+                setActiveModal("profile_view");
+              }}
+              setMobileView={setMobileView}
+              showToast={showToast}
+            />
+          </div>
         ) : activeChannel ? (
-          <Channels
-            channels={channels}
-            activeChannel={activeChannel}
-            setActiveChannel={setActiveChannel}
-            channelPosts={channelPosts}
-            currentUser={currentUser}
-            THEME={THEME}
-            t={t}
-            onToggleSubscribe={handleToggleSubscribe}
-            onBroadcastPost={handleBroadcastPost}
-            onPromoteAdmin={handleChannelAdminAction}
-            onDemoteAdmin={handleDemoteAdmin}
-            onToggleLike={handleToggleFeedLike}
-            onReaction={handleFeedReaction}
-            onForward={(post) => {
-              setForwardModalMsg(post);
-              setSelectedForwardTargets([]);
-            }}
-            onLightbox={(media) => setLightboxMedia(media)}
-            setMobileView={setMobileView}
-            showToast={showToast}
-          />
+          <div
+            className="flex-1 flex flex-col overflow-hidden h-full"
+            style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column" }}
+          >
+            <Channels
+              channels={channels}
+              activeChannel={activeChannel}
+              setActiveChannel={setActiveChannel}
+              channelPosts={channelPosts}
+              currentUser={currentUser}
+              THEME={THEME}
+              t={t}
+              onToggleSubscribe={handleToggleSubscribe}
+              onBroadcastPost={handleBroadcastPost}
+              onPromoteAdmin={handleChannelAdminAction}
+              onDemoteAdmin={handleDemoteAdmin}
+              onToggleLike={handleToggleFeedLike}
+              onReaction={handleFeedReaction}
+              onForward={(post) => {
+                setForwardModalMsg(post);
+                setSelectedForwardTargets([]);
+              }}
+              onLightbox={(media) => setLightboxMedia(media)}
+              setMobileView={setMobileView}
+              showToast={showToast}
+            />
+          </div>
         ) : mainTab === "feed" ? (
-          <Feed
-            feedPosts={feedPosts}
-            currentUser={currentUser}
-            channels={channels}
-            THEME={THEME}
-            t={t}
-            onOpenChannel={(chId) => {
-              const ch = channels.find((c) => c.id === chId);
-              if (ch) {
-                setActiveChannel(ch);
-                setMainTab("channels");
-              }
+          <div
+            className="flex-1 flex flex-col overflow-y-auto h-full"
+            style={{
+              flex: 1,
+              height: "100%",
+              overflowY: "auto",
+              WebkitOverflowScrolling: "touch",
+              overscrollBehaviorY: "contain"
             }}
-            onToggleLike={handleToggleFeedLike}
-            onReaction={handleFeedReaction}
-            onForward={(post) => {
-              setForwardModalMsg(post);
-              setSelectedForwardTargets([]);
-            }}
-            onLightbox={(media) => setLightboxMedia(media)}
-            onBroadcastPost={handleBroadcastPost}
-            showToast={showToast}
-          />
+          >
+            <Feed
+              feedPosts={feedPosts}
+              currentUser={currentUser}
+              channels={channels}
+              THEME={THEME}
+              t={t}
+              onOpenChannel={(chId) => {
+                const ch = channels.find((c) => c.id === chId);
+                if (ch) {
+                  setActiveChannel(ch);
+                  setMainTab("channels");
+                }
+              }}
+              onToggleLike={handleToggleFeedLike}
+              onReaction={handleFeedReaction}
+              onForward={(post) => {
+                setForwardModalMsg(post);
+                setSelectedForwardTargets([]);
+              }}
+              onLightbox={(media) => setLightboxMedia(media)}
+              onBroadcastPost={handleBroadcastPost}
+              showToast={showToast}
+            />
+          </div>
         ) : (
           <div style={{ margin: "auto", textAlign: "center", color: THEME.textMuted, padding: "20px" }}>
             <MessageSquare size={54} color={THEME.primary} style={{ marginBottom: "12px", opacity: 0.8 }} />
@@ -1346,32 +1422,37 @@ export default function App() {
 
       {/* --- SETTINGS MODAL --- */}
       {activeModal === "settings" && (
-        <Settings
-          currentUser={currentUser}
-          setCurrentUser={setCurrentUser}
-          lang={lang}
-          setLang={setLang}
-          darkMode={darkMode}
-          setDarkMode={setDarkMode}
-          notificationsEnabled={notificationsEnabled}
-          setNotificationsEnabled={setNotificationsEnabled}
-          soundEnabled={soundEnabled}
-          setSoundEnabled={setSoundEnabled}
-          ghostMode={ghostMode}
-          setGhostMode={setGhostMode}
-          selectedRingtone={selectedRingtone}
-          setSelectedRingtone={setSelectedRingtone}
-          THEME={THEME}
-          t={t}
-          onClose={() => setActiveModal(null)}
-          onOpenChannels={() => {
-            setMainTab("channels");
-            setActiveModal(null);
-          }}
-          onLogout={handleLogout}
-          showToast={showToast}
-          db={db}
-        />
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 overscroll-y-contain"
+          style={{ overscrollBehaviorY: "contain" }}
+        >
+          <Settings
+            currentUser={currentUser}
+            setCurrentUser={setCurrentUser}
+            lang={lang}
+            setLang={setLang}
+            darkMode={darkMode}
+            setDarkMode={setDarkMode}
+            notificationsEnabled={notificationsEnabled}
+            setNotificationsEnabled={setNotificationsEnabled}
+            soundEnabled={soundEnabled}
+            setSoundEnabled={setSoundEnabled}
+            ghostMode={ghostMode}
+            setGhostMode={setGhostMode}
+            selectedRingtone={selectedRingtone}
+            setSelectedRingtone={setSelectedRingtone}
+            THEME={THEME}
+            t={t}
+            onClose={() => setActiveModal(null)}
+            onOpenChannels={() => {
+              setMainTab("channels");
+              setActiveModal(null);
+            }}
+            onLogout={handleLogout}
+            showToast={showToast}
+            db={db}
+          />
+        </div>
       )}
 
       {/* --- FORWARD MODAL --- */}
@@ -1395,7 +1476,19 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ padding: "12px", maxHeight: "50vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: "6px" }}>
+            <div
+              className="overflow-y-auto"
+              style={{
+                padding: "12px",
+                maxHeight: "50vh",
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: "6px",
+                WebkitOverflowScrolling: "touch",
+                overscrollBehaviorY: "contain"
+              }}
+            >
               <div style={{ fontSize: "11px", fontWeight: "700", color: THEME.textMuted, textTransform: "uppercase" }}>Chats</div>
               {contacts.map((c) => {
                 const isSelected = selectedForwardTargets.includes(c.id);
@@ -1600,8 +1693,21 @@ export default function App() {
       {/* Injected Responsive and Reset CSS */}
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body, html { width: 100vw; height: 100vh; min-height: 100vh; overflow: hidden; }
-        #root { width: 100vw; height: 100vh; min-height: 100vh; display: flex; }
+        body, html {
+          width: 100%;
+          min-height: 100%;
+          height: 100%;
+          overscroll-behavior-y: contain;
+          -webkit-overflow-scrolling: touch;
+        }
+        #root {
+          width: 100%;
+          min-height: 100dvh;
+          height: 100%;
+          display: flex;
+          flex-direction: column;
+          overscroll-behavior-y: contain;
+        }
         @media (min-width: 768px) {
           .mobile-only { display: flex !important; }
         }
