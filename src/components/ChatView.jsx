@@ -58,32 +58,32 @@ export default function ChatView({
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showChatOptions, setShowChatOptions] = useState(false);
 
-  // Reaction picker popup state: { messageId, position: { x, y } }
+  // Floating Emoji Reaction Picker state: { msgId, x, y }
   const [reactionPicker, setReactionPicker] = useState(null);
 
-  // Context selection state
+  // Context Selection state
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [pinnedMessage, setPinnedMessage] = useState(null);
   const [editingMessage, setEditingMessage] = useState(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
-  // References for scrolling and input focus
+  // DOM references for scrolling and auto-focus
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
-  // Gesture tracking
+  // Gesture tracking states and refs
   const touchStartPos = useRef({ x: 0, y: 0, time: 0 });
   const lastTapRef = useRef({ time: 0, msgId: null });
   const longPressTimerRef = useRef(null);
-  const isSwipeGesture = useRef(false);
-  const [swipeOffsets, setSwipeOffsets] = useState({}); // { [msgId]: number }
+  const isSwipingHorizontal = useRef(false);
+  const [bubbleOffsets, setBubbleOffsets] = useState({}); // { [msgId]: number }
 
   const myIdent = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
 
-  // --- 1. AUTO-SCROLL TO LATEST MESSAGE ON ENTRY & ON RECEIVING NEW MESSAGES ---
+  // --- 1. AUTO-SCROLL TO BOTTOM ON THREAD ENTRY & NEW MESSAGES ---
   useEffect(() => {
-    // Immediate scroll when opening a new chat
+    // Instant snap to bottom on entering direct chat
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "auto" });
     }
@@ -98,22 +98,22 @@ export default function ChatView({
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
 
-    // If near bottom (within 200px) or on initial render, smoothly scroll to bottom
-    if (distanceFromBottom < 200) {
+    // Smooth scroll if user was near bottom when a new message arrives
+    if (distanceFromBottom < 250) {
       if (messagesEndRef.current) {
         messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
     }
   }, [messages.length]);
 
-  // Focus input automatically whenever replyingTo changes
+  // Focus input automatically whenever reply mode activates
   useEffect(() => {
     if (replyingTo && inputRef.current) {
       inputRef.current.focus();
     }
   }, [replyingTo]);
 
-  // --- 2. SEND / EDIT MESSAGE HANDLER ---
+  // --- 2. SEND / UPDATE MESSAGE HANDLER ---
   const handleSend = (e) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!inputText.trim()) return;
@@ -144,12 +144,11 @@ export default function ChatView({
     setInputText("");
     setReplyingTo(null);
 
-    // Scroll to bottom immediately upon user send
     setTimeout(() => {
       if (messagesEndRef.current) {
         messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
-    }, 50);
+    }, 40);
   };
 
   // --- 3. ATTACHMENT HANDLER ---
@@ -177,15 +176,15 @@ export default function ChatView({
     reader.readAsDataURL(file);
   };
 
-  // --- 4. TOUCH GESTURES: CONTROLLED RIGHT-SWIPE (MAX ~50px) & DOUBLE-TAP / LONG-PRESS ---
-  const handleBubbleTouchStart = (e, msg) => {
+  // --- 4. CONTROLLED SWIPE-TO-REPLY & DOUBLE-TAP / LONG-PRESS GESTURES ---
+  const handleTouchStart = (e, msg) => {
     const touch = e.touches[0];
     const now = Date.now();
     touchStartPos.current = { x: touch.clientX, y: touch.clientY, time: now };
-    isSwipeGesture.current = false;
+    isSwipingHorizontal.current = false;
 
-    // Double-tap detection for reaction popup
-    if (lastTapRef.current.msgId === msg.id && now - lastTapRef.current.time < 300) {
+    // Double-tap detection -> open emoji reactions
+    if (lastTapRef.current.msgId === msg.id && now - lastTapRef.current.time < 320) {
       clearTimeout(longPressTimerRef.current);
       openReactionPicker(msg.id, touch.clientX, touch.clientY);
       lastTapRef.current = { time: 0, msgId: null };
@@ -193,52 +192,52 @@ export default function ChatView({
     }
     lastTapRef.current = { time: now, msgId: msg.id };
 
-    // Long-press timer (400ms) for reaction popup & selection
+    // Long press timer (~380ms) -> open reactions & contextual options
     longPressTimerRef.current = setTimeout(() => {
       if (window.navigator?.vibrate) {
         window.navigator.vibrate(40);
       }
       openReactionPicker(msg.id, touch.clientX, touch.clientY);
       setSelectedMessage(msg);
-    }, 400);
+    }, 380);
   };
 
-  const handleBubbleTouchMove = (e, msgId) => {
+  const handleTouchMove = (e, msgId) => {
     const touch = e.touches[0];
     const deltaX = touch.clientX - touchStartPos.current.x;
     const deltaY = touch.clientY - touchStartPos.current.y;
 
-    // If vertical scrolling detected, cancel long-press and horizontal swipe
+    // If scrolling vertically, immediately cancel long-press and swipe gestures
     if (Math.abs(deltaY) > 8) {
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = null;
       }
-      if (!isSwipeGesture.current) return;
+      if (!isSwipingHorizontal.current) return;
     }
 
-    // Controlled right-swipe only (deltaX > 0), strictly capped at 50px
-    if (deltaX > 10 && Math.abs(deltaY) < 20) {
-      isSwipeGesture.current = true;
+    // Controlled right-swipe strictly on the individual bubble (0px to max 45px)
+    if (deltaX > 8 && Math.abs(deltaY) < 18) {
+      isSwipingHorizontal.current = true;
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = null;
       }
-      const boundedOffset = Math.min(50, Math.max(0, deltaX));
-      setSwipeOffsets((prev) => ({ ...prev, [msgId]: boundedOffset }));
+      const boundedOffset = Math.min(45, Math.max(0, deltaX));
+      setBubbleOffsets((prev) => ({ ...prev, [msgId]: boundedOffset }));
     }
   };
 
-  const handleBubbleTouchEnd = (e, msg) => {
+  const handleTouchEnd = (e, msg) => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
 
-    const currentOffset = swipeOffsets[msg.id] || 0;
+    const offset = bubbleOffsets[msg.id] || 0;
 
-    // If swiped right at least 35px, activate Reply and focus input immediately
-    if (currentOffset >= 35) {
+    // Trigger reply if swiped right >= 32px
+    if (offset >= 32) {
       if (window.navigator?.vibrate) {
         window.navigator.vibrate(25);
       }
@@ -247,21 +246,24 @@ export default function ChatView({
         content: msg.content || (msg.fileUrl ? "Media file" : ""),
         senderName: msg.senderName || "User"
       });
-      if (inputRef.current) {
-        inputRef.current.focus();
-      }
+      // Pop up keyboard automatically
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+        }
+      }, 50);
     }
 
     // Elastic reset
-    setSwipeOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
-    isSwipeGesture.current = false;
+    setBubbleOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
+    isSwipingHorizontal.current = false;
   };
 
   const openReactionPicker = (msgId, clientX, clientY) => {
     setReactionPicker({
       msgId,
-      x: Math.min(window.innerWidth - 220, Math.max(20, clientX - 80)),
-      y: Math.max(60, clientY - 60)
+      x: Math.min(window.innerWidth - 220, Math.max(16, clientX - 80)),
+      y: Math.max(60, clientY - 55)
     });
   };
 
@@ -278,7 +280,7 @@ export default function ChatView({
   const handleCopySelected = () => {
     if (!selectedMessage) return;
     navigator.clipboard.writeText(selectedMessage.content || "");
-    if (showToast) showToast("Message copied to clipboard");
+    if (showToast) showToast("Message copied");
     setSelectedMessage(null);
   };
 
@@ -289,9 +291,11 @@ export default function ChatView({
       content: selectedMessage.content,
       senderName: selectedMessage.senderName || "User"
     });
-    if (inputRef.current) {
-      inputRef.current.focus();
-    }
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+      }
+    }, 50);
     setSelectedMessage(null);
   };
 
@@ -305,9 +309,11 @@ export default function ChatView({
     if (!selectedMessage) return;
     setEditingMessage(selectedMessage);
     setInputText(selectedMessage.content || "");
-    if (inputRef.current) {
-      inputRef.current.focus();
-    }
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+      }
+    }, 50);
     setSelectedMessage(null);
   };
 
@@ -354,7 +360,7 @@ export default function ChatView({
         overflow: "hidden"
       }}
     >
-      {/* --- TOP HEADER: ACTION BAR OR CHAT BAR --- */}
+      {/* --- TOP HEADER (CONTEXT BAR OR DIRECT CHAT HEADER) --- */}
       {selectedMessage ? (
         <div
           style={{
@@ -659,15 +665,17 @@ export default function ChatView({
         </div>
       )}
 
-      {/* --- 6. DUAL-DIRECTION SMOOTH SCROLLING MESSAGE CONTAINER --- */}
+      {/* --- 6. DUAL-DIRECTION VERTICAL SCROLLING CONTAINER --- */}
       <div
         ref={messagesContainerRef}
         style={{
           flex: 1,
           height: "100%",
           overflowY: "auto",
+          overflowX: "hidden",
           WebkitOverflowScrolling: "touch",
           overscrollBehaviorY: "contain",
+          touchAction: "pan-y",
           padding: "14px 16px",
           display: "flex",
           flexDirection: "column",
@@ -686,7 +694,7 @@ export default function ChatView({
                 border: `1px solid ${THEME.border}`
               }}
             >
-              🔒 Swipe right to reply, or double-tap/hold to react.
+              🔒 Direct end-to-end messaging. Swipe right to reply, or hold/double-tap to react.
             </div>
           </div>
         ) : (
@@ -695,7 +703,7 @@ export default function ChatView({
             const isVanished = msg.type === "vanished";
             const isDeleted = msg.type === "deleted";
             const isSelected = selectedMessage?.id === msg.id;
-            const currentOffset = swipeOffsets[msg.id] || 0;
+            const currentOffset = bubbleOffsets[msg.id] || 0;
 
             return (
               <div
@@ -709,34 +717,34 @@ export default function ChatView({
                   position: "relative"
                 }}
               >
-                {/* Swipe Reply Indicator Behind Bubble */}
-                {currentOffset > 10 && (
+                {/* Swipe Reply Icon Indicator (Appears when bubble is swiped right) */}
+                {currentOffset > 8 && (
                   <div
                     style={{
                       position: "absolute",
-                      left: "-30px",
+                      left: "-28px",
                       top: "50%",
                       transform: "translateY(-50%)",
                       color: THEME.primary,
-                      opacity: Math.min(1, currentOffset / 35),
-                      transition: "opacity 0.15s ease"
+                      opacity: Math.min(1, currentOffset / 32),
+                      transition: "opacity 0.1s ease"
                     }}
                   >
                     <Reply size={18} />
                   </div>
                 )}
 
-                {/* Message Bubble with Controlled Right-Swipe (Max 50px) */}
+                {/* Individual Message Bubble with Controlled Right-Swipe (Max 45px) */}
                 <div
-                  onTouchStart={(e) => handleBubbleTouchStart(e, msg)}
-                  onTouchMove={(e) => handleBubbleTouchMove(e, msg.id)}
-                  onTouchEnd={(e) => handleBubbleTouchEnd(e, msg)}
+                  onTouchStart={(e) => handleTouchStart(e, msg)}
+                  onTouchMove={(e) => handleTouchMove(e, msg.id)}
+                  onTouchEnd={(e) => handleTouchEnd(e, msg)}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setSelectedMessage(msg);
                   }}
                   style={{
-                    maxWidth: "80%",
+                    maxWidth: "82%",
                     borderRadius: "12px",
                     borderTopRightRadius: isMe ? "2px" : "12px",
                     borderTopLeftRadius: !isMe ? "2px" : "12px",
@@ -983,7 +991,7 @@ export default function ChatView({
         </div>
       )}
 
-      {/* --- 7. CHAT INPUT & COMPOSER BAR --- */}
+      {/* --- 7. CHAT INPUT COMPOSER --- */}
       <form
         onSubmit={handleSend}
         style={{
@@ -996,7 +1004,7 @@ export default function ChatView({
           position: "relative"
         }}
       >
-        {/* Attachment Button */}
+        {/* Attachment Toggle */}
         <div style={{ position: "relative" }}>
           <button
             type="button"
@@ -1110,7 +1118,7 @@ export default function ChatView({
           <Eye size={20} />
         </button>
 
-        {/* Message Input Box with auto-focus ref */}
+        {/* Input Box with ref for auto keyboard focus */}
         <div
           style={{
             flex: 1,
