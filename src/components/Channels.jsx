@@ -1,4 +1,15 @@
-import React, { useState, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import {
+  collection,
+  doc,
+  setDoc,
+  getDoc,
+  query,
+  where,
+  onSnapshot,
+  orderBy,
+  limit
+} from "firebase/firestore";
 import {
   Users,
   Plus,
@@ -6,19 +17,20 @@ import {
   Trash2,
   Archive,
   ArchiveRestore,
-  UserPlus,
-  UserMinus,
-  Heart,
-  Share2,
-  X,
+  MoreVertical,
+  AlertTriangle,
+  ArrowLeft,
   Volume2,
   VolumeX,
   Shield,
-  ArrowLeft,
-  MoreVertical,
-  AlertTriangle
+  Heart,
+  Share2,
+  X,
+  Search,
+  MessageSquarePlus,
+  UserPlus
 } from "lucide-react";
-import { styles } from "../firebase";
+import { db, styles } from "../firebase";
 
 export default function Channels({
   channels = [],
@@ -41,19 +53,28 @@ export default function Channels({
 }) {
   const currentUserId = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
 
-  // Local state for Channel creation
+  // Private isolated conversations fetched strictly with participants array-contains currentUserId
+  const [privateConversations, setPrivateConversations] = useState([]);
+  const [isLoadingChats, setIsLoadingChats] = useState(true);
+
+  // New Chat / Contact search modal state
+  const [showNewChatModal, setShowNewChatModal] = useState(false);
+  const [contactPhoneInput, setContactPhoneInput] = useState("");
+  const [isSearchingContact, setIsSearchingContact] = useState(false);
+  const [initialMessageText, setInitialMessageText] = useState("");
+
+  // Channel Creation Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newChannelName, setNewChannelName] = useState("");
   const [newChannelDesc, setNewChannelDesc] = useState("");
 
-  // Local state for Broadcasting posts
+  // Broadcast input in channel view
   const [postContent, setPostContent] = useState("");
-  const [promotePhoneInput, setPromotePhoneInput] = useState("");
 
-  // Tab filter: Active vs Archived Channels/Chats
-  const [viewFilter, setViewFilter] = useState("active"); // "active" | "archived"
+  // View Filter: 'active' | 'archived'
+  const [viewFilter, setViewFilter] = useState("active");
 
-  // Per-user Archive & Deleted lists persisted locally & synced with user ID
+  // Local persistence for archived and deleted items per user
   const [userArchivedIds, setUserArchivedIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`infinity_archived_${currentUserId}`);
@@ -78,34 +99,167 @@ export default function Channels({
   const pressTimer = useRef(null);
   const isLongPressTriggered = useRef(false);
 
-  // --- 1. STRICT USER CHAT & CHANNEL ISOLATION ---
-  // Ensure User A only sees their own subscribed or created channels / chats,
-  // preventing cross-account leaks of conversation items.
-  const userIsolatedChannels = useMemo(() => {
-    if (!currentUserId) return [];
-    return channels.filter((ch) => {
-      // Must not be marked as deleted by the current user
-      if (userDeletedIds.includes(ch.id)) return false;
+  // Clean 11-digit phone number helper
+  const cleanPhone = (val) => {
+    if (!val) return "";
+    const digits = val.toString().replace(/\D/g, "");
+    if (digits.startsWith("880") && digits.length === 13) return digits.slice(2);
+    return digits.slice(0, 11);
+  };
 
-      // Check ownership or explicit subscription by this specific user
+  // --- 1. STRICT PRIVATE CONVERSATION QUERY (WHATSAPP ARCHITECTURE) ---
+  // Queries the 'conversations' collection strictly WHERE 'participants' array contains currentUserId.
+  // Unrelated users or global directories are NEVER loaded into the list.
+  useEffect(() => {
+    if (!currentUserId) return;
+    setIsLoadingChats(true);
+
+    const convCol = collection(db, "conversations");
+    const q = query(
+      convCol,
+      where("participants", "array-contains", currentUserId),
+      orderBy("updatedAt", "desc"),
+      limit(50)
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          list.push({
+            id: docSnap.id,
+            ...data
+          });
+        });
+        setPrivateConversations(list);
+        setIsLoadingChats(false);
+      },
+      (error) => {
+        // Fallback gracefully if composite index is pending
+        console.warn("Private query fallback: fetching by participants", error.message);
+        const fallbackQ = query(convCol, where("participants", "array-contains", currentUserId));
+        onSnapshot(fallbackQ, (snap) => {
+          const list = [];
+          snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+          setPrivateConversations(list);
+          setIsLoadingChats(false);
+        });
+      }
+    );
+
+    return () => unsubscribe();
+  }, [currentUserId]);
+
+  // Combined user-isolated items: Private Conversations + Channels where user is a participant
+  const userIsolatedItems = useMemo(() => {
+    // Isolated Channels (created, administered, or subscribed to by current user)
+    const filteredChannels = channels.filter((ch) => {
       const isCreator = ch.creatorPhone === currentUserId || ch.creatorId === currentUserId;
       const isAdmin = Array.isArray(ch.admins) && ch.admins.includes(currentUserId);
-      const isSubscribed = Array.isArray(ch.subscribers) && ch.subscribers.includes(currentUserId);
-
-      // User must be a participant, creator, admin, or subscriber
-      return isCreator || isAdmin || isSubscribed;
+      const isSub = Array.isArray(ch.subscribers) && ch.subscribers.includes(currentUserId);
+      return isCreator || isAdmin || isSub;
     });
-  }, [channels, currentUserId, userDeletedIds]);
 
-  // Split into Active vs Archived
-  const displayedChannels = useMemo(() => {
-    return userIsolatedChannels.filter((ch) => {
-      const isArchived = userArchivedIds.includes(ch.id);
+    // Merge private conversations and user channels
+    const combined = [
+      ...privateConversations.map((c) => ({ ...c, isPrivateChat: true })),
+      ...filteredChannels.map((ch) => ({ ...ch, isChannel: true }))
+    ];
+
+    // Filter out deleted items
+    return combined.filter((item) => !userDeletedIds.includes(item.id));
+  }, [channels, privateConversations, currentUserId, userDeletedIds]);
+
+  // Filter into Active vs Archived
+  const displayedItems = useMemo(() => {
+    return userIsolatedItems.filter((item) => {
+      const isArchived = userArchivedIds.includes(item.id);
       return viewFilter === "archived" ? isArchived : !isArchived;
     });
-  }, [userIsolatedChannels, userArchivedIds, viewFilter]);
+  }, [userIsolatedItems, userArchivedIds, viewFilter]);
 
-  // --- 2. LONG-PRESS / PRESS-HOLD EVENT HANDLERS (~500ms threshold) ---
+  // --- 2. MANUAL CONTACT SEARCH & CONVERSATION CREATION ---
+  const handleStartNewChat = async (e) => {
+    e.preventDefault();
+    const phone = cleanPhone(contactPhoneInput);
+
+    if (phone.length !== 11) {
+      if (showToast) showToast("Please enter an 11-digit mobile number");
+      return;
+    }
+
+    if (phone === currentUserId) {
+      if (showToast) showToast("You cannot start a private chat with yourself");
+      return;
+    }
+
+    setIsSearchingContact(true);
+    try {
+      // Look up target contact in Firestore
+      const userSnap = await getDoc(doc(db, "users", phone));
+      const targetData = userSnap.exists()
+        ? userSnap.data()
+        : { name: `User ${phone.slice(-4)}`, phone: phone };
+
+      // Form unique deterministic room/conversation ID
+      const roomId = [currentUserId, phone].sort().join("_");
+      const convDocRef = doc(db, "conversations", roomId);
+
+      const conversationPayload = {
+        id: roomId,
+        name: targetData.name || phone,
+        phone: phone,
+        avatar: targetData.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${phone}`,
+        participants: [currentUserId, phone],
+        participantDetails: {
+          [currentUserId]: {
+            name: currentUser?.name || currentUserId,
+            phone: currentUserId
+          },
+          [phone]: {
+            name: targetData.name || phone,
+            phone: phone
+          }
+        },
+        lastMessage: initialMessageText.trim() || "Started a private conversation",
+        updatedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString()
+      };
+
+      // Add conversation to Firestore strictly mapping both participants
+      await setDoc(convDocRef, conversationPayload, { merge: true });
+
+      // If initial message provided, save to room messages subcollection
+      if (initialMessageText.trim()) {
+        const msgId = Date.now().toString();
+        await setDoc(doc(db, "rooms", roomId, "messages", msgId), {
+          senderPhone: currentUserId,
+          senderName: currentUser?.name || currentUserId,
+          recipientPhone: phone,
+          content: initialMessageText.trim(),
+          type: "text",
+          status: "sent",
+          createdAt: new Date().toISOString()
+        });
+      }
+
+      setShowNewChatModal(false);
+      setContactPhoneInput("");
+      setInitialMessageText("");
+      setActiveChannel(conversationPayload);
+      if (setMobileView) setMobileView("chat");
+      if (showToast) showToast(`Private chat started with ${targetData.name || phone}`);
+    } catch (err) {
+      console.error("Error creating conversation:", err);
+      if (showToast) showToast("Could not start chat: " + err.message);
+    } finally {
+      setIsSearchingContact(false);
+    }
+  };
+
+  // --- 3. LONG-PRESS / HOLD EVENT HANDLERS (500ms) ---
   const handleTouchStart = (item) => {
     isLongPressTriggered.current = false;
     pressTimer.current = setTimeout(() => {
@@ -124,28 +278,26 @@ export default function Channels({
     }
   };
 
-  const handleItemClick = (ch) => {
+  const handleItemClick = (item) => {
     if (isLongPressTriggered.current) {
       isLongPressTriggered.current = false;
       return;
     }
-    setActiveChannel(ch);
+    setActiveChannel(item);
     if (setMobileView) setMobileView("chat");
   };
 
-  // --- 3. ARCHIVE / UNARCHIVE ACTION ---
-  const handleToggleArchive = (chId) => {
-    const isCurrentlyArchived = userArchivedIds.includes(chId);
+  // --- 4. ARCHIVE / RESTORE ACTION ---
+  const handleToggleArchive = (id) => {
+    const isCurrentlyArchived = userArchivedIds.includes(id);
     let nextList;
     if (isCurrentlyArchived) {
-      nextList = userArchivedIds.filter((id) => id !== chId);
-      if (showToast) showToast("Chat restored to active list");
+      nextList = userArchivedIds.filter((item) => item !== id);
+      if (showToast) showToast("Chat unarchived");
     } else {
-      nextList = [...userArchivedIds, chId];
-      if (showToast) showToast("Chat moved to archived");
-      if (activeChannel?.id === chId) {
-        setActiveChannel(null);
-      }
+      nextList = [...userArchivedIds, id];
+      if (showToast) showToast("Chat moved to archive");
+      if (activeChannel?.id === id) setActiveChannel(null);
     }
     setUserArchivedIds(nextList);
     try {
@@ -154,7 +306,7 @@ export default function Channels({
     setContextItem(null);
   };
 
-  // --- 4. DELETE CHAT / CHANNEL ACTION ---
+  // --- 5. DELETE CONVERSATION ACTION ---
   const handleExecuteDelete = () => {
     if (!contextItem) return;
     const targetId = contextItem.id;
@@ -170,12 +322,12 @@ export default function Channels({
       if (setMobileView) setMobileView("list");
     }
 
-    if (showToast) showToast("Chat conversation deleted");
+    if (showToast) showToast("Chat removed from your list");
     setShowConfirmDelete(false);
     setContextItem(null);
   };
 
-  // --- 5. CHANNEL CREATION ---
+  // --- 6. CHANNEL CREATION ---
   const handleCreateChannel = async (e) => {
     e.preventDefault();
     if (!newChannelName.trim()) return;
@@ -192,7 +344,7 @@ export default function Channels({
     if (showToast) showToast("Channel created successfully!");
   };
 
-  // --- 6. BROADCAST SUBMISSION ---
+  // Broadcast in channel
   const handleSendBroadcast = (e) => {
     e.preventDefault();
     if (!postContent.trim() || !activeChannel) return;
@@ -213,7 +365,7 @@ export default function Channels({
 
   return (
     <div style={{ display: "flex", flex: 1, height: "100%", overflow: "hidden", position: "relative" }}>
-      {/* LEFT COLUMN: User-Isolated Channels List */}
+      {/* LEFT COLUMN: WhatsApp-Style Isolated Chat & Channel List */}
       <div
         style={{
           width: "100%",
@@ -223,10 +375,11 @@ export default function Channels({
           borderRight: `1px solid ${THEME.border}`,
           backgroundColor: THEME.sidebar,
           height: "100%",
-          overflow: "hidden"
+          overflow: "hidden",
+          position: "relative"
         }}
       >
-        {/* Header with Archive Filter & New Channel Button */}
+        {/* Header with Title, Archive Filter & Add Buttons */}
         <div
           style={{
             ...styles.headerBar,
@@ -241,7 +394,7 @@ export default function Channels({
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <Users size={18} color={THEME.primary} />
             <span style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
-              {viewFilter === "archived" ? "Archived Chats" : "Channels & Chats"}
+              {viewFilter === "archived" ? "Archived Chats" : "Private Chats & Channels"}
             </span>
           </div>
 
@@ -257,8 +410,10 @@ export default function Channels({
             >
               {viewFilter === "archived" ? <ArchiveRestore size={18} /> : <Archive size={18} />}
             </button>
+
+            {/* Start New Private Chat Button */}
             <button
-              onClick={() => setShowCreateModal(true)}
+              onClick={() => setShowNewChatModal(true)}
               style={{
                 backgroundColor: THEME.primary,
                 border: "none",
@@ -271,14 +426,14 @@ export default function Channels({
                 cursor: "pointer",
                 color: "#fff"
               }}
-              title="Create Channel"
+              title="New Private Chat"
             >
-              <Plus size={16} />
+              <MessageSquarePlus size={16} />
             </button>
           </div>
         </div>
 
-        {/* Scrollable Isolated List with Long-Press */}
+        {/* Scrollable Isolated List */}
         <div
           style={{
             flex: 1,
@@ -287,38 +442,57 @@ export default function Channels({
             padding: "6px"
           }}
         >
-          {displayedChannels.length === 0 ? (
+          {isLoadingChats ? (
+            <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted, fontSize: "12px" }}>
+              Loading conversations...
+            </div>
+          ) : displayedItems.length === 0 ? (
             <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted }}>
-              <Users size={36} style={{ margin: "0 auto 10px", opacity: 0.6 }} />
-              <div style={{ fontSize: "13px", fontWeight: "600" }}>
-                {viewFilter === "archived" ? "No archived chats" : "No active channels found"}
+              <Users size={36} style={{ margin: "0 auto 10px", opacity: 0.5 }} />
+              <div style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
+                {viewFilter === "archived" ? "No archived chats" : "No private chats yet"}
               </div>
-              <div style={{ fontSize: "11px", marginTop: "4px" }}>
+              <div style={{ fontSize: "11px", marginTop: "6px", lineHeight: "1.5" }}>
                 {viewFilter === "archived"
-                  ? "Long-press any chat item to archive it"
-                  : "Tap '+' above to create your own broadcast channel"}
+                  ? "Long-press any conversation to archive it."
+                  : "Chats only appear when you actively add or message a contact. Tap the '+' button to start a private chat."}
               </div>
+              {viewFilter === "active" && (
+                <button
+                  onClick={() => setShowNewChatModal(true)}
+                  style={{
+                    ...styles.primaryBtn,
+                    backgroundColor: THEME.primary,
+                    width: "auto",
+                    padding: "8px 16px",
+                    margin: "16px auto 0",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px"
+                  }}
+                >
+                  <UserPlus size={15} />
+                  <span>Start New Chat</span>
+                </button>
+              )}
             </div>
           ) : (
-            displayedChannels.map((ch) => {
-              const isSelected = activeChannel?.id === ch.id;
-              const isUserSubscribed = Array.isArray(ch.subscribers) && ch.subscribers.includes(currentUserId);
-              const isUserAdmin =
-                ch.creatorPhone === currentUserId ||
-                ch.creatorId === currentUserId ||
-                (Array.isArray(ch.admins) && ch.admins.includes(currentUserId));
+            displayedItems.map((item) => {
+              const isSelected = activeChannel?.id === item.id;
+              const displayName = item.name || item.phone || "Chat";
+              const avatarUrl = item.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${item.id}`;
 
               return (
                 <div
-                  key={ch.id}
-                  onClick={() => handleItemClick(ch)}
-                  onTouchStart={() => handleTouchStart(ch)}
+                  key={item.id}
+                  onClick={() => handleItemClick(item)}
+                  onTouchStart={() => handleTouchStart(item)}
                   onTouchEnd={handleTouchEnd}
-                  onMouseDown={() => handleTouchStart(ch)}
+                  onMouseDown={() => handleTouchStart(item)}
                   onMouseUp={handleTouchEnd}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    setContextItem(ch);
+                    setContextItem(item);
                   }}
                   style={{
                     ...styles.contactItem,
@@ -329,25 +503,29 @@ export default function Channels({
                   }}
                 >
                   <img
-                    src={ch.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${ch.id}`}
+                    src={avatarUrl}
                     alt=""
                     style={{ width: "42px", height: "42px", borderRadius: "50%", objectFit: "cover" }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontWeight: "700", fontSize: "13px", color: THEME.text }}>{ch.name}</span>
-                      {isUserAdmin && (
+                      <span style={{ fontWeight: "700", fontSize: "13px", color: THEME.text }}>{displayName}</span>
+                      {item.isChannel ? (
                         <span
                           style={{
                             fontSize: "9px",
                             padding: "2px 6px",
                             borderRadius: "10px",
-                            backgroundColor: "rgba(37, 211, 102, 0.15)",
+                            backgroundColor: "rgba(34, 197, 94, 0.15)",
                             color: THEME.primary,
                             fontWeight: "700"
                           }}
                         >
-                          ADMIN
+                          CHANNEL
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: "10px", color: THEME.textMuted }}>
+                          {item.updatedAt ? new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
                         </span>
                       )}
                     </div>
@@ -360,14 +538,14 @@ export default function Channels({
                         textOverflow: "ellipsis"
                       }}
                     >
-                      {ch.desc || `${(ch.subscribers || []).length} subscriber(s)`}
+                      {item.lastMessage || item.desc || "Private message"}
                     </div>
                   </div>
 
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      setContextItem(ch);
+                      setContextItem(item);
                     }}
                     style={{
                       ...styles.cleanBtn,
@@ -383,9 +561,34 @@ export default function Channels({
             })
           )}
         </div>
+
+        {/* FLOATING ACTION BUTTON (+) FOR NEW CHAT */}
+        <button
+          onClick={() => setShowNewChatModal(true)}
+          style={{
+            position: "absolute",
+            bottom: "20px",
+            right: "20px",
+            backgroundColor: THEME.primary,
+            color: "#fff",
+            border: "none",
+            borderRadius: "50%",
+            width: "48px",
+            height: "48px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+            cursor: "pointer",
+            zIndex: 10
+          }}
+          title="New Private Chat"
+        >
+          <MessageSquarePlus size={22} />
+        </button>
       </div>
 
-      {/* RIGHT COLUMN: Active Channel Feed & Broadcasting View */}
+      {/* RIGHT COLUMN: Active Chat Feed & Broadcasting View */}
       {activeChannel ? (
         <div
           style={{
@@ -397,7 +600,7 @@ export default function Channels({
             overflow: "hidden"
           }}
         >
-          {/* Channel Header */}
+          {/* Header Bar */}
           <div
             style={{
               ...styles.headerBar,
@@ -425,43 +628,49 @@ export default function Channels({
                 style={{ width: "36px", height: "36px", borderRadius: "50%", objectFit: "cover" }}
               />
               <div>
-                <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>{activeChannel.name}</div>
+                <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                  {activeChannel.name || activeChannel.phone}
+                </div>
                 <div style={{ fontSize: "11px", color: THEME.textMuted }}>
-                  {(activeChannel.subscribers || []).length} subscriber(s) • {isAdmin ? "You are Admin" : "Subscriber"}
+                  {activeChannel.isPrivateChat
+                    ? "Private Conversation"
+                    : `${(activeChannel.subscribers || []).length} subscriber(s)`}
                 </div>
               </div>
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <button
-                onClick={(e) => onToggleSubscribe && onToggleSubscribe(activeChannel, e)}
-                style={{
-                  ...styles.pillBtn,
-                  backgroundColor:
-                    Array.isArray(activeChannel.subscribers) && activeChannel.subscribers.includes(currentUserId)
-                      ? THEME.card
-                      : THEME.primary,
-                  color:
-                    Array.isArray(activeChannel.subscribers) && activeChannel.subscribers.includes(currentUserId)
-                      ? THEME.textMuted
-                      : "#fff",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px"
-                }}
-              >
-                {Array.isArray(activeChannel.subscribers) && activeChannel.subscribers.includes(currentUserId) ? (
-                  <>
-                    <VolumeX size={14} />
-                    <span>Subscribed</span>
-                  </>
-                ) : (
-                  <>
-                    <Volume2 size={14} />
-                    <span>Subscribe</span>
-                  </>
-                )}
-              </button>
+              {!activeChannel.isPrivateChat && (
+                <button
+                  onClick={(e) => onToggleSubscribe && onToggleSubscribe(activeChannel, e)}
+                  style={{
+                    ...styles.pillBtn,
+                    backgroundColor:
+                      Array.isArray(activeChannel.subscribers) && activeChannel.subscribers.includes(currentUserId)
+                        ? THEME.card
+                        : THEME.primary,
+                    color:
+                      Array.isArray(activeChannel.subscribers) && activeChannel.subscribers.includes(currentUserId)
+                        ? THEME.textMuted
+                        : "#fff",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px"
+                  }}
+                >
+                  {Array.isArray(activeChannel.subscribers) && activeChannel.subscribers.includes(currentUserId) ? (
+                    <>
+                      <VolumeX size={14} />
+                      <span>Subscribed</span>
+                    </>
+                  ) : (
+                    <>
+                      <Volume2 size={14} />
+                      <span>Subscribe</span>
+                    </>
+                  )}
+                </button>
+              )}
 
               <button
                 onClick={() => setContextItem(activeChannel)}
@@ -472,7 +681,7 @@ export default function Channels({
             </div>
           </div>
 
-          {/* Posts List */}
+          {/* Messages or Channel Posts */}
           <div
             style={{
               flex: 1,
@@ -487,9 +696,15 @@ export default function Channels({
             {channelPosts.length === 0 ? (
               <div style={{ textAlign: "center", margin: "auto", color: THEME.textMuted }}>
                 <Users size={48} style={{ opacity: 0.3, marginBottom: "8px" }} />
-                <div style={{ fontSize: "14px" }}>No broadcasts published yet</div>
+                <div style={{ fontSize: "14px" }}>
+                  {activeChannel.isPrivateChat ? "Private conversation active" : "No broadcasts published yet"}
+                </div>
                 <div style={{ fontSize: "11px", marginTop: "4px" }}>
-                  {isAdmin ? "Broadcast news, updates, or messages below." : "Updates will show here."}
+                  {activeChannel.isPrivateChat
+                    ? "Only you and your contact can read and send messages here."
+                    : isAdmin
+                    ? "Broadcast announcements to your subscribers below."
+                    : "Channel announcements will show up here."}
                 </div>
               </div>
             ) : (
@@ -524,19 +739,6 @@ export default function Channels({
                       {post.content}
                     </div>
 
-                    {post.fileUrl && (
-                      <div
-                        onClick={() => onLightbox && onLightbox({ url: post.fileUrl, type: post.type, name: post.fileName })}
-                        style={{ cursor: "pointer", borderRadius: "8px", overflow: "hidden", maxHeight: "240px" }}
-                      >
-                        {post.type === "video" ? (
-                          <video src={post.fileUrl} controls style={{ width: "100%", maxHeight: "240px", objectFit: "cover" }} />
-                        ) : (
-                          <img src={post.fileUrl} alt="" style={{ width: "100%", maxHeight: "240px", objectFit: "cover" }} />
-                        )}
-                      </div>
-                    )}
-
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingTop: "6px" }}>
                       <button
                         onClick={() => onToggleLike && onToggleLike(post.id)}
@@ -567,8 +769,8 @@ export default function Channels({
             )}
           </div>
 
-          {/* Admin Broadcast Input Bar */}
-          {isAdmin ? (
+          {/* Broadcast Input (Channels only) */}
+          {!activeChannel.isPrivateChat && isAdmin && (
             <form
               onSubmit={handleSendBroadcast}
               style={{
@@ -606,19 +808,6 @@ export default function Channels({
                 <Send size={16} />
               </button>
             </form>
-          ) : (
-            <div
-              style={{
-                padding: "10px",
-                textAlign: "center",
-                backgroundColor: THEME.header,
-                borderTop: `1px solid ${THEME.border}`,
-                color: THEME.textMuted,
-                fontSize: "12px"
-              }}
-            >
-              Only channel administrators can post in this broadcast channel.
-            </div>
           )}
         </div>
       ) : (
@@ -634,14 +823,79 @@ export default function Channels({
           }}
         >
           <Users size={56} style={{ opacity: 0.3 }} />
-          <div style={{ fontSize: "15px", fontWeight: "600", color: THEME.text }}>Channels & Broadcasts</div>
-          <p style={{ fontSize: "12px", maxWidth: "280px", textAlign: "center", lineHeight: "1.4" }}>
-            Select a channel to read announcements or create your own community.
+          <div style={{ fontSize: "15px", fontWeight: "600", color: THEME.text }}>Private Chat & Channels</div>
+          <p style={{ fontSize: "12px", maxWidth: "300px", textAlign: "center", lineHeight: "1.4" }}>
+            Select a conversation or tap '+' to start an end-to-end private chat with an 11-digit mobile contact.
           </p>
         </div>
       )}
 
-      {/* --- LONG-PRESS CONTEXT MENU (BOTTOM SHEET / MODAL) --- */}
+      {/* --- MODAL: START NEW CHAT (MANUAL CONTACT ADDITION) --- */}
+      {showNewChatModal && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text, display: "flex", alignItems: "center", gap: "8px" }}>
+                <MessageSquarePlus size={18} color={THEME.primary} />
+                <span>New Private Chat</span>
+              </div>
+              <button onClick={() => setShowNewChatModal(false)} style={styles.cleanBtn}>
+                <X size={18} color={THEME.text} />
+              </button>
+            </div>
+
+            <form onSubmit={handleStartNewChat} style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div style={{ fontSize: "12px", color: THEME.textMuted }}>
+                Chats are completely private. Enter the contact's 11-digit mobile number to open a dedicated conversation.
+              </div>
+
+              <div>
+                <label style={styles.label}>11-Digit Contact Number</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type="tel"
+                    placeholder="01712345678"
+                    maxLength={11}
+                    value={contactPhoneInput}
+                    onChange={(e) => setContactPhoneInput(cleanPhone(e.target.value))}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    autoFocus
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={styles.label}>First Message (Optional)</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type="text"
+                    placeholder="Hello! How are you?"
+                    value={initialMessageText}
+                    onChange={(e) => setInitialMessageText(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSearchingContact || cleanPhone(contactPhoneInput).length !== 11}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: THEME.primary,
+                  marginTop: "6px",
+                  opacity: isSearchingContact || cleanPhone(contactPhoneInput).length !== 11 ? 0.6 : 1
+                }}
+              >
+                {isSearchingContact ? "Finding Contact..." : "Start Private Chat"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- LONG-PRESS CONTEXT MENU (DELETE / ARCHIVE) --- */}
       {contextItem && (
         <div
           onClick={() => {
@@ -672,7 +926,6 @@ export default function Channels({
               margin: "0 auto"
             }}
           >
-            {/* Header info */}
             <div style={{ display: "flex", alignItems: "center", gap: "10px", paddingBottom: "8px", borderBottom: `1px solid ${THEME.border}` }}>
               <img
                 src={contextItem.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${contextItem.id}`}
@@ -680,8 +933,10 @@ export default function Channels({
                 style={{ width: "36px", height: "36px", borderRadius: "50%" }}
               />
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>{contextItem.name}</div>
-                <div style={{ fontSize: "11px", color: THEME.textMuted }}>Manage conversation options</div>
+                <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                  {contextItem.name || contextItem.phone}
+                </div>
+                <div style={{ fontSize: "11px", color: THEME.textMuted }}>Conversation Options</div>
               </div>
               <button
                 onClick={() => {
@@ -694,15 +949,15 @@ export default function Channels({
               </button>
             </div>
 
-            {/* Confirmation State for Deletion */}
+            {/* Confirm Delete State */}
             {showConfirmDelete ? (
               <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: "12px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px", color: THEME.danger, fontSize: "13px", fontWeight: "600" }}>
                   <AlertTriangle size={18} />
-                  <span>Delete this chat for your account?</span>
+                  <span>Delete this conversation from your list?</span>
                 </div>
                 <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                  This will remove the chat from your active list. You can rejoin or start fresh anytime.
+                  This will remove the chat from your active list without affecting your contact's view.
                 </div>
                 <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
                   <button
@@ -721,7 +976,7 @@ export default function Channels({
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                {/* Archive / Unarchive Option */}
+                {/* Archive / Unarchive */}
                 <button
                   onClick={() => handleToggleArchive(contextItem.id)}
                   style={{
@@ -754,7 +1009,7 @@ export default function Channels({
                   )}
                 </button>
 
-                {/* Delete Option */}
+                {/* Delete Chat */}
                 <button
                   onClick={() => setShowConfirmDelete(true)}
                   style={{
@@ -778,7 +1033,6 @@ export default function Channels({
                   <span>Delete Chat</span>
                 </button>
 
-                {/* Cancel */}
                 <button
                   onClick={() => setContextItem(null)}
                   style={{
@@ -797,57 +1051,6 @@ export default function Channels({
                 </button>
               </div>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* --- CREATE CHANNEL MODAL --- */}
-      {showCreateModal && (
-        <div style={styles.modalOverlay}>
-          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
-            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
-              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>Create Broadcast Channel</div>
-              <button onClick={() => setShowCreateModal(false)} style={styles.cleanBtn}>
-                <X size={18} color={THEME.text} />
-              </button>
-            </div>
-            <form onSubmit={handleCreateChannel} style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div>
-                <label style={styles.label}>Channel Name</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <input
-                    type="text"
-                    placeholder="e.g. Bangladesh News & Updates"
-                    value={newChannelName}
-                    onChange={(e) => setNewChannelName(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                    autoFocus
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label style={styles.label}>Description (Optional)</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
-                  <input
-                    type="text"
-                    placeholder="What is this channel about?"
-                    value={newChannelDesc}
-                    onChange={(e) => setNewChannelDesc(e.target.value)}
-                    style={{ ...styles.bareInput, color: THEME.text }}
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={!newChannelName.trim()}
-                style={{ ...styles.primaryBtn, backgroundColor: THEME.primary, marginTop: "4px" }}
-              >
-                Create Channel
-              </button>
-            </form>
           </div>
         </div>
       )}
