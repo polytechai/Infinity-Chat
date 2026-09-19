@@ -90,3 +90,10 @@
     transform: scaleY(1);
   }
 }
+/* Prevent pull-to-refresh reload and allow smooth scroll */
+html, body, #root {
+  overscroll-behavior-y: contain;
+  touch-action: pan-x pan-y;
+  height: 100%;
+  overflow-x: hidden;
+}
