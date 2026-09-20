@@ -1,5 +1,19 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
+  collection,
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+  query,
+  where,
+  onSnapshot,
+  limit
+} from "firebase/firestore";
+import {
+  Users,
+  Search,
+  MessageSquarePlus,
   ArrowLeft,
   Phone,
   Video,
@@ -9,20 +23,22 @@ import {
   Check,
   CheckCheck,
   Pin,
+  PinOff,
+  Bell,
   BellOff,
-  Flame,
+  Archive,
+  ArchiveRestore,
+  Trash2,
+  AlertTriangle,
+  X,
   Eye,
   Reply,
-  Share2,
-  X,
   Copy,
-  Trash2,
-  Edit2,
-  CheckCircle,
+  Share2,
   FileText,
   Image as ImageIcon
 } from "lucide-react";
-import { styles } from "../firebase";
+import { db, styles } from "../firebase";
 
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
@@ -54,93 +70,445 @@ export default function ChatView({
   setMobileView,
   showToast
 }) {
+  const currentUserId = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
+
+  // 1-on-1 direct conversations strictly queried for current user
+  const [conversations, setConversations] = useState([]);
+  const [isLoadingConversations, setIsLoadingConversations] = useState(true);
+
+  // Search & Filter state
+  const [searchTerm, setSearchTerm] = useState("");
+  const [viewFilter, setViewFilter] = useState("active"); // 'active' | 'archived'
+
+  // New Chat / Direct Phone Modal state
+  const [showNewChatModal, setShowNewChatModal] = useState(false);
+  const [contactPhoneInput, setContactPhoneInput] = useState("");
+  const [initialMessageText, setInitialMessageText] = useState("");
+  const [isSearchingContact, setIsSearchingContact] = useState(false);
+
+  // Read status tracking per current user
+  const [readChatIds, setReadChatIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`infinity_read_${currentUserId}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  // Local persistence for Pinned, Muted, Archived, and Deleted strictly per user
+  const [userPinnedIds, setUserPinnedIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`infinity_pinned_${currentUserId}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [userMutedIds, setUserMutedIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`infinity_muted_${currentUserId}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [userArchivedIds, setUserArchivedIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`infinity_archived_${currentUserId}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [userDeletedIds, setUserDeletedIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`infinity_deleted_${currentUserId}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  // Long-press Context Modal state
+  const [contextItem, setContextItem] = useState(null);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const pressTimer = useRef(null);
+  const touchStartPos = useRef({ x: 0, y: 0 });
+  const isLongPressTriggered = useRef(false);
+
+  // Active chat thread states
   const [inputText, setInputText] = useState("");
   const [showAttachMenu, setShowAttachMenu] = useState(false);
-  const [showChatOptions, setShowChatOptions] = useState(false);
-
-  // Floating Emoji Reaction Picker state: { msgId, x, y }
   const [reactionPicker, setReactionPicker] = useState(null);
-
-  // Context Selection state
   const [selectedMessage, setSelectedMessage] = useState(null);
-  const [pinnedMessage, setPinnedMessage] = useState(null);
-  const [editingMessage, setEditingMessage] = useState(null);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
-  // DOM references for scrolling and auto-focus
+  // References for scrolling and inputs
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
-  // Gesture tracking states and refs
-  const touchStartPos = useRef({ x: 0, y: 0, time: 0 });
-  const lastTapRef = useRef({ time: 0, msgId: null });
-  const longPressTimerRef = useRef(null);
-  const isSwipingHorizontal = useRef(false);
-  const [bubbleOffsets, setBubbleOffsets] = useState({}); // { [msgId]: number }
+  // Swipe-to-reply gesture references
+  const msgTouchStartPos = useRef({ x: 0, y: 0, time: 0 });
+  const [bubbleOffsets, setBubbleOffsets] = useState({});
 
-  const myIdent = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
+  // Helper to format clean 11-digit Bangladeshi mobile numbers
+  const cleanPhone = (val) => {
+    if (!val) return "";
+    const digits = val.toString().replace(/\D/g, "");
+    if (digits.startsWith("880") && digits.length === 13) return digits.slice(2);
+    return digits.slice(0, 11);
+  };
 
-  // --- 1. AUTO-SCROLL TO BOTTOM ON THREAD ENTRY & NEW MESSAGES ---
+  // Helper to parse timestamps for dynamic sorting
+  const getTimestampMillis = (item) => {
+    const raw =
+      item.lastMessageTimestamp ||
+      item.updatedAt ||
+      item.lastMessageTime ||
+      item.createdAt;
+    if (!raw) return 0;
+    if (typeof raw === "number") return raw;
+    if (raw?.toMillis) return raw.toMillis();
+    if (raw?.seconds) return raw.seconds * 1000;
+    const parsed = new Date(raw).getTime();
+    return isNaN(parsed) ? 0 : parsed;
+  };
+
+  // --- 1. ABSOLUTE PRIVACY: STRICT PARTICIPANTS QUERY ---
+  // Queries Firestore strictly WHERE 'participants' array contains current user ID.
+  // Unrelated contacts or conversations are NEVER loaded or leaked.
   useEffect(() => {
-    // Instant snap to bottom on entering direct chat
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "auto" });
-    }
-    setSelectedMessage(null);
-    setEditingMessage(null);
-    setReactionPicker(null);
-  }, [activeChat?.id]);
+    if (!currentUserId) return;
+    setIsLoadingConversations(true);
 
-  useEffect(() => {
-    if (!messagesContainerRef.current) return;
-    const container = messagesContainerRef.current;
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
+    const convCol = collection(db, "conversations");
+    const q = query(
+      convCol,
+      where("participants", "array-contains", currentUserId),
+      limit(50)
+    );
 
-    // Smooth scroll if user was near bottom when a new message arrives
-    if (distanceFromBottom < 250) {
-      if (messagesEndRef.current) {
-        messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = [];
+        snapshot.forEach((docSnap) => {
+          list.push({
+            id: docSnap.id,
+            ...docSnap.data()
+          });
+        });
+        setConversations(list);
+        setIsLoadingConversations(false);
+      },
+      (err) => {
+        console.warn("Private conversations query error:", err.message);
+        setIsLoadingConversations(false);
       }
+    );
+
+    return () => unsubscribe();
+  }, [currentUserId]);
+
+  // --- 2. LATEST MESSAGE SORTING & SEARCH FILTERING ---
+  const displayedConversations = useMemo(() => {
+    let list = conversations.filter((item) => !userDeletedIds.includes(item.id));
+
+    // Filter Active vs Archived
+    list = list.filter((item) => {
+      const isArchived = userArchivedIds.includes(item.id);
+      return viewFilter === "archived" ? isArchived : !isArchived;
+    });
+
+    // Search filter
+    if (searchTerm.trim()) {
+      const term = searchTerm.toLowerCase().trim();
+      list = list.filter((item) => {
+        const name = (item.name || "").toLowerCase();
+        const phone = (item.phone || "").toLowerCase();
+        const lastMsg = (item.lastMessage || "").toLowerCase();
+        return name.includes(term) || phone.includes(term) || lastMsg.includes(term);
+      });
     }
-  }, [messages.length]);
 
-  // Focus input automatically whenever reply mode activates
-  useEffect(() => {
-    if (replyingTo && inputRef.current) {
-      inputRef.current.focus();
+    // Sort: Pinned conversations on top, then sorted by lastMessageTimestamp descending
+    return list.sort((a, b) => {
+      const aPinned = userPinnedIds.includes(a.id);
+      const bPinned = userPinnedIds.includes(b.id);
+      if (aPinned && !bPinned) return -1;
+      if (!aPinned && bPinned) return 1;
+
+      const timeA = getTimestampMillis(a);
+      const timeB = getTimestampMillis(b);
+      return timeB - timeA;
+    });
+  }, [conversations, userDeletedIds, userArchivedIds, userPinnedIds, viewFilter, searchTerm]);
+
+  // Unread badge counter for current user
+  const getUnreadCount = (item) => {
+    if (activeChat?.id === item.id) return 0;
+    if (readChatIds.includes(item.id)) return 0;
+
+    if (item.unreadCount && typeof item.unreadCount === "object") {
+      const count = item.unreadCount[currentUserId];
+      if (typeof count === "number") return count;
     }
-  }, [replyingTo]);
 
-  // --- 2. SEND / UPDATE MESSAGE HANDLER ---
-  const handleSend = (e) => {
-    if (e && e.preventDefault) e.preventDefault();
-    if (!inputText.trim()) return;
+    if (typeof item.unreadCount === "number" && item.lastSender !== currentUserId) {
+      return item.unreadCount;
+    }
 
-    if (editingMessage) {
-      editingMessage.content = inputText.trim();
-      editingMessage.isEdited = true;
-      if (showToast) showToast("Message updated");
-      setEditingMessage(null);
-      setInputText("");
+    return 0;
+  };
+
+  // --- 3. OPEN CONVERSATION & CLEAR UNREAD BADGE ---
+  const handleOpenConversation = async (item) => {
+    if (isLongPressTriggered.current) {
+      isLongPressTriggered.current = false;
       return;
     }
 
-    const payload = {
-      content: inputText.trim(),
-      type: "text",
-      isViewOnce: !!viewOnceMode,
-      replyTo: replyingTo
-        ? {
-            id: replyingTo.id,
-            content: replyingTo.content,
-            senderName: replyingTo.senderName
-          }
-        : null
-    };
+    // Mark as read locally
+    if (!readChatIds.includes(item.id)) {
+      const updated = [...readChatIds, item.id];
+      setReadChatIds(updated);
+      try {
+        localStorage.setItem(`infinity_read_${currentUserId}`, JSON.stringify(updated));
+      } catch (e) {}
+    }
 
-    onSendMessage(payload);
+    // Reset unread count in Firestore
+    if (item.unreadCount && item.unreadCount[currentUserId]) {
+      try {
+        const convDocRef = doc(db, "conversations", item.id);
+        await updateDoc(convDocRef, {
+          [`unreadCount.${currentUserId}`]: 0
+        });
+      } catch (err) {}
+    }
+
+    setActiveChat(item);
+    if (setMobileView) setMobileView("chat");
+  };
+
+  // --- 4. LONG-PRESS TOUCH HANDLERS (~500ms) ---
+  const handleRowTouchStart = (e, item) => {
+    isLongPressTriggered.current = false;
+    if (e.touches && e.touches[0]) {
+      touchStartPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+
+    pressTimer.current = setTimeout(() => {
+      isLongPressTriggered.current = true;
+      if (window.navigator?.vibrate) {
+        window.navigator.vibrate(50);
+      }
+      setContextItem(item);
+    }, 500);
+  };
+
+  const handleRowTouchMove = (e) => {
+    if (!e.touches || !e.touches[0]) return;
+    const deltaX = Math.abs(e.touches[0].clientX - touchStartPos.current.x);
+    const deltaY = Math.abs(e.touches[0].clientY - touchStartPos.current.y);
+
+    if (deltaX > 10 || deltaY > 10) {
+      if (pressTimer.current) {
+        clearTimeout(pressTimer.current);
+        pressTimer.current = null;
+      }
+    }
+  };
+
+  const handleRowTouchEnd = () => {
+    if (pressTimer.current) {
+      clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+  };
+
+  // --- 5. LONG-PRESS ACTIONS (PIN, MUTE, ARCHIVE, DELETE) ---
+  const handleTogglePin = (id) => {
+    const isCurrentlyPinned = userPinnedIds.includes(id);
+    let nextPinned;
+    if (isCurrentlyPinned) {
+      nextPinned = userPinnedIds.filter((itemId) => itemId !== id);
+      if (showToast) showToast("চ্যাট আনপিন করা হয়েছে");
+    } else {
+      nextPinned = [...userPinnedIds, id];
+      if (showToast) showToast("চ্যাট উপরে পিন করা হয়েছে");
+    }
+    setUserPinnedIds(nextPinned);
+    try {
+      localStorage.setItem(`infinity_pinned_${currentUserId}`, JSON.stringify(nextPinned));
+    } catch (e) {}
+    setContextItem(null);
+  };
+
+  const handleToggleMute = (id) => {
+    const isCurrentlyMuted = userMutedIds.includes(id);
+    let nextMuted;
+    if (isCurrentlyMuted) {
+      nextMuted = userMutedIds.filter((itemId) => itemId !== id);
+      if (showToast) showToast("নোটিফিকেশন আনমিউট করা হয়েছে");
+    } else {
+      nextMuted = [...userMutedIds, id];
+      if (showToast) showToast("নোটিফিকেশন মিউট করা হয়েছে");
+    }
+    setUserMutedIds(nextMuted);
+    try {
+      localStorage.setItem(`infinity_muted_${currentUserId}`, JSON.stringify(nextMuted));
+    } catch (e) {}
+    setContextItem(null);
+  };
+
+  const handleToggleArchive = (id) => {
+    const isCurrentlyArchived = userArchivedIds.includes(id);
+    let nextList;
+    if (isCurrentlyArchived) {
+      nextList = userArchivedIds.filter((item) => item !== id);
+      if (showToast) showToast("চ্যাট আনআর্কাইভ করা হয়েছে");
+    } else {
+      nextList = [...userArchivedIds, id];
+      if (showToast) showToast("চ্যাট আর্কাইভে সরানো হয়েছে");
+      if (activeChat?.id === id) setActiveChat(null);
+    }
+    setUserArchivedIds(nextList);
+    try {
+      localStorage.setItem(`infinity_archived_${currentUserId}`, JSON.stringify(nextList));
+    } catch (e) {}
+    setContextItem(null);
+  };
+
+  const handleExecuteDelete = () => {
+    if (!contextItem) return;
+    const targetId = contextItem.id;
+    const nextDeleted = [...userDeletedIds, targetId];
+    setUserDeletedIds(nextDeleted);
+
+    try {
+      localStorage.setItem(`infinity_deleted_${currentUserId}`, JSON.stringify(nextDeleted));
+    } catch (e) {}
+
+    if (activeChat?.id === targetId) {
+      setActiveChat(null);
+      if (setMobileView) setMobileView("list");
+    }
+
+    if (showToast) showToast("চ্যাট তালিকা থেকে মুছে ফেলা হয়েছে");
+    setShowConfirmDelete(false);
+    setContextItem(null);
+  };
+
+  // --- 6. START NEW 1-ON-1 PHONE CHAT ---
+  const handleStartNewChat = async (e) => {
+    e.preventDefault();
+    const phone = cleanPhone(contactPhoneInput);
+
+    if (phone.length !== 11) {
+      if (showToast) showToast("সঠিক ১১ ডিজিটের মোবাইল নম্বর লিখুন");
+      return;
+    }
+
+    if (phone === currentUserId) {
+      if (showToast) showToast("নিজের সাথে সরাসরি চ্যাট সম্ভব নয়");
+      return;
+    }
+
+    setIsSearchingContact(true);
+    try {
+      const userSnap = await getDoc(doc(db, "users", phone));
+      const targetData = userSnap.exists()
+        ? userSnap.data()
+        : { name: `User ${phone.slice(-4)}`, phone: phone };
+
+      const roomId = [currentUserId, phone].sort().join("_");
+      const convDocRef = doc(db, "conversations", roomId);
+
+      const conversationPayload = {
+        id: roomId,
+        name: targetData.name || phone,
+        phone: phone,
+        avatar: targetData.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${phone}`,
+        participants: [currentUserId, phone],
+        participantDetails: {
+          [currentUserId]: { name: currentUser?.name || currentUserId, phone: currentUserId },
+          [phone]: { name: targetData.name || phone, phone: phone }
+        },
+        lastMessage: initialMessageText.trim() || "Started private conversation",
+        lastMessageTimestamp: Date.now(),
+        updatedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        unreadCount: {
+          [phone]: initialMessageText.trim() ? 1 : 0,
+          [currentUserId]: 0
+        }
+      };
+
+      await setDoc(convDocRef, conversationPayload, { merge: true });
+
+      if (initialMessageText.trim()) {
+        const msgId = Date.now().toString();
+        await setDoc(doc(db, "rooms", roomId, "messages", msgId), {
+          senderPhone: currentUserId,
+          senderName: currentUser?.name || currentUserId,
+          recipientPhone: phone,
+          content: initialMessageText.trim(),
+          type: "text",
+          status: "sent",
+          createdAt: new Date().toISOString()
+        });
+      }
+
+      setShowNewChatModal(false);
+      setContactPhoneInput("");
+      setInitialMessageText("");
+      handleOpenConversation(conversationPayload);
+      if (showToast) showToast(`${targetData.name || phone}-এর সাথে চ্যাট শুরু হয়েছে`);
+    } catch (err) {
+      console.error("Error creating conversation:", err);
+      if (showToast) showToast("ত্রুটি: " + err.message);
+    } finally {
+      setIsSearchingContact(false);
+    }
+  };
+
+  // --- 7. AUTO-SCROLL TO BOTTOM IN ACTIVE CHAT THREAD ---
+  useEffect(() => {
+    if (activeChat && messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "auto" });
+    }
+  }, [activeChat?.id]);
+
+  useEffect(() => {
+    if (activeChat && messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages.length]);
+
+  const handleSendMessage = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!inputText.trim()) return;
+
+    if (onSendMessage) {
+      onSendMessage({
+        content: inputText.trim(),
+        type: "text",
+        isViewOnce: !!viewOnceMode,
+        replyTo: replyingTo
+          ? {
+              id: replyingTo.id,
+              content: replyingTo.content,
+              senderName: replyingTo.senderName
+            }
+          : null
+      });
+    }
+
     setInputText("");
     setReplyingTo(null);
 
@@ -151,302 +519,33 @@ export default function ChatView({
     }, 40);
   };
 
-  // --- 3. ATTACHMENT HANDLER ---
-  const handleFileSelect = (e, fileType) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setShowAttachMenu(false);
-    const reader = new FileReader();
-
-    reader.onload = (loadEvt) => {
-      const base64Data = loadEvt.target.result;
-      if (onSendMedia) {
-        onSendMedia({
-          type: fileType,
-          fileUrl: base64Data,
-          fileName: file.name,
-          fileSize: (file.size / 1024).toFixed(1) + " KB",
-          content: fileType === "image" ? "Photo" : fileType === "video" ? "Video" : file.name,
-          isViewOnce: !!viewOnceMode
-        });
-      }
-    };
-
-    reader.readAsDataURL(file);
-  };
-
-  // --- 4. CONTROLLED SWIPE-TO-REPLY & DOUBLE-TAP / LONG-PRESS GESTURES ---
-  const handleTouchStart = (e, msg) => {
-    const touch = e.touches[0];
-    const now = Date.now();
-    touchStartPos.current = { x: touch.clientX, y: touch.clientY, time: now };
-    isSwipingHorizontal.current = false;
-
-    // Double-tap detection -> open emoji reactions
-    if (lastTapRef.current.msgId === msg.id && now - lastTapRef.current.time < 320) {
-      clearTimeout(longPressTimerRef.current);
-      openReactionPicker(msg.id, touch.clientX, touch.clientY);
-      lastTapRef.current = { time: 0, msgId: null };
-      return;
-    }
-    lastTapRef.current = { time: now, msgId: msg.id };
-
-    // Long press timer (~380ms) -> open reactions & contextual options
-    longPressTimerRef.current = setTimeout(() => {
-      if (window.navigator?.vibrate) {
-        window.navigator.vibrate(40);
-      }
-      openReactionPicker(msg.id, touch.clientX, touch.clientY);
-      setSelectedMessage(msg);
-    }, 380);
-  };
-
-  const handleTouchMove = (e, msgId) => {
-    const touch = e.touches[0];
-    const deltaX = touch.clientX - touchStartPos.current.x;
-    const deltaY = touch.clientY - touchStartPos.current.y;
-
-    // If scrolling vertically, immediately cancel long-press and swipe gestures
-    if (Math.abs(deltaY) > 8) {
-      if (longPressTimerRef.current) {
-        clearTimeout(longPressTimerRef.current);
-        longPressTimerRef.current = null;
-      }
-      if (!isSwipingHorizontal.current) return;
-    }
-
-    // Controlled right-swipe strictly on the individual bubble (0px to max 45px)
-    if (deltaX > 8 && Math.abs(deltaY) < 18) {
-      isSwipingHorizontal.current = true;
-      if (longPressTimerRef.current) {
-        clearTimeout(longPressTimerRef.current);
-        longPressTimerRef.current = null;
-      }
-      const boundedOffset = Math.min(45, Math.max(0, deltaX));
-      setBubbleOffsets((prev) => ({ ...prev, [msgId]: boundedOffset }));
-    }
-  };
-
-  const handleTouchEnd = (e, msg) => {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-
-    const offset = bubbleOffsets[msg.id] || 0;
-
-    // Trigger reply if swiped right >= 32px
-    if (offset >= 32) {
-      if (window.navigator?.vibrate) {
-        window.navigator.vibrate(25);
-      }
-      setReplyingTo({
-        id: msg.id,
-        content: msg.content || (msg.fileUrl ? "Media file" : ""),
-        senderName: msg.senderName || "User"
-      });
-      // Pop up keyboard automatically
-      setTimeout(() => {
-        if (inputRef.current) {
-          inputRef.current.focus();
-        }
-      }, 50);
-    }
-
-    // Elastic reset
-    setBubbleOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
-    isSwipingHorizontal.current = false;
-  };
-
-  const openReactionPicker = (msgId, clientX, clientY) => {
-    setReactionPicker({
-      msgId,
-      x: Math.min(window.innerWidth - 220, Math.max(16, clientX - 80)),
-      y: Math.max(60, clientY - 55)
-    });
-  };
-
-  const handleApplyReaction = (emoji) => {
-    if (!reactionPicker) return;
-    if (onReactMessage) {
-      onReactMessage(reactionPicker.msgId, emoji);
-    }
-    setReactionPicker(null);
-    if (showToast) showToast(`Reacted ${emoji}`);
-  };
-
-  // --- 5. TOP CONTEXT ACTION HANDLERS ---
-  const handleCopySelected = () => {
-    if (!selectedMessage) return;
-    navigator.clipboard.writeText(selectedMessage.content || "");
-    if (showToast) showToast("Message copied");
-    setSelectedMessage(null);
-  };
-
-  const handleReplySelected = () => {
-    if (!selectedMessage) return;
-    setReplyingTo({
-      id: selectedMessage.id,
-      content: selectedMessage.content,
-      senderName: selectedMessage.senderName || "User"
-    });
-    setTimeout(() => {
-      if (inputRef.current) {
-        inputRef.current.focus();
-      }
-    }, 50);
-    setSelectedMessage(null);
-  };
-
-  const handleForwardSelected = () => {
-    if (!selectedMessage) return;
-    if (onForwardMessage) onForwardMessage(selectedMessage);
-    setSelectedMessage(null);
-  };
-
-  const handleEditSelected = () => {
-    if (!selectedMessage) return;
-    setEditingMessage(selectedMessage);
-    setInputText(selectedMessage.content || "");
-    setTimeout(() => {
-      if (inputRef.current) {
-        inputRef.current.focus();
-      }
-    }, 50);
-    setSelectedMessage(null);
-  };
-
-  const handlePinSelected = () => {
-    if (!selectedMessage) return;
-    if (pinnedMessage?.id === selectedMessage.id) {
-      setPinnedMessage(null);
-      if (showToast) showToast("Message unpinned");
-    } else {
-      setPinnedMessage(selectedMessage);
-      if (showToast) showToast("Message pinned to top");
-    }
-    setSelectedMessage(null);
-  };
-
-  const handleDeleteSelected = (forEveryone = false) => {
-    if (!selectedMessage) return;
-    selectedMessage.content = forEveryone
-      ? "🚫 This message was deleted"
-      : "🚫 You deleted this message";
-    selectedMessage.type = "deleted";
-    selectedMessage.fileUrl = null;
-    if (showToast) showToast(forEveryone ? "Deleted for everyone" : "Deleted for you");
-    setShowDeleteConfirm(false);
-    setSelectedMessage(null);
-  };
-
-  const isSelectedSentByMe =
-    selectedMessage &&
-    (selectedMessage.senderPhone === myIdent || selectedMessage.senderId === myIdent);
-
   return (
     <div
-      onClick={() => {
-        if (reactionPicker) setReactionPicker(null);
-      }}
       style={{
         display: "flex",
-        flexDirection: "column",
+        flex: 1,
         width: "100%",
         height: "100%",
-        backgroundColor: THEME.bg,
+        overflow: "hidden",
         position: "relative",
-        overflow: "hidden"
+        backgroundColor: THEME.bg
       }}
     >
-      {/* --- TOP HEADER (CONTEXT BAR OR DIRECT CHAT HEADER) --- */}
-      {selectedMessage ? (
-        <div
-          style={{
-            ...styles.headerBar,
-            backgroundColor: THEME.sidebar,
-            borderColor: THEME.primary,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            padding: "8px 14px",
-            zIndex: 20,
-            borderBottom: `2px solid ${THEME.primary}`
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <button
-              onClick={() => {
-                setSelectedMessage(null);
-                setShowDeleteConfirm(false);
-              }}
-              style={{ ...styles.cleanBtn, color: THEME.text }}
-            >
-              <X size={20} />
-            </button>
-            <span style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
-              1 message selected
-            </span>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            <button
-              onClick={handleReplySelected}
-              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-              title="Reply"
-            >
-              <Reply size={18} />
-            </button>
-
-            <button
-              onClick={handleCopySelected}
-              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-              title="Copy"
-            >
-              <Copy size={18} />
-            </button>
-
-            <button
-              onClick={handleForwardSelected}
-              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-              title="Forward"
-            >
-              <Share2 size={18} />
-            </button>
-
-            <button
-              onClick={handlePinSelected}
-              style={{
-                ...styles.cleanBtn,
-                color: pinnedMessage?.id === selectedMessage.id ? THEME.primary : THEME.text,
-                padding: "8px"
-              }}
-              title="Pin message"
-            >
-              <Pin size={18} />
-            </button>
-
-            {isSelectedSentByMe && selectedMessage.type === "text" && (
-              <button
-                onClick={handleEditSelected}
-                style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-                title="Edit message"
-              >
-                <Edit2 size={18} />
-              </button>
-            )}
-
-            <button
-              onClick={() => setShowDeleteConfirm(true)}
-              style={{ ...styles.cleanBtn, color: THEME.danger, padding: "8px" }}
-              title="Delete"
-            >
-              <Trash2 size={18} />
-            </button>
-          </div>
-        </div>
-      ) : (
+      {/* ================= LEFT PANE: 1-ON-1 DIRECT CONTACT & CHAT LIST ================= */}
+      <div
+        style={{
+          width: "100%",
+          maxWidth: activeChat ? "340px" : "100%",
+          display: activeChat && window.innerWidth < 768 ? "none" : "flex",
+          flexDirection: "column",
+          borderRight: `1px solid ${THEME.border}`,
+          backgroundColor: THEME.sidebar,
+          height: "100%",
+          overflow: "hidden",
+          position: "relative"
+        }}
+      >
+        {/* Header Bar */}
         <div
           style={{
             ...styles.headerBar,
@@ -455,719 +554,858 @@ export default function ChatView({
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            padding: "8px 14px",
-            zIndex: 10
+            padding: "10px 14px"
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
-            <button
-              onClick={() => {
-                setActiveChat(null);
-                if (setMobileView) setMobileView("list");
-              }}
-              style={{
-                ...styles.cleanBtn,
-                color: THEME.text,
-                display: "flex",
-                alignItems: "center",
-                padding: "4px"
-              }}
-              title="Back"
-            >
-              <ArrowLeft size={20} />
-            </button>
-
-            <div
-              onClick={() => openProfile && openProfile(activeChat)}
-              style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", minWidth: 0 }}
-            >
-              <div style={{ position: "relative", flexShrink: 0 }}>
-                <img
-                  src={activeChat.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
-                  alt=""
-                  style={styles.roundAvatar}
-                />
-                {peerPresence.isOnline && (
-                  <span
-                    style={{
-                      position: "absolute",
-                      bottom: "1px",
-                      right: "1px",
-                      width: "10px",
-                      height: "10px",
-                      borderRadius: "50%",
-                      backgroundColor: THEME.accent,
-                      border: `2px solid ${THEME.header}`
-                    }}
-                  />
-                )}
-              </div>
-
-              <div style={{ minWidth: 0 }}>
-                <div
-                  style={{
-                    fontWeight: "700",
-                    fontSize: "14px",
-                    color: THEME.text,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis"
-                  }}
-                >
-                  {activeChat.name}
-                </div>
-                <div style={{ fontSize: "11px", color: peerPresence.isOnline ? THEME.accent : THEME.textMuted }}>
-                  {peerPresence.isOnline ? "Online" : peerPresence.lastSeen ? `Last seen ${peerPresence.lastSeen}` : activeChat.phone || ""}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <button
-              onClick={() => startCall && startCall(activeChat, "audio")}
-              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-              title="Audio Call"
-            >
-              <Phone size={18} />
-            </button>
-
-            <button
-              onClick={() => startCall && startCall(activeChat, "video")}
-              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-              title="Video Call"
-            >
-              <Video size={18} />
-            </button>
-
-            <button
-              onClick={() => setShowChatOptions(!showChatOptions)}
-              style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
-              title="More"
-            >
-              <MoreVertical size={18} />
-            </button>
-          </div>
-
-          {showChatOptions && (
-            <div
-              style={{
-                position: "absolute",
-                top: "56px",
-                right: "14px",
-                backgroundColor: THEME.sidebar,
-                border: `1px solid ${THEME.border}`,
-                borderRadius: "10px",
-                padding: "6px 0",
-                boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-                zIndex: 100,
-                minWidth: "180px"
-              }}
-            >
-              <button
-                onClick={() => {
-                  onTogglePin && onTogglePin(activeChat.id);
-                  setShowChatOptions(false);
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  width: "100%",
-                  padding: "10px 14px",
-                  border: "none",
-                  background: "none",
-                  color: THEME.text,
-                  fontSize: "13px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Pin size={15} color={isPinned ? THEME.primary : THEME.textMuted} />
-                <span>{isPinned ? "Unpin Chat" : "Pin Chat"}</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  onToggleMute && onToggleMute(activeChat.id);
-                  setShowChatOptions(false);
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  width: "100%",
-                  padding: "10px 14px",
-                  border: "none",
-                  background: "none",
-                  color: THEME.text,
-                  fontSize: "13px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <BellOff size={15} color={isMuted ? THEME.danger : THEME.textMuted} />
-                <span>{isMuted ? "Unmute Notifications" : "Mute Notifications"}</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setVanishMode && setVanishMode(!vanishMode);
-                  setShowChatOptions(false);
-                  if (showToast) showToast(!vanishMode ? "Vanish Mode ON (15s)" : "Vanish Mode OFF");
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  width: "100%",
-                  padding: "10px 14px",
-                  border: "none",
-                  background: "none",
-                  color: vanishMode ? THEME.accent : THEME.text,
-                  fontSize: "13px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Flame size={15} color={vanishMode ? THEME.accent : THEME.textMuted} />
-                <span>Vanish Mode (15s)</span>
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Pinned Message Banner */}
-      {pinnedMessage && (
-        <div
-          style={{
-            backgroundColor: "rgba(34, 197, 94, 0.12)",
-            borderBottom: `1px solid ${THEME.primary}`,
-            padding: "6px 14px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            fontSize: "12px",
-            zIndex: 5
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
-            <Pin size={14} color={THEME.primary} />
-            <span style={{ fontWeight: "700", color: THEME.primary }}>Pinned:</span>
-            <span style={{ color: THEME.text, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
-              {pinnedMessage.content || "Media"}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <Users size={18} color={THEME.primary || "#22c55e"} />
+            <span style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>
+              {viewFilter === "archived" ? "আর্কাইভ করা চ্যাট" : "ব্যক্তিগত চ্যাট"}
             </span>
           </div>
-          <button onClick={() => setPinnedMessage(null)} style={styles.cleanBtn}>
-            <X size={14} color={THEME.textMuted} />
-          </button>
-        </div>
-      )}
 
-      {/* --- 6. DUAL-DIRECTION VERTICAL SCROLLING CONTAINER --- */}
-      <div
-        ref={messagesContainerRef}
-        style={{
-          flex: 1,
-          height: "100%",
-          overflowY: "auto",
-          overflowX: "hidden",
-          WebkitOverflowScrolling: "touch",
-          overscrollBehaviorY: "contain",
-          touchAction: "pan-y",
-          padding: "14px 16px",
-          display: "flex",
-          flexDirection: "column",
-          gap: "8px"
-        }}
-      >
-        {messages.length === 0 ? (
-          <div style={{ margin: "auto", textAlign: "center", color: THEME.textMuted }}>
-            <div
-              style={{
-                display: "inline-block",
-                padding: "6px 14px",
-                borderRadius: "8px",
-                backgroundColor: THEME.card,
-                fontSize: "12px",
-                border: `1px solid ${THEME.border}`
-              }}
-            >
-              🔒 Direct end-to-end messaging. Swipe right to reply, or hold/double-tap to react.
-            </div>
-          </div>
-        ) : (
-          messages.map((msg) => {
-            const isMe = msg.senderPhone === myIdent || msg.senderId === myIdent;
-            const isVanished = msg.type === "vanished";
-            const isDeleted = msg.type === "deleted";
-            const isSelected = selectedMessage?.id === msg.id;
-            const currentOffset = bubbleOffsets[msg.id] || 0;
-
-            return (
-              <div
-                key={msg.id}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: isMe ? "flex-end" : "flex-start",
-                  width: "100%",
-                  marginBottom: "2px",
-                  position: "relative"
-                }}
-              >
-                {/* Swipe Reply Icon Indicator (Appears when bubble is swiped right) */}
-                {currentOffset > 8 && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      left: "-28px",
-                      top: "50%",
-                      transform: "translateY(-50%)",
-                      color: THEME.primary,
-                      opacity: Math.min(1, currentOffset / 32),
-                      transition: "opacity 0.1s ease"
-                    }}
-                  >
-                    <Reply size={18} />
-                  </div>
-                )}
-
-                {/* Individual Message Bubble with Controlled Right-Swipe (Max 45px) */}
-                <div
-                  onTouchStart={(e) => handleTouchStart(e, msg)}
-                  onTouchMove={(e) => handleTouchMove(e, msg.id)}
-                  onTouchEnd={(e) => handleTouchEnd(e, msg)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setSelectedMessage(msg);
-                  }}
-                  style={{
-                    maxWidth: "82%",
-                    borderRadius: "12px",
-                    borderTopRightRadius: isMe ? "2px" : "12px",
-                    borderTopLeftRadius: !isMe ? "2px" : "12px",
-                    padding: "8px 12px",
-                    backgroundColor: isSelected
-                      ? "rgba(34, 197, 94, 0.35)"
-                      : isMe
-                      ? THEME.primary
-                      : THEME.card,
-                    border: isSelected ? `1.5px solid ${THEME.primary}` : "1.5px solid transparent",
-                    color: "#fff",
-                    boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
-                    position: "relative",
-                    wordBreak: "break-word",
-                    userSelect: "none",
-                    WebkitUserSelect: "none",
-                    transform: `translateX(${currentOffset}px)`,
-                    transition: currentOffset === 0 ? "transform 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28)" : "none"
-                  }}
-                >
-                  {/* Quoted Message */}
-                  {msg.replyTo && !isDeleted && (
-                    <div
-                      style={{
-                        backgroundColor: "rgba(0,0,0,0.2)",
-                        borderLeft: `3px solid ${isMe ? "#fff" : THEME.primary}`,
-                        borderRadius: "4px",
-                        padding: "4px 8px",
-                        marginBottom: "6px",
-                        fontSize: "11px"
-                      }}
-                    >
-                      <div style={{ fontWeight: "700", opacity: 0.9 }}>{msg.replyTo.senderName || "User"}</div>
-                      <div style={{ opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {msg.replyTo.content}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Media Content */}
-                  {msg.fileUrl && !isVanished && !isDeleted && (
-                    <div
-                      onClick={() => onLightbox && onLightbox({ url: msg.fileUrl, type: msg.type, name: msg.fileName })}
-                      style={{ cursor: "pointer", borderRadius: "8px", overflow: "hidden", marginBottom: "6px" }}
-                    >
-                      {msg.type === "video" ? (
-                        <video src={msg.fileUrl} style={{ width: "100%", maxHeight: "200px", objectFit: "cover" }} />
-                      ) : msg.type === "image" ? (
-                        <img src={msg.fileUrl} alt="" style={{ width: "100%", maxHeight: "200px", objectFit: "cover" }} />
-                      ) : (
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "8px",
-                            backgroundColor: "rgba(0,0,0,0.15)",
-                            padding: "8px",
-                            borderRadius: "6px"
-                          }}
-                        >
-                          <FileText size={20} />
-                          <span style={{ fontSize: "12px", textDecoration: "underline" }}>{msg.fileName || "Download file"}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Message Text */}
-                  <div style={{ fontSize: "13px", lineHeight: "1.4", fontStyle: isDeleted ? "italic" : "normal", opacity: isDeleted ? 0.7 : 1 }}>
-                    {msg.content}
-                  </div>
-
-                  {/* Timestamp & Read Receipts */}
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "flex-end",
-                      gap: "4px",
-                      marginTop: "4px",
-                      fontSize: "10px",
-                      opacity: 0.75
-                    }}
-                  >
-                    {msg.isEdited && <span>(edited)</span>}
-                    <span>
-                      {msg.createdAt ? new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
-                    </span>
-                    {isMe && !isDeleted && (
-                      <span>
-                        {msg.status === "read" ? <CheckCheck size={13} color="#53bdeb" /> : <Check size={13} />}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Emoji Reactions Badges Below Bubble */}
-                {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                  <div style={{ display: "flex", gap: "2px", marginTop: "-6px", zIndex: 2 }}>
-                    {Object.entries(msg.reactions).map(([uid, emo]) => (
-                      <span
-                        key={uid}
-                        style={{
-                          backgroundColor: THEME.header,
-                          border: `1px solid ${THEME.border}`,
-                          borderRadius: "12px",
-                          padding: "1px 5px",
-                          fontSize: "11px"
-                        }}
-                      >
-                        {emo}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* --- FLOATING EMOJI REACTION PICKER POPUP --- */}
-      {reactionPicker && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            position: "fixed",
-            left: reactionPicker.x,
-            top: reactionPicker.y,
-            backgroundColor: THEME.sidebar,
-            border: `1px solid ${THEME.border}`,
-            borderRadius: "30px",
-            padding: "4px 8px",
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.6)",
-            zIndex: 1000,
-            animation: "fadeIn 0.15s ease"
-          }}
-        >
-          {REACTION_EMOJIS.map((emoji) => (
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <button
-              key={emoji}
-              onClick={() => handleApplyReaction(emoji)}
+              onClick={() => setViewFilter(viewFilter === "active" ? "archived" : "active")}
+              title={viewFilter === "active" ? "আর্কাইভ দেখুন" : "সক্রিয় চ্যাট দেখুন"}
               style={{
-                background: "none",
-                border: "none",
-                fontSize: "20px",
-                cursor: "pointer",
-                padding: "4px",
-                transition: "transform 0.1s ease"
+                ...styles.cleanBtn,
+                color: viewFilter === "archived" ? (THEME.primary || "#22c55e") : THEME.textMuted,
+                padding: "6px"
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.transform = "scale(1.3)")}
-              onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
             >
-              {emoji}
+              {viewFilter === "archived" ? <ArchiveRestore size={18} /> : <Archive size={18} />}
             </button>
-          ))}
-        </div>
-      )}
 
-      {/* Delete Confirmation Modal */}
-      {showDeleteConfirm && selectedMessage && (
-        <div style={styles.modalOverlay}>
-          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
-            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
-              <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>Delete message?</div>
-              <button onClick={() => setShowDeleteConfirm(false)} style={styles.cleanBtn}>
-                <X size={16} color={THEME.textMuted} />
-              </button>
-            </div>
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px" }}>
-              <button
-                onClick={() => handleDeleteSelected(false)}
-                style={{ ...styles.pillBtn, backgroundColor: THEME.card, color: THEME.text, padding: "10px" }}
-              >
-                Delete for Me
-              </button>
-              {isSelectedSentByMe && (
-                <button
-                  onClick={() => handleDeleteSelected(true)}
-                  style={{ ...styles.pillBtn, backgroundColor: THEME.danger, color: "#fff", padding: "10px", fontWeight: "700" }}
-                >
-                  Delete for Everyone
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Replying Banner */}
-      {replyingTo && (
-        <div
-          style={{
-            backgroundColor: THEME.card,
-            borderTop: `1.5px solid ${THEME.primary}`,
-            padding: "6px 14px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between"
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text, minWidth: 0 }}>
-            <Reply size={15} color={THEME.primary} />
-            <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              <span style={{ color: THEME.primary, fontWeight: "700" }}>{replyingTo.senderName}: </span>
-              <span style={{ color: THEME.textMuted }}>{replyingTo.content}</span>
-            </div>
-          </div>
-          <button onClick={() => setReplyingTo(null)} style={styles.cleanBtn}>
-            <X size={16} color={THEME.textMuted} />
-          </button>
-        </div>
-      )}
-
-      {/* Inline Edit Banner */}
-      {editingMessage && (
-        <div
-          style={{
-            backgroundColor: THEME.card,
-            borderTop: `1.5px solid ${THEME.accent}`,
-            padding: "6px 14px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between"
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text }}>
-            <Edit2 size={14} color={THEME.accent} />
-            <span style={{ color: THEME.accent, fontWeight: "700" }}>Editing Message</span>
-          </div>
-          <button
-            onClick={() => {
-              setEditingMessage(null);
-              setInputText("");
-            }}
-            style={styles.cleanBtn}
-          >
-            <X size={16} color={THEME.textMuted} />
-          </button>
-        </div>
-      )}
-
-      {/* --- 7. CHAT INPUT COMPOSER --- */}
-      <form
-        onSubmit={handleSend}
-        style={{
-          padding: "8px 12px",
-          backgroundColor: THEME.header,
-          borderTop: `1px solid ${THEME.border}`,
-          display: "flex",
-          alignItems: "center",
-          gap: "8px",
-          position: "relative"
-        }}
-      >
-        {/* Attachment Toggle */}
-        <div style={{ position: "relative" }}>
-          <button
-            type="button"
-            onClick={() => setShowAttachMenu(!showAttachMenu)}
-            style={{ ...styles.cleanBtn, color: THEME.textMuted, padding: "6px" }}
-            title="Attach"
-          >
-            <Paperclip size={20} />
-          </button>
-
-          {showAttachMenu && (
-            <div
+            <button
+              onClick={() => setShowNewChatModal(true)}
               style={{
-                position: "absolute",
-                bottom: "45px",
-                left: 0,
-                backgroundColor: THEME.sidebar,
-                border: `1px solid ${THEME.border}`,
-                borderRadius: "10px",
-                padding: "8px",
+                backgroundColor: THEME.primary || "#22c55e",
+                border: "none",
+                borderRadius: "50%",
+                width: "32px",
+                height: "32px",
                 display: "flex",
-                flexDirection: "column",
-                gap: "6px",
-                boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
-                zIndex: 50,
-                minWidth: "140px"
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                color: "#fff",
+                boxShadow: "0 2px 6px rgba(0,0,0,0.3)"
               }}
+              title="নতুন চ্যাট"
             >
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "6px 10px",
-                  color: THEME.text,
-                  fontSize: "12px",
-                  cursor: "pointer",
-                  borderRadius: "6px"
-                }}
-              >
-                <ImageIcon size={16} color={THEME.primary} />
-                <span>Photo</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => handleFileSelect(e, "image")}
-                  style={{ display: "none" }}
-                />
-              </label>
-
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "6px 10px",
-                  color: THEME.text,
-                  fontSize: "12px",
-                  cursor: "pointer",
-                  borderRadius: "6px"
-                }}
-              >
-                <Video size={16} color="#34B7F1" />
-                <span>Video</span>
-                <input
-                  type="file"
-                  accept="video/*"
-                  onChange={(e) => handleFileSelect(e, "video")}
-                  style={{ display: "none" }}
-                />
-              </label>
-
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "6px 10px",
-                  color: THEME.text,
-                  fontSize: "12px",
-                  cursor: "pointer",
-                  borderRadius: "6px"
-                }}
-              >
-                <FileText size={16} color="#5F6368" />
-                <span>Document</span>
-                <input
-                  type="file"
-                  onChange={(e) => handleFileSelect(e, "file")}
-                  style={{ display: "none" }}
-                />
-              </label>
-            </div>
-          )}
+              <MessageSquarePlus size={16} />
+            </button>
+          </div>
         </div>
 
-        {/* View Once Toggle */}
-        <button
-          type="button"
-          onClick={() => {
-            setViewOnceMode && setViewOnceMode(!viewOnceMode);
-            if (showToast) showToast(!viewOnceMode ? "View Once mode enabled" : "View Once mode disabled");
-          }}
+        {/* Direct Phone Number Search Bar */}
+        <div
           style={{
-            ...styles.cleanBtn,
-            color: viewOnceMode ? THEME.primary : THEME.textMuted,
-            padding: "6px"
+            padding: "8px 12px",
+            backgroundColor: THEME.sidebar,
+            borderBottom: `1px solid ${THEME.border}`
           }}
-          title="View Once"
         >
-          <Eye size={20} />
-        </button>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              backgroundColor: THEME.card,
+              border: `1px solid ${THEME.border}`,
+              borderRadius: "8px",
+              padding: "6px 10px"
+            }}
+          >
+            <Search size={16} color={THEME.textMuted} />
+            <input
+              type="text"
+              placeholder="চ্যাট বা মোবাইল নম্বর খুঁজুন..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              style={{
+                ...styles.bareInput,
+                color: THEME.text,
+                fontSize: "13px"
+              }}
+            />
+            {searchTerm && (
+              <button onClick={() => setSearchTerm("")} style={styles.cleanBtn}>
+                <X size={14} color={THEME.textMuted} />
+              </button>
+            )}
+          </div>
+        </div>
 
-        {/* Input Box with ref for auto keyboard focus */}
+        {/* Smooth Scroll Contact Container (No Pull-To-Refresh, Isolated) */}
         <div
           style={{
             flex: 1,
-            backgroundColor: THEME.card,
-            borderRadius: "20px",
-            border: `1px solid ${THEME.border}`,
-            display: "flex",
-            alignItems: "center",
-            padding: "0 12px"
+            height: "100%",
+            overflowY: "auto",
+            overflowX: "hidden",
+            WebkitOverflowScrolling: "touch",
+            overscrollBehaviorY: "contain",
+            touchAction: "pan-y",
+            padding: "6px"
           }}
         >
-          <input
-            ref={inputRef}
-            type="text"
-            placeholder={editingMessage ? "Edit message..." : "Type a message..."}
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            style={{
-              ...styles.bareInput,
-              color: THEME.text,
-              fontSize: "14px",
-              padding: "9px 0"
-            }}
-          />
+          {isLoadingConversations ? (
+            <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted, fontSize: "12px" }}>
+              চ্যাট তালিকা লোড হচ্ছে...
+            </div>
+          ) : displayedConversations.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted }}>
+              <Users size={36} style={{ margin: "0 auto 10px", opacity: 0.4 }} />
+              <div style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
+                {viewFilter === "archived" ? "কোনো আর্কাইভ চ্যাট নেই" : "কোনো ব্যক্তিগত চ্যাট পাওয়া যায়নি"}
+              </div>
+              <div style={{ fontSize: "11px", marginTop: "6px", lineHeight: "1.5" }}>
+                {viewFilter === "archived"
+                  ? "চ্যাট চেপে ধরে রাখলে আর্কাইভ অপশন প্রদর্শিত হবে।"
+                  : "নতুন কারো সাথে চ্যাট শুরু করতে '+' বোতামে চাপ দিন বা নম্বর খুঁজুন।"}
+              </div>
+            </div>
+          ) : (
+            displayedConversations.map((item) => {
+              const isSelected = activeChat?.id === item.id;
+              const isPinnedItem = userPinnedIds.includes(item.id);
+              const isMutedItem = userMutedIds.includes(item.id);
+              const unreadCount = getUnreadCount(item);
+              const displayName = item.name || item.phone || "Direct Chat";
+              const avatarUrl = item.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${item.id}`;
+
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => handleOpenConversation(item)}
+                  onTouchStart={(e) => handleRowTouchStart(e, item)}
+                  onTouchMove={handleRowTouchMove}
+                  onTouchEnd={handleRowTouchEnd}
+                  onMouseDown={(e) => handleRowTouchStart(e, item)}
+                  onMouseUp={handleRowTouchEnd}
+                  onMouseLeave={handleRowTouchEnd}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setContextItem(item);
+                  }}
+                  style={{
+                    ...styles.contactItem,
+                    backgroundColor: isSelected ? THEME.cardHover : "transparent",
+                    borderLeft: isSelected ? `3px solid ${THEME.primary || "#22c55e"}` : "3px solid transparent",
+                    userSelect: "none",
+                    WebkitUserSelect: "none",
+                    position: "relative",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "10px",
+                    padding: "10px 8px"
+                  }}
+                >
+                  <img
+                    src={avatarUrl}
+                    alt=""
+                    style={{ width: "42px", height: "42px", borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2px" }}>
+                      <span
+                        style={{
+                          fontWeight: unreadCount > 0 ? "800" : "700",
+                          fontSize: "13px",
+                          color: THEME.text,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis"
+                        }}
+                      >
+                        {displayName}
+                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                        {isPinnedItem && <Pin size={12} color={THEME.primary || "#22c55e"} />}
+                        {isMutedItem && <BellOff size={12} color={THEME.danger} />}
+                        <span
+                          style={{
+                            fontSize: "10px",
+                            color: unreadCount > 0 ? (THEME.primary || "#22c55e") : THEME.textMuted,
+                            fontWeight: unreadCount > 0 ? "700" : "normal"
+                          }}
+                        >
+                          {item.lastMessageTimestamp
+                            ? new Date(getTimestampMillis(item)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                            : item.updatedAt
+                            ? new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                            : ""}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          color: unreadCount > 0 ? THEME.text : THEME.textMuted,
+                          fontWeight: unreadCount > 0 ? "600" : "normal",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          flex: 1,
+                          marginRight: "6px"
+                        }}
+                      >
+                        {item.lastMessage || "বার্তা শুরু করুন"}
+                      </span>
+
+                      {/* Green Circular Unread Badge */}
+                      {unreadCount > 0 && (
+                        <span
+                          style={{
+                            backgroundColor: THEME.primary || "#22c55e",
+                            color: "#fff",
+                            fontSize: "10px",
+                            fontWeight: "800",
+                            minWidth: "18px",
+                            height: "18px",
+                            borderRadius: "10px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            padding: "0 5px",
+                            flexShrink: 0,
+                            boxShadow: "0 1px 3px rgba(0,0,0,0.3)"
+                          }}
+                        >
+                          {unreadCount > 99 ? "99+" : unreadCount}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setContextItem(item);
+                    }}
+                    style={{
+                      ...styles.cleanBtn,
+                      color: THEME.textMuted,
+                      padding: "6px",
+                      flexShrink: 0
+                    }}
+                    title="অপশন"
+                  >
+                    <MoreVertical size={16} />
+                  </button>
+                </div>
+              );
+            })
+          )}
         </div>
 
-        {/* Send Button */}
+        {/* Floating Action Button (+) */}
         <button
-          type="submit"
-          disabled={!inputText.trim()}
+          onClick={() => setShowNewChatModal(true)}
           style={{
-            backgroundColor: editingMessage ? THEME.accent : THEME.primary,
+            position: "absolute",
+            bottom: "20px",
+            right: "20px",
+            backgroundColor: THEME.primary || "#22c55e",
             color: "#fff",
             border: "none",
             borderRadius: "50%",
-            width: "38px",
-            height: "38px",
+            width: "48px",
+            height: "48px",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
             cursor: "pointer",
-            opacity: !inputText.trim() ? 0.6 : 1,
-            flexShrink: 0
+            zIndex: 10
           }}
-          title={editingMessage ? "Update message" : "Send message"}
+          title="নতুন চ্যাট শুরু করুন"
         >
-          {editingMessage ? <CheckCircle size={18} /> : <Send size={17} />}
+          <MessageSquarePlus size={22} />
         </button>
-      </form>
+      </div>
+
+      {/* ================= RIGHT PANE: ACTIVE DIRECT CHAT THREAD ================= */}
+      {activeChat ? (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            backgroundColor: THEME.bg,
+            height: "100%",
+            overflow: "hidden",
+            position: "relative"
+          }}
+        >
+          {/* Active Chat Header Bar */}
+          <div
+            style={{
+              ...styles.headerBar,
+              backgroundColor: THEME.header,
+              borderColor: THEME.border,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "8px 14px",
+              zIndex: 10
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
+              <button
+                onClick={() => {
+                  setActiveChat(null);
+                  if (setMobileView) setMobileView("list");
+                }}
+                style={{ ...styles.cleanBtn, color: THEME.text, display: "flex", alignItems: "center" }}
+              >
+                <ArrowLeft size={18} />
+              </button>
+
+              <div
+                onClick={() => openProfile && openProfile(activeChat)}
+                style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", minWidth: 0 }}
+              >
+                <img
+                  src={activeChat.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${activeChat.id}`}
+                  alt=""
+                  style={{ width: "38px", height: "38px", borderRadius: "50%", objectFit: "cover" }}
+                />
+                <div style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontWeight: "700",
+                      fontSize: "14px",
+                      color: THEME.text,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis"
+                    }}
+                  >
+                    {activeChat.name || activeChat.phone}
+                  </div>
+                  <div style={{ fontSize: "11px", color: peerPresence.isOnline ? (THEME.primary || "#22c55e") : THEME.textMuted }}>
+                    {peerPresence.isOnline ? "Online" : peerPresence.lastSeen ? `Last seen ${peerPresence.lastSeen}` : activeChat.phone || ""}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button
+                onClick={() => startCall && startCall(activeChat, "audio")}
+                style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+                title="Audio Call"
+              >
+                <Phone size={18} />
+              </button>
+              <button
+                onClick={() => startCall && startCall(activeChat, "video")}
+                style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+                title="Video Call"
+              >
+                <Video size={18} />
+              </button>
+              <button
+                onClick={() => setContextItem(activeChat)}
+                style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
+                title="Options"
+              >
+                <MoreVertical size={18} />
+              </button>
+            </div>
+          </div>
+
+          {/* Messages Scroll Area */}
+          <div
+            ref={messagesContainerRef}
+            style={{
+              flex: 1,
+              height: "100%",
+              overflowY: "auto",
+              overflowX: "hidden",
+              WebkitOverflowScrolling: "touch",
+              overscrollBehaviorY: "contain",
+              touchAction: "pan-y",
+              padding: "14px 16px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px"
+            }}
+          >
+            {messages.length === 0 ? (
+              <div style={{ margin: "auto", textAlign: "center", color: THEME.textMuted }}>
+                <div
+                  style={{
+                    display: "inline-block",
+                    padding: "6px 14px",
+                    borderRadius: "8px",
+                    backgroundColor: THEME.card,
+                    fontSize: "12px",
+                    border: `1px solid ${THEME.border}`
+                  }}
+                >
+                  🔒 End-to-end direct phone messaging.
+                </div>
+              </div>
+            ) : (
+              messages.map((msg) => {
+                const isMe = msg.senderPhone === currentUserId || msg.senderId === currentUserId;
+                const isDeleted = msg.type === "deleted";
+
+                return (
+                  <div
+                    key={msg.id}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: isMe ? "flex-end" : "flex-start",
+                      width: "100%",
+                      marginBottom: "2px"
+                    }}
+                  >
+                    <div
+                      style={{
+                        maxWidth: "82%",
+                        borderRadius: "12px",
+                        borderTopRightRadius: isMe ? "2px" : "12px",
+                        borderTopLeftRadius: !isMe ? "2px" : "12px",
+                        padding: "8px 12px",
+                        backgroundColor: isMe ? (THEME.primary || "#22c55e") : THEME.card,
+                        color: "#fff",
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+                        position: "relative",
+                        wordBreak: "break-word"
+                      }}
+                    >
+                      {msg.replyTo && !isDeleted && (
+                        <div
+                          style={{
+                            backgroundColor: "rgba(0,0,0,0.2)",
+                            borderLeft: `3px solid ${isMe ? "#fff" : (THEME.primary || "#22c55e")}`,
+                            borderRadius: "4px",
+                            padding: "4px 8px",
+                            marginBottom: "6px",
+                            fontSize: "11px"
+                          }}
+                        >
+                          <div style={{ fontWeight: "700", opacity: 0.9 }}>{msg.replyTo.senderName || "User"}</div>
+                          <div style={{ opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {msg.replyTo.content}
+                          </div>
+                        </div>
+                      )}
+
+                      <div style={{ fontSize: "13px", lineHeight: "1.4" }}>
+                        {msg.content}
+                      </div>
+
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "flex-end",
+                          gap: "4px",
+                          marginTop: "4px",
+                          fontSize: "10px",
+                          opacity: 0.75
+                        }}
+                      >
+                        <span>
+                          {msg.createdAt ? new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                        </span>
+                        {isMe && !isDeleted && (
+                          <span>
+                            {msg.status === "read" ? <CheckCheck size={13} color="#53bdeb" /> : <Check size={13} />}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Composer Input Bar */}
+          <form
+            onSubmit={handleSendMessage}
+            style={{
+              padding: "8px 12px",
+              backgroundColor: THEME.header,
+              borderTop: `1px solid ${THEME.border}`,
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              position: "relative"
+            }}
+          >
+            <div
+              style={{
+                flex: 1,
+                backgroundColor: THEME.card,
+                borderRadius: "20px",
+                border: `1px solid ${THEME.border}`,
+                display: "flex",
+                alignItems: "center",
+                padding: "0 12px"
+              }}
+            >
+              <input
+                ref={inputRef}
+                type="text"
+                placeholder="Type a message..."
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                style={{
+                  ...styles.bareInput,
+                  color: THEME.text,
+                  fontSize: "14px",
+                  padding: "9px 0"
+                }}
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={!inputText.trim()}
+              style={{
+                backgroundColor: THEME.primary || "#22c55e",
+                color: "#fff",
+                border: "none",
+                borderRadius: "50%",
+                width: "38px",
+                height: "38px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                opacity: !inputText.trim() ? 0.6 : 1,
+                flexShrink: 0
+              }}
+              title="Send message"
+            >
+              <Send size={17} />
+            </button>
+          </form>
+        </div>
+      ) : (
+        <div
+          style={{
+            flex: 1,
+            display: window.innerWidth < 768 ? "none" : "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexDirection: "column",
+            color: THEME.textMuted,
+            gap: "10px"
+          }}
+        >
+          <Users size={56} style={{ opacity: 0.3 }} />
+          <div style={{ fontSize: "16px", fontWeight: "600", color: THEME.text }}>ব্যক্তিগত ১-অন-১ চ্যাট</div>
+          <p style={{ fontSize: "12px", maxWidth: "320px", textAlign: "center", lineHeight: "1.5" }}>
+            একটি কথোপকথন নির্বাচন করুন অথবা পরিচিত ব্যক্তির নম্বর দিয়ে সরাসরি ব্যক্তিগত চ্যাট শুরু করুন।
+          </p>
+        </div>
+      )}
+
+      {/* --- NEW 1-ON-1 PHONE CHAT MODAL --- */}
+      {showNewChatModal && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text, display: "flex", alignItems: "center", gap: "8px" }}>
+                <MessageSquarePlus size={18} color={THEME.primary || "#22c55e"} />
+                <span>নতুন ব্যক্তিগত চ্যাট</span>
+              </div>
+              <button onClick={() => setShowNewChatModal(false)} style={styles.cleanBtn}>
+                <X size={18} color={THEME.text} />
+              </button>
+            </div>
+
+            <form onSubmit={handleStartNewChat} style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div style={{ fontSize: "12px", color: THEME.textMuted }}>
+                পরিচিত ব্যক্তির ১১ ডিজিটের মোবাইল নম্বর লিখুন। আপনার চ্যাট তালিকা সম্পূর্ণ ব্যক্তিগত ও সুরক্ষিত থাকবে।
+              </div>
+
+              <div>
+                <label style={styles.label}>১১ ডিজিট মোবাইল নম্বর</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type="tel"
+                    placeholder="01712345678"
+                    maxLength={11}
+                    value={contactPhoneInput}
+                    onChange={(e) => setContactPhoneInput(cleanPhone(e.target.value))}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                    autoFocus
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={styles.label}>প্রথম বার্তা (ঐচ্ছিক)</label>
+                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                  <input
+                    type="text"
+                    placeholder="কেমন আছেন?"
+                    value={initialMessageText}
+                    onChange={(e) => setInitialMessageText(e.target.value)}
+                    style={{ ...styles.bareInput, color: THEME.text }}
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSearchingContact || cleanPhone(contactPhoneInput).length !== 11}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: THEME.primary || "#22c55e",
+                  marginTop: "6px",
+                  opacity: isSearchingContact || cleanPhone(contactPhoneInput).length !== 11 ? 0.6 : 1
+                }}
+              >
+                {isSearchingContact ? "সন্ধান করা হচ্ছে..." : "চ্যাট শুরু করুন"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- LONG-PRESS CONTEXT ACTION MODAL / SHEET --- */}
+      {contextItem && (
+        <div
+          onClick={() => {
+            setContextItem(null);
+            setShowConfirmDelete(false);
+          }}
+          style={{
+            ...styles.modalOverlay,
+            zIndex: 4000,
+            alignItems: "flex-end",
+            padding: 0
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: "500px",
+              backgroundColor: THEME.sidebar,
+              borderTopLeftRadius: "16px",
+              borderTopRightRadius: "16px",
+              border: `1px solid ${THEME.border}`,
+              padding: "16px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+              boxShadow: "0 -4px 20px rgba(0,0,0,0.5)",
+              margin: "0 auto"
+            }}
+          >
+            {/* Context Item Header */}
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", paddingBottom: "8px", borderBottom: `1px solid ${THEME.border}` }}>
+              <img
+                src={contextItem.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${contextItem.id}`}
+                alt=""
+                style={{ width: "38px", height: "38px", borderRadius: "50%" }}
+              />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                  {contextItem.name || contextItem.phone}
+                </div>
+                <div style={{ fontSize: "11px", color: THEME.textMuted }}>চ্যাট পরিচালনা অপশন</div>
+              </div>
+              <button
+                onClick={() => {
+                  setContextItem(null);
+                  setShowConfirmDelete(false);
+                }}
+                style={styles.cleanBtn}
+              >
+                <X size={18} color={THEME.textMuted} />
+              </button>
+            </div>
+
+            {/* Confirm Delete State */}
+            {showConfirmDelete ? (
+              <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: "12px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", color: THEME.danger, fontSize: "13px", fontWeight: "600" }}>
+                  <AlertTriangle size={18} />
+                  <span>আপনি কি এই চ্যাটটি মুছে ফেলতে চান?</span>
+                </div>
+                <div style={{ fontSize: "12px", color: THEME.textMuted }}>
+                  এটি শুধুমাত্র আপনার প্রোফাইল থেকে চ্যাটটি সরিয়ে দেবে।
+                </div>
+                <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+                  <button
+                    onClick={() => setShowConfirmDelete(false)}
+                    style={{ ...styles.pillBtn, backgroundColor: THEME.card, color: THEME.text }}
+                  >
+                    বাতিল
+                  </button>
+                  <button
+                    onClick={handleExecuteDelete}
+                    style={{ ...styles.pillBtn, backgroundColor: THEME.danger, color: "#fff", fontWeight: "700" }}
+                  >
+                    নিশ্চিত করুন
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                {/* 1. Pin / Unpin Chat */}
+                <button
+                  onClick={() => handleTogglePin(contextItem.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    padding: "12px",
+                    borderRadius: "8px",
+                    border: "none",
+                    backgroundColor: "transparent",
+                    color: THEME.text,
+                    fontSize: "14px",
+                    fontWeight: "500",
+                    cursor: "pointer",
+                    textAlign: "left"
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+                >
+                  {userPinnedIds.includes(contextItem.id) ? (
+                    <>
+                      <PinOff size={18} color={THEME.primary || "#22c55e"} />
+                      <span>চ্যাট আনপিন করুন</span>
+                    </>
+                  ) : (
+                    <>
+                      <Pin size={18} color={THEME.primary || "#22c55e"} />
+                      <span>উপরে পিন করে রাখুন</span>
+                    </>
+                  )}
+                </button>
+
+                {/* 2. Mute / Unmute Notifications */}
+                <button
+                  onClick={() => handleToggleMute(contextItem.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    padding: "12px",
+                    borderRadius: "8px",
+                    border: "none",
+                    backgroundColor: "transparent",
+                    color: THEME.text,
+                    fontSize: "14px",
+                    fontWeight: "500",
+                    cursor: "pointer",
+                    textAlign: "left"
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+                >
+                  {userMutedIds.includes(contextItem.id) ? (
+                    <>
+                      <Bell size={18} color={THEME.textMuted} />
+                      <span>নোটিফিকেশন আনমিউট করুন</span>
+                    </>
+                  ) : (
+                    <>
+                      <BellOff size={18} color={THEME.danger} />
+                      <span>নোটিফিকেশন মিউট করুন</span>
+                    </>
+                  )}
+                </button>
+
+                {/* 3. Archive / Unarchive Chat */}
+                <button
+                  onClick={() => handleToggleArchive(contextItem.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    padding: "12px",
+                    borderRadius: "8px",
+                    border: "none",
+                    backgroundColor: "transparent",
+                    color: THEME.text,
+                    fontSize: "14px",
+                    fontWeight: "500",
+                    cursor: "pointer",
+                    textAlign: "left"
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+                >
+                  {userArchivedIds.includes(contextItem.id) ? (
+                    <>
+                      <ArchiveRestore size={18} color={THEME.primary || "#22c55e"} />
+                      <span>আর্কাইভ থেকে আনআর্কাইভ করুন</span>
+                    </>
+                  ) : (
+                    <>
+                      <Archive size={18} color={THEME.primary || "#22c55e"} />
+                      <span>চ্যাট আর্কাইভ করুন</span>
+                    </>
+                  )}
+                </button>
+
+                {/* 4. Delete Chat */}
+                <button
+                  onClick={() => setShowConfirmDelete(true)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    padding: "12px",
+                    borderRadius: "8px",
+                    border: "none",
+                    backgroundColor: "transparent",
+                    color: THEME.danger,
+                    fontSize: "14px",
+                    fontWeight: "500",
+                    cursor: "pointer",
+                    textAlign: "left"
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
+                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+                >
+                  <Trash2 size={18} color={THEME.danger} />
+                  <span>চ্যাট মুছে ফেলুন</span>
+                </button>
+
+                {/* 5. Cancel */}
+                <button
+                  onClick={() => setContextItem(null)}
+                  style={{
+                    padding: "10px",
+                    borderRadius: "8px",
+                    border: `1px solid ${THEME.border}`,
+                    backgroundColor: THEME.card,
+                    color: THEME.textMuted,
+                    fontSize: "13px",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                    marginTop: "6px"
+                  }}
+                >
+                  বাতিল
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
