@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   Image as ImageIcon,
   Video,
@@ -15,7 +15,12 @@ import {
   Sparkles,
   ExternalLink,
   Copy,
-  Check
+  Check,
+  Bell,
+  RefreshCw,
+  CornerDownRight,
+  Smile,
+  Compass
 } from "lucide-react";
 import { styles } from "../firebase";
 
@@ -24,9 +29,9 @@ const REACTION_EMOJIS = [
   { id: "love", emoji: "❤️", label: "Love", color: "#f43f5e" },
   { id: "care", emoji: "🥰", label: "Care", color: "#eab308" },
   { id: "haha", emoji: "😂", label: "Haha", color: "#facc15" },
-  { id: "angry", emoji: "😡", label: "Angry", color: "#ef4444" },
-  { id: "sad", emoji: "😥", label: "Sad", color: "#38bdf8" },
-  { id: "wow", emoji: "😱", label: "Wow", color: "#a855f7" }
+  { id: "wow", emoji: "😮", label: "Wow", color: "#a855f7" },
+  { id: "sad", emoji: "😢", label: "Sad", color: "#38bdf8" },
+  { id: "angry", emoji: "😡", label: "Angry", color: "#ef4444" }
 ];
 
 export default function Feed({
@@ -55,27 +60,55 @@ export default function Feed({
   const [channelName, setChannelName] = useState("");
   const [channelBio, setChannelBio] = useState("");
 
-  // --- COMMENTS INTERACTIVE INLINE STATE ---
+  // --- COMMENTS & NESTED REPLIES STATE ---
   const [activeCommentsPostId, setActiveCommentsPostId] = useState(null);
   const [commentInputMap, setCommentInputMap] = useState({});
+  const [replyingToCommentMap, setReplyingToCommentMap] = useState({}); // { [postId]: { commentId, authorName } }
   const [localCommentsMap, setLocalCommentsMap] = useState(() => {
     try {
-      const saved = localStorage.getItem("infinity_feed_comments");
+      const saved = localStorage.getItem("infinity_feed_comments_v2");
       return saved ? JSON.parse(saved) : {};
     } catch (e) {
       return {};
     }
   });
 
-  // --- REACTION POPUP BAR STATE ---
+  // --- REACTION POPUP BAR & REACTION LIST MODAL ---
   const [hoveredReactionPostId, setHoveredReactionPostId] = useState(null);
+  const [viewingReactionsPost, setViewingReactionsPost] = useState(null);
   const reactionTimerRef = useRef(null);
 
-  // --- CHANNEL PROFILE & SUBSCRIPTION MODAL STATE ---
-  const [selectedChannelProfile, setSelectedChannelProfile] = useState(null);
-  const [showSubListType, setShowSubListType] = useState(null); // 'subscribers' | 'subscriptions'
+  // --- NOTIFICATIONS STATE ---
+  const [showNotificationsDrawer, setShowNotificationsDrawer] = useState(false);
+  const [notifications, setNotifications] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`infinity_notifs_${currentUserId}`);
+      return saved
+        ? JSON.parse(saved)
+        : [
+            {
+              id: "notif_welcome",
+              type: "welcome",
+              senderName: "Infinity Team",
+              senderAvatar: "https://api.dicebear.com/7.x/identicon/svg?seed=Infinity",
+              text: "Welcome to the new News Feed! React, comment, and discover channels.",
+              time: "Just now",
+              read: false
+            }
+          ];
+    } catch (e) {
+      return [];
+    }
+  });
 
-  // --- LOCAL PERSISTED SUBSCRIPTIONS MAP ---
+  // --- FEED DEDUPLICATION & SHUFFLE STATE ---
+  const [shuffleSeed, setShuffleSeed] = useState(1);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // --- CHANNEL PROFILE & SUBSCRIPTIONS ---
+  const [selectedChannelProfile, setSelectedChannelProfile] = useState(null);
+  const [showSubListType, setShowSubListType] = useState(null);
+
   const [localSubscriptions, setLocalSubscriptions] = useState(() => {
     try {
       const s = localStorage.getItem(`infinity_subs_${currentUserId}`);
@@ -85,7 +118,35 @@ export default function Feed({
     }
   });
 
-  // Check if current user already owns at least one channel
+  // Save notifications locally
+  const pushNotification = (notif) => {
+    const updated = [
+      {
+        id: "notif_" + Date.now(),
+        time: "Just now",
+        read: false,
+        ...notif
+      },
+      ...notifications
+    ].slice(0, 30);
+
+    setNotifications(updated);
+    try {
+      localStorage.setItem(`infinity_notifs_${currentUserId}`, JSON.stringify(updated));
+    } catch (e) {}
+  };
+
+  const unreadNotifCount = notifications.filter((n) => !n.read).length;
+
+  const markAllNotifsRead = () => {
+    const updated = notifications.map((n) => ({ ...n, read: true }));
+    setNotifications(updated);
+    try {
+      localStorage.setItem(`infinity_notifs_${currentUserId}`, JSON.stringify(updated));
+    } catch (e) {}
+  };
+
+  // Check if current user owns a channel
   const myChannel = useMemo(() => {
     return channels.find(
       (c) =>
@@ -95,7 +156,40 @@ export default function Feed({
     );
   }, [channels, currentUserId]);
 
-  // --- 1. HANDLE MEDIA PICKER ---
+  // Suggested channels (not yet subscribed by user)
+  const suggestedChannels = useMemo(() => {
+    return channels
+      .filter((c) => c.id !== myChannel?.id && !localSubscriptions.includes(c.id))
+      .slice(0, 6);
+  }, [channels, myChannel, localSubscriptions]);
+
+  // --- DEDUPLICATED & ALGORITHMIC ORDERED POSTS ---
+  const processedPosts = useMemo(() => {
+    const map = new Map();
+    // Unique deduplication by ID
+    feedPosts.forEach((post) => {
+      if (post && post.id && !map.has(post.id)) {
+        map.set(post.id, post);
+      }
+    });
+
+    const uniqueList = Array.from(map.values());
+
+    // Algorithmic weighting: (Likes * 2) + Comments count + freshness
+    return uniqueList.sort((a, b) => {
+      const aReactions = Object.keys(a.reactions || a.likes || {}).length;
+      const bReactions = Object.keys(b.reactions || b.likes || {}).length;
+      const aComments = (localCommentsMap[a.id] || []).length;
+      const bComments = (localCommentsMap[b.id] || []).length;
+
+      const aScore = aReactions * 2 + aComments + (shuffleSeed % 2 === 0 ? 1 : 0);
+      const bScore = bReactions * 2 + bComments;
+
+      return bScore - aScore;
+    });
+  }, [feedPosts, localCommentsMap, shuffleSeed]);
+
+  // --- MEDIA PICKER ---
   const handleMediaSelect = (e, type) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -112,7 +206,7 @@ export default function Feed({
     reader.readAsDataURL(file);
   };
 
-  // --- 2. CREATE CHANNEL ACTION ---
+  // --- CREATE CHANNEL ---
   const handleCreateChannelSubmit = async (e) => {
     e.preventDefault();
     if (!channelName.trim()) {
@@ -134,7 +228,6 @@ export default function Feed({
     };
 
     if (onBroadcastPost) {
-      // Create initial broadcast or channel structure
       await onBroadcastPost(newChannelData, "🎉 Welcome to our official broadcast channel!", null);
     }
 
@@ -144,11 +237,10 @@ export default function Feed({
     if (showToast) showToast(`Channel "${newChannelData.name}" created! You can now publish posts.`);
   };
 
-  // --- 3. SUBMIT NEW FACEBOOK-STYLE POST ---
+  // --- PUBLISH POST ---
   const handlePublishPost = async (e) => {
     e.preventDefault();
 
-    // Mandatory channel check
     if (!myChannel) {
       setShowChannelModal(true);
       if (showToast) showToast("You must create a Channel before posting!");
@@ -156,7 +248,7 @@ export default function Feed({
     }
 
     if (!postText.trim() && !mediaPreview) {
-      if (showToast) showToast("Please write something or attach a photo/video");
+      if (showToast) showToast("Please write something or attach media");
       return;
     }
 
@@ -167,7 +259,7 @@ export default function Feed({
       }
       setPostText("");
       setMediaPreview(null);
-      if (showToast) showToast("Post published to shared News Feed!");
+      if (showToast) showToast("Post published to the News Feed!");
     } catch (err) {
       if (showToast) showToast("Error publishing post: " + err.message);
     } finally {
@@ -175,45 +267,71 @@ export default function Feed({
     }
   };
 
-  // --- 4. TOGGLE SUBSCRIBE TO CHANNEL ---
-  const handleToggleSubscribe = (channelId, channelName = "Channel") => {
+  // --- TOGGLE SUBSCRIBE ---
+  const handleToggleSubscribe = (channelId, channelTitle = "Channel") => {
     const isSubscribed = localSubscriptions.includes(channelId);
     let updated;
     if (isSubscribed) {
       updated = localSubscriptions.filter((id) => id !== channelId);
-      if (showToast) showToast(`Unsubscribed from ${channelName}`);
+      if (showToast) showToast(`Unsubscribed from ${channelTitle}`);
     } else {
       updated = [...localSubscriptions, channelId];
-      if (showToast) showToast(`Subscribed to ${channelName}! 🎉`);
+      if (showToast) showToast(`Subscribed to ${channelTitle}! 🎉`);
+
+      // Trigger notification
+      pushNotification({
+        type: "subscriber",
+        senderName: channelTitle,
+        senderAvatar: `https://api.dicebear.com/7.x/identicon/svg?seed=${channelId}`,
+        text: `You subscribed to ${channelTitle}. You will receive fresh updates.`
+      });
     }
+
     setLocalSubscriptions(updated);
     try {
       localStorage.setItem(`infinity_subs_${currentUserId}`, JSON.stringify(updated));
     } catch (e) {}
   };
 
-  // --- 5. POST REACTION DISPATCH ---
-  const handleSelectReaction = (postId, reactionObj) => {
+  // --- REACTIONS ---
+  const handleSelectReaction = (post, reactionObj) => {
     if (onReaction) {
-      onReaction(postId, reactionObj.emoji);
+      onReaction(post.id, reactionObj.emoji);
     } else if (onToggleLike) {
-      onToggleLike(postId);
+      onToggleLike(post.id);
     }
     setHoveredReactionPostId(null);
     if (showToast) showToast(`Reacted ${reactionObj.emoji}`);
+
+    // If reacting to someone else's post, add alert
+    if (post.creatorPhone && post.creatorPhone !== currentUserId) {
+      pushNotification({
+        type: "reaction",
+        senderName: currentUser?.name || "You",
+        senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+        text: `Reacted ${reactionObj.emoji} to ${post.channelName || "Channel"}'s post.`,
+        postId: post.id
+      });
+    }
   };
 
-  // --- 6. COMMENTS SYSTEM ---
+  // --- THREADED COMMENTS & REPLIES ---
   const handleAddComment = (postId) => {
     const text = (commentInputMap[postId] || "").trim();
     if (!text) return;
 
+    const replyContext = replyingToCommentMap[postId];
+
     const newComment = {
       id: "comment_" + Date.now(),
+      authorId: currentUserId,
       authorName: currentUser?.name || "User",
       authorAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
       content: text,
-      createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      replyToAuthor: replyContext?.authorName || null,
+      replyToCommentId: replyContext?.commentId || null,
+      likes: {}
     };
 
     const existing = localCommentsMap[postId] || [];
@@ -222,31 +340,77 @@ export default function Feed({
 
     setLocalCommentsMap(newMap);
     setCommentInputMap((prev) => ({ ...prev, [postId]: "" }));
+    setReplyingToCommentMap((prev) => ({ ...prev, [postId]: null }));
+
     try {
-      localStorage.setItem("infinity_feed_comments", JSON.stringify(newMap));
+      localStorage.setItem("infinity_feed_comments_v2", JSON.stringify(newMap));
+    } catch (e) {}
+
+    // Add notification
+    pushNotification({
+      type: "comment",
+      senderName: currentUser?.name || "User",
+      senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+      text: replyContext
+        ? `Replied to ${replyContext.authorName}: "${text.slice(0, 30)}..."`
+        : `Commented on post: "${text.slice(0, 30)}..."`,
+      postId: postId
+    });
+  };
+
+  const handleToggleCommentLike = (postId, commentId) => {
+    const existing = localCommentsMap[postId] || [];
+    const updated = existing.map((comm) => {
+      if (comm.id === commentId) {
+        const likes = { ...(comm.likes || {}) };
+        if (likes[currentUserId]) {
+          delete likes[currentUserId];
+        } else {
+          likes[currentUserId] = true;
+        }
+        return { ...comm, likes };
+      }
+      return comm;
+    });
+
+    const newMap = { ...localCommentsMap, [postId]: updated };
+    setLocalCommentsMap(newMap);
+    try {
+      localStorage.setItem("infinity_feed_comments_v2", JSON.stringify(newMap));
     } catch (e) {}
   };
 
-  // --- 7. NATIVE SOCIAL SHARE ---
-  const handleSharePost = async (post) => {
-    const shareData = {
-      title: `${post.channelName || "Channel"} on Infinity Chat`,
-      text: post.content || "Check out this post on Infinity Chat!",
-      url: window.location.href
-    };
+  // --- REACTION BADGE SUMMARY (TOP 3 EMOJIS) ---
+  const getReactionSummary = (post) => {
+    const reactions = post.reactions || {};
+    const emojisCount = {};
 
-    if (navigator.share) {
-      try {
-        await navigator.share(shareData);
-      } catch (e) {}
-    } else {
-      try {
-        await navigator.clipboard.writeText(`${shareData.title}\n\n${shareData.text}\n${shareData.url}`);
-        if (showToast) showToast("Link copied to clipboard!");
-      } catch (e) {
-        if (onForward) onForward(post);
-      }
+    Object.values(reactions).forEach((emoji) => {
+      emojisCount[emoji] = (emojisCount[emoji] || 0) + 1;
+    });
+
+    if (post.likes && Object.keys(post.likes).length > 0) {
+      emojisCount["❤️"] = (emojisCount["❤️"] || 0) + Object.keys(post.likes).length;
     }
+
+    const topEmojis = Object.entries(emojisCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([emoji]) => emoji);
+
+    const totalCount = Object.values(emojisCount).reduce((acc, count) => acc + count, 0);
+
+    return { topEmojis, totalCount, details: reactions };
+  };
+
+  // Refresh / Shuffle Feed
+  const handleRefreshFeed = () => {
+    setIsRefreshing(true);
+    setShuffleSeed((prev) => prev + 1);
+    setTimeout(() => {
+      setIsRefreshing(false);
+      if (showToast) showToast("Feed refreshed with latest updates!");
+    }, 450);
   };
 
   return (
@@ -261,12 +425,85 @@ export default function Feed({
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
-        padding: "16px 12px 60px"
+        padding: "16px 12px 60px",
+        position: "relative"
       }}
     >
       <div style={{ width: "100%", maxWidth: "620px", display: "flex", flexDirection: "column", gap: "16px" }}>
-        
-        {/* --- BANNER: MANDATORY CHANNEL REMINDER IF USER HAS NO CHANNEL --- */}
+
+        {/* --- FEED TOP NAVIGATION: REFRESH & NOTIFICATIONS TOGGLE --- */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "4px 2px"
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ fontSize: "16px", fontWeight: "800", color: THEME.text }}>News Feed</span>
+            <button
+              onClick={handleRefreshFeed}
+              style={{
+                ...styles.cleanBtn,
+                color: THEME.textMuted,
+                display: "flex",
+                alignItems: "center",
+                gap: "4px",
+                fontSize: "11px"
+              }}
+              title="Refresh Feed"
+            >
+              <RefreshCw size={13} style={{ transform: isRefreshing ? "rotate(180deg)" : "none", transition: "transform 0.4s ease" }} />
+              <span>Refresh</span>
+            </button>
+          </div>
+
+          {/* Notifications Drawer Toggle */}
+          <button
+            onClick={() => {
+              setShowNotificationsDrawer(true);
+              markAllNotifsRead();
+            }}
+            style={{
+              position: "relative",
+              backgroundColor: THEME.card,
+              border: `1px solid ${THEME.border}`,
+              borderRadius: "20px",
+              padding: "6px 12px",
+              color: THEME.text,
+              fontSize: "12px",
+              fontWeight: "600",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px"
+            }}
+          >
+            <Bell size={15} color={unreadNotifCount > 0 ? (THEME.primary || "#22c55e") : THEME.textMuted} />
+            <span>Alerts</span>
+            {unreadNotifCount > 0 && (
+              <span
+                style={{
+                  backgroundColor: THEME.primary || "#22c55e",
+                  color: "#fff",
+                  borderRadius: "10px",
+                  fontSize: "10px",
+                  fontWeight: "800",
+                  padding: "0 6px",
+                  height: "16px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center"
+                }}
+              >
+                {unreadNotifCount}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* --- BANNER: MANDATORY CHANNEL REMINDER IF NO CHANNEL EXISTS --- */}
         {!myChannel && (
           <div
             style={{
@@ -314,7 +551,7 @@ export default function Feed({
           </div>
         )}
 
-        {/* --- FACEBOOK-STYLE POST CREATION BOX (TOP OF FEED) --- */}
+        {/* --- FACEBOOK-STYLE POST CREATOR (TOP OF FEED) --- */}
         <div
           style={{
             backgroundColor: THEME.card,
@@ -334,8 +571,8 @@ export default function Feed({
               <div style={{ fontWeight: "700", fontSize: "13px", color: THEME.text }}>
                 {myChannel ? myChannel.name : currentUser?.name || "Your Profile"}
               </div>
-              <div style={{ fontSize: "11px", color: myChannel ? THEME.primary || "#22c55e" : THEME.textMuted }}>
-                {myChannel ? "Posting as Official Channel" : "Create a channel to broadcast"}
+              <div style={{ fontSize: "11px", color: myChannel ? (THEME.primary || "#22c55e") : THEME.textMuted }}>
+                {myChannel ? "Posting as Official Channel" : "Channel required to publish"}
               </div>
             </div>
           </div>
@@ -402,7 +639,7 @@ export default function Feed({
               </div>
             )}
 
-            {/* Action Buttons: Photo, Video, Submit */}
+            {/* Actions: Photo, Video, Submit */}
             <div
               style={{
                 display: "flex",
@@ -413,7 +650,6 @@ export default function Feed({
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                {/* Photo Upload */}
                 <label
                   style={{
                     display: "flex",
@@ -437,7 +673,6 @@ export default function Feed({
                   />
                 </label>
 
-                {/* Video Upload */}
                 <label
                   style={{
                     display: "flex",
@@ -487,8 +722,90 @@ export default function Feed({
           </form>
         </div>
 
-        {/* --- GLOBAL PUBLIC NEWS FEED POSTS --- */}
-        {feedPosts.length === 0 ? (
+        {/* --- SUGGESTED CHANNELS DISCOVERY CAROUSEL --- */}
+        {suggestedChannels.length > 0 && (
+          <div
+            style={{
+              backgroundColor: THEME.card,
+              borderRadius: "14px",
+              border: `1px solid ${THEME.border}`,
+              padding: "14px 16px"
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "10px" }}>
+              <Compass size={16} color={THEME.primary || "#22c55e"} />
+              <span style={{ fontSize: "13px", fontWeight: "700", color: THEME.text }}>
+                Suggested Channels to Follow
+              </span>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                gap: "10px",
+                overflowX: "auto",
+                paddingBottom: "6px",
+                WebkitOverflowScrolling: "touch"
+              }}
+            >
+              {suggestedChannels.map((sug) => (
+                <div
+                  key={sug.id}
+                  style={{
+                    minWidth: "130px",
+                    backgroundColor: THEME.header,
+                    borderRadius: "10px",
+                    border: `1px solid ${THEME.border}`,
+                    padding: "12px 10px",
+                    textAlign: "center",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: "6px"
+                  }}
+                >
+                  <img
+                    src={sug.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${sug.id}`}
+                    alt=""
+                    style={{ width: "42px", height: "42px", borderRadius: "50%", objectFit: "cover" }}
+                  />
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      fontWeight: "700",
+                      color: THEME.text,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      width: "100%"
+                    }}
+                  >
+                    {sug.name}
+                  </div>
+                  <button
+                    onClick={() => handleToggleSubscribe(sug.id, sug.name)}
+                    style={{
+                      backgroundColor: THEME.primary || "#22c55e",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: "14px",
+                      padding: "4px 10px",
+                      fontSize: "11px",
+                      fontWeight: "700",
+                      cursor: "pointer",
+                      width: "100%"
+                    }}
+                  >
+                    Subscribe
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* --- DYNAMIC NEWS FEED POSTS --- */}
+        {processedPosts.length === 0 ? (
           <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted }}>
             <Users size={48} style={{ margin: "0 auto 12px", opacity: 0.4 }} />
             <div style={{ fontSize: "15px", fontWeight: "700", color: THEME.text }}>No posts in the News Feed yet</div>
@@ -497,14 +814,15 @@ export default function Feed({
             </div>
           </div>
         ) : (
-          feedPosts.map((post) => {
+          processedPosts.map((post) => {
             const channelId = post.channelId || post.id;
             const isSubscribed = localSubscriptions.includes(channelId);
             const isLiked = post.likes && post.likes[currentUserId];
-            const reactionKeys = Object.values(post.reactions || {});
-            const totalReactions = (Object.keys(post.likes || {}).length || 0) + reactionKeys.length;
+            const { topEmojis, totalCount, details } = getReactionSummary(post);
+
             const postComments = localCommentsMap[post.id] || [];
             const isCommentsOpen = activeCommentsPostId === post.id;
+            const currentReplyingTo = replyingToCommentMap[post.id];
 
             return (
               <div
@@ -518,7 +836,7 @@ export default function Feed({
                   position: "relative"
                 }}
               >
-                {/* Post Header: Channel Avatar, Name, Timestamp & Subscribe Button */}
+                {/* Header: Channel info & Subscribe button */}
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
                   <div
                     onClick={() => {
@@ -539,8 +857,8 @@ export default function Feed({
                       style={{ width: "42px", height: "42px", borderRadius: "50%", objectFit: "cover" }}
                     />
                     <div>
-                      <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text, display: "flex", alignItems: "center", gap: "6px" }}>
-                        <span>{post.channelName || post.authorName || "Public Channel"}</span>
+                      <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                        {post.channelName || post.authorName || "Public Channel"}
                       </div>
                       <div style={{ fontSize: "11px", color: THEME.textMuted }}>
                         {post.createdAt ? new Date(post.createdAt).toLocaleDateString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Just now"}
@@ -548,7 +866,6 @@ export default function Feed({
                     </div>
                   </div>
 
-                  {/* Subscribe / Subscribed Toggle Button */}
                   <button
                     onClick={() => handleToggleSubscribe(channelId, post.channelName)}
                     style={{
@@ -570,7 +887,7 @@ export default function Feed({
                   </button>
                 </div>
 
-                {/* Post Content / Caption */}
+                {/* Post Text */}
                 {post.content && (
                   <div
                     style={{
@@ -585,7 +902,7 @@ export default function Feed({
                   </div>
                 )}
 
-                {/* Custom Responsive HTML5 Video Player or Image Viewer */}
+                {/* Media Preview (Video / Photo) */}
                 {post.fileUrl && (
                   <div
                     style={{
@@ -602,32 +919,21 @@ export default function Feed({
                         controls
                         playsInline
                         preload="metadata"
-                        style={{
-                          width: "100%",
-                          maxHeight: "380px",
-                          borderRadius: "10px",
-                          display: "block"
-                        }}
+                        style={{ width: "100%", maxHeight: "380px", display: "block" }}
                       />
                     ) : (
                       <img
                         src={post.fileUrl}
                         alt=""
                         onClick={() => onLightbox && onLightbox({ url: post.fileUrl, type: post.type, name: post.fileName })}
-                        style={{
-                          width: "100%",
-                          maxHeight: "420px",
-                          objectFit: "contain",
-                          display: "block",
-                          cursor: "pointer"
-                        }}
+                        style={{ width: "100%", maxHeight: "420px", objectFit: "contain", display: "block", cursor: "pointer" }}
                       />
                     )}
                   </div>
                 )}
 
-                {/* Reactions Count & Breakdown Summary */}
-                {totalReactions > 0 && (
+                {/* Reaction Summary Bar (Clicking opens Reaction List Modal) */}
+                {totalCount > 0 && (
                   <div
                     style={{
                       display: "flex",
@@ -639,10 +945,15 @@ export default function Feed({
                       color: THEME.textMuted
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                      <span style={{ fontSize: "14px" }}>❤️ 👍</span>
-                      <span>{totalReactions}</span>
+                    <div
+                      onClick={() => setViewingReactionsPost(post)}
+                      style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}
+                    >
+                      <span style={{ fontSize: "14px" }}>{topEmojis.join("")}</span>
+                      <span style={{ fontWeight: "700", color: THEME.text }}>{totalCount}</span>
+                      <span style={{ fontSize: "11px", color: THEME.textMuted }}>(View Reacted)</span>
                     </div>
+
                     {postComments.length > 0 && (
                       <div
                         onClick={() => setActiveCommentsPostId(isCommentsOpen ? null : post.id)}
@@ -654,7 +965,7 @@ export default function Feed({
                   </div>
                 )}
 
-                {/* --- ACTION BAR: LIKE (MULTI-REACTION), COMMENT, SHARE --- */}
+                {/* Action Bar: Like (Floating Picker), Comment, Share */}
                 <div
                   style={{
                     display: "flex",
@@ -664,7 +975,7 @@ export default function Feed({
                     position: "relative"
                   }}
                 >
-                  {/* Floating Multi-Reaction Bar (Hover or Long-Press) */}
+                  {/* Floating Multi-Reaction Bar */}
                   {hoveredReactionPostId === post.id && (
                     <div
                       onMouseEnter={() => clearTimeout(reactionTimerRef.current)}
@@ -688,7 +999,7 @@ export default function Feed({
                       {REACTION_EMOJIS.map((rec) => (
                         <button
                           key={rec.id}
-                          onClick={() => handleSelectReaction(post.id, rec)}
+                          onClick={() => handleSelectReaction(post, rec)}
                           style={{
                             background: "none",
                             border: "none",
@@ -767,7 +1078,17 @@ export default function Feed({
 
                   {/* Share Button */}
                   <button
-                    onClick={() => handleSharePost(post)}
+                    onClick={() => {
+                      if (navigator.share) {
+                        navigator.share({
+                          title: post.channelName || "Infinity Chat Post",
+                          text: post.content || "",
+                          url: window.location.href
+                        }).catch(() => {});
+                      } else if (onForward) {
+                        onForward(post);
+                      }
+                    }}
                     style={{
                       flex: 1,
                       display: "flex",
@@ -789,7 +1110,7 @@ export default function Feed({
                   </button>
                 </div>
 
-                {/* --- INLINE INTERACTIVE COMMENTS SECTION --- */}
+                {/* --- THREADED & NESTED COMMENTS SECTION --- */}
                 {isCommentsOpen && (
                   <div
                     style={{
@@ -801,7 +1122,34 @@ export default function Feed({
                       gap: "10px"
                     }}
                   >
-                    {/* Add Comment Input */}
+                    {/* Replying Context Indicator */}
+                    {currentReplyingTo && (
+                      <div
+                        style={{
+                          backgroundColor: THEME.header,
+                          borderRadius: "8px",
+                          padding: "4px 10px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          fontSize: "11px",
+                          color: THEME.primary || "#22c55e"
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <CornerDownRight size={13} />
+                          <span>Replying to <strong>{currentReplyingTo.authorName}</strong></span>
+                        </div>
+                        <button
+                          onClick={() => setReplyingToCommentMap({ ...replyingToCommentMap, [post.id]: null })}
+                          style={styles.cleanBtn}
+                        >
+                          <X size={13} color={THEME.textMuted} />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Input Composer */}
                     <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                       <img
                         src={currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
@@ -810,7 +1158,7 @@ export default function Feed({
                       />
                       <input
                         type="text"
-                        placeholder="Write a comment..."
+                        placeholder={currentReplyingTo ? `Reply to ${currentReplyingTo.authorName}...` : "Write a comment..."}
                         value={commentInputMap[post.id] || ""}
                         onChange={(e) => setCommentInputMap({ ...commentInputMap, [post.id]: e.target.value })}
                         onKeyDown={(e) => {
@@ -848,36 +1196,94 @@ export default function Feed({
                       </button>
                     </div>
 
-                    {/* Comments List */}
+                    {/* Threaded Comments List */}
                     {postComments.length > 0 ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "6px" }}>
-                        {postComments.map((comm) => (
-                          <div key={comm.id} style={{ display: "flex", gap: "8px" }}>
-                            <img
-                              src={comm.authorAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
-                              alt=""
-                              style={{ width: "28px", height: "28px", borderRadius: "50%", marginTop: "2px" }}
-                            />
+                      <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "4px" }}>
+                        {postComments.map((comm) => {
+                          const isCommentLiked = comm.likes && comm.likes[currentUserId];
+                          const commentLikeCount = Object.keys(comm.likes || {}).length;
+                          const isNestedReply = !!comm.replyToCommentId;
+
+                          return (
                             <div
+                              key={comm.id}
                               style={{
-                                backgroundColor: THEME.header,
-                                borderRadius: "12px",
-                                padding: "8px 12px",
-                                flex: 1
+                                display: "flex",
+                                gap: "8px",
+                                marginLeft: isNestedReply ? "28px" : "0px"
                               }}
                             >
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                                <span style={{ fontWeight: "700", fontSize: "12px", color: THEME.text }}>
-                                  {comm.authorName}
-                                </span>
-                                <span style={{ fontSize: "10px", color: THEME.textMuted }}>{comm.createdAt}</span>
-                              </div>
-                              <div style={{ fontSize: "12px", color: THEME.text, marginTop: "2px" }}>
-                                {comm.content}
+                              <img
+                                src={comm.authorAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
+                                alt=""
+                                style={{ width: "26px", height: "26px", borderRadius: "50%", marginTop: "2px" }}
+                              />
+                              <div style={{ flex: 1 }}>
+                                <div
+                                  style={{
+                                    backgroundColor: THEME.header,
+                                    borderRadius: "12px",
+                                    padding: "8px 12px"
+                                  }}
+                                >
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                    <span style={{ fontWeight: "700", fontSize: "12px", color: THEME.text }}>
+                                      {comm.authorName}
+                                    </span>
+                                    <span style={{ fontSize: "10px", color: THEME.textMuted }}>{comm.createdAt}</span>
+                                  </div>
+
+                                  {/* Reply tag if nested */}
+                                  {comm.replyToAuthor && (
+                                    <div style={{ fontSize: "10px", color: THEME.primary || "#22c55e", marginBottom: "2px" }}>
+                                      replying to @{comm.replyToAuthor}
+                                    </div>
+                                  )}
+
+                                  <div style={{ fontSize: "12px", color: THEME.text, marginTop: "2px" }}>
+                                    {comm.content}
+                                  </div>
+                                </div>
+
+                                {/* Comment Actions: Like Comment & Reply */}
+                                <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "4px", paddingLeft: "6px" }}>
+                                  <button
+                                    onClick={() => handleToggleCommentLike(post.id, comm.id)}
+                                    style={{
+                                      ...styles.cleanBtn,
+                                      color: isCommentLiked ? (THEME.primary || "#22c55e") : THEME.textMuted,
+                                      fontSize: "11px",
+                                      fontWeight: "600",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: "3px"
+                                    }}
+                                  >
+                                    <Heart size={11} fill={isCommentLiked ? (THEME.primary || "#22c55e") : "none"} />
+                                    <span>{commentLikeCount > 0 ? `${commentLikeCount} Like` : "Like"}</span>
+                                  </button>
+
+                                  <button
+                                    onClick={() => {
+                                      setReplyingToCommentMap({
+                                        ...replyingToCommentMap,
+                                        [post.id]: { commentId: comm.id, authorName: comm.authorName }
+                                      });
+                                    }}
+                                    style={{
+                                      ...styles.cleanBtn,
+                                      color: THEME.textMuted,
+                                      fontSize: "11px",
+                                      fontWeight: "600"
+                                    }}
+                                  >
+                                    Reply
+                                  </button>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     ) : (
                       <div style={{ fontSize: "11px", color: THEME.textMuted, textAlign: "center", padding: "4px" }}>
@@ -892,7 +1298,157 @@ export default function Feed({
         )}
       </div>
 
-      {/* --- MODAL: CREATE CHANNEL (MANDATORY REQUIREMENT FOR POSTING) --- */}
+      {/* --- NOTIFICATIONS DRAWER / SLIDE-OVER --- */}
+      {showNotificationsDrawer && (
+        <div style={styles.modalOverlay}>
+          <div
+            style={{
+              ...styles.modalCard,
+              backgroundColor: THEME.sidebar,
+              borderColor: THEME.border,
+              maxWidth: "460px"
+            }}
+          >
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text, display: "flex", alignItems: "center", gap: "8px" }}>
+                <Bell size={18} color={THEME.primary || "#22c55e"} />
+                <span>Notifications & Alerts</span>
+              </div>
+              <button onClick={() => setShowNotificationsDrawer(false)} style={styles.cleanBtn}>
+                <X size={18} color={THEME.text} />
+              </button>
+            </div>
+
+            <div
+              style={{
+                maxHeight: "380px",
+                overflowY: "auto",
+                padding: "12px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+                WebkitOverflowScrolling: "touch"
+              }}
+            >
+              {notifications.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "30px", color: THEME.textMuted, fontSize: "13px" }}>
+                  No notifications yet.
+                </div>
+              ) : (
+                notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
+                      padding: "10px",
+                      borderRadius: "10px",
+                      backgroundColor: n.read ? THEME.card : "rgba(34, 197, 94, 0.1)",
+                      border: `1px solid ${THEME.border}`
+                    }}
+                  >
+                    <img
+                      src={n.senderAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
+                      alt=""
+                      style={{ width: "36px", height: "36px", borderRadius: "50%", objectFit: "cover" }}
+                    />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: "12px", color: THEME.text, lineHeight: "1.4" }}>
+                        <strong>{n.senderName}</strong> {n.text}
+                      </div>
+                      <div style={{ fontSize: "10px", color: THEME.textMuted, marginTop: "2px" }}>
+                        {n.time}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- REACTED BY MODAL (REACTION BREAKDOWN LIST) --- */}
+      {viewingReactionsPost && (
+        <div style={styles.modalOverlay}>
+          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border, maxWidth: "420px" }}>
+            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
+              <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                People who reacted to this post
+              </div>
+              <button onClick={() => setViewingReactionsPost(null)} style={styles.cleanBtn}>
+                <X size={18} color={THEME.text} />
+              </button>
+            </div>
+
+            <div style={{ padding: "14px", maxHeight: "300px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
+              {Object.entries(viewingReactionsPost.reactions || {}).length === 0 &&
+              (!viewingReactionsPost.likes || Object.keys(viewingReactionsPost.likes).length === 0) ? (
+                <div style={{ textAlign: "center", color: THEME.textMuted, fontSize: "12px", padding: "20px" }}>
+                  No reactions yet.
+                </div>
+              ) : (
+                <>
+                  {Object.entries(viewingReactionsPost.reactions || {}).map(([uid, emo]) => (
+                    <div
+                      key={uid}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "8px 10px",
+                        backgroundColor: THEME.header,
+                        borderRadius: "8px"
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <img
+                          src={`https://api.dicebear.com/7.x/identicon/svg?seed=${uid}`}
+                          alt=""
+                          style={{ width: "32px", height: "32px", borderRadius: "50%" }}
+                        />
+                        <span style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
+                          {uid === currentUserId ? "You" : `User ${uid.slice(-4)}`}
+                        </span>
+                      </div>
+                      <span style={{ fontSize: "18px" }}>{emo}</span>
+                    </div>
+                  ))}
+
+                  {Object.keys(viewingReactionsPost.likes || {}).map((uid) => (
+                    <div
+                      key={"like_" + uid}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "8px 10px",
+                        backgroundColor: THEME.header,
+                        borderRadius: "8px"
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <img
+                          src={`https://api.dicebear.com/7.x/identicon/svg?seed=${uid}`}
+                          alt=""
+                          style={{ width: "32px", height: "32px", borderRadius: "50%" }}
+                        />
+                        <span style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
+                          {uid === currentUserId ? "You" : `User ${uid.slice(-4)}`}
+                        </span>
+                      </div>
+                      <span style={{ fontSize: "18px" }}>❤️</span>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- CREATE CHANNEL MODAL --- */}
       {showChannelModal && (
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
@@ -953,7 +1509,7 @@ export default function Feed({
         </div>
       )}
 
-      {/* --- MODAL: CHANNEL PROFILE & SUBSCRIBERS / SUBSCRIPTIONS --- */}
+      {/* --- CHANNEL PROFILE MODAL --- */}
       {selectedChannelProfile && (
         <div style={styles.modalOverlay}>
           <div
@@ -982,7 +1538,6 @@ export default function Feed({
               {selectedChannelProfile.desc || "Official News & Broadcast Channel"}
             </p>
 
-            {/* Counts: Subscribers & Subscriptions */}
             <div
               style={{
                 display: "flex",
@@ -994,10 +1549,7 @@ export default function Feed({
                 marginBottom: "16px"
               }}
             >
-              <div
-                onClick={() => setShowSubListType("subscribers")}
-                style={{ cursor: "pointer" }}
-              >
+              <div onClick={() => setShowSubListType("subscribers")} style={{ cursor: "pointer" }}>
                 <div style={{ fontSize: "18px", fontWeight: "800", color: THEME.primary || "#22c55e" }}>
                   {(selectedChannelProfile.subscribers || []).length || 1}
                 </div>
@@ -1006,10 +1558,7 @@ export default function Feed({
 
               <div style={{ width: "1px", backgroundColor: THEME.border }} />
 
-              <div
-                onClick={() => setShowSubListType("subscriptions")}
-                style={{ cursor: "pointer" }}
-              >
+              <div onClick={() => setShowSubListType("subscriptions")} style={{ cursor: "pointer" }}>
                 <div style={{ fontSize: "18px", fontWeight: "800", color: THEME.text }}>
                   {(selectedChannelProfile.subscriptions || []).length || 0}
                 </div>
@@ -1017,47 +1566,14 @@ export default function Feed({
               </div>
             </div>
 
-            {/* Modal Sub-List View for Subscribers/Subscriptions */}
-            {showSubListType && (
-              <div
-                style={{
-                  backgroundColor: THEME.header,
-                  borderRadius: "8px",
-                  padding: "10px",
-                  marginBottom: "14px",
-                  maxHeight: "140px",
-                  overflowY: "auto",
-                  textAlign: "left"
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                  <span style={{ fontSize: "11px", fontWeight: "700", color: THEME.text }}>
-                    {showSubListType === "subscribers" ? "Channel Subscribers" : "Subscribed Channels"}
-                  </span>
-                  <button onClick={() => setShowSubListType(null)} style={styles.cleanBtn}>
-                    <X size={12} color={THEME.textMuted} />
-                  </button>
-                </div>
-                <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                  {showSubListType === "subscribers"
-                    ? `Active followers including ${currentUser?.name || "User"}`
-                    : "No public subscriptions listed."}
-                </div>
-              </div>
-            )}
-
             <button
-              onClick={() => {
-                handleToggleSubscribe(selectedChannelProfile.id, selectedChannelProfile.name);
-              }}
+              onClick={() => handleToggleSubscribe(selectedChannelProfile.id, selectedChannelProfile.name)}
               style={{
                 ...styles.primaryBtn,
                 backgroundColor: localSubscriptions.includes(selectedChannelProfile.id)
                   ? THEME.card
                   : (THEME.primary || "#22c55e"),
-                color: localSubscriptions.includes(selectedChannelProfile.id)
-                  ? THEME.text
-                  : "#fff",
+                color: localSubscriptions.includes(selectedChannelProfile.id) ? THEME.text : "#fff",
                 border: `1px solid ${THEME.primary || "#22c55e"}`
               }}
             >
