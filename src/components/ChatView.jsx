@@ -5,6 +5,8 @@ import {
   setDoc,
   getDoc,
   updateDoc,
+  deleteDoc,
+  arrayUnion,
   query,
   where,
   onSnapshot,
@@ -37,7 +39,9 @@ import {
   Copy,
   Share2,
   FileText,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Flame,
+  Edit2
 } from "lucide-react";
 import { db, styles } from "../firebase";
 
@@ -49,8 +53,23 @@ export default function ChatView({
   messages = [],
   currentUser,
   peerPresence = { isOnline: false, lastSeen: "" },
-  THEME,
-  t,
+  THEME = {
+    bg: "#0B141A",
+    sidebar: "#111B21",
+    header: "#202C33",
+    card: "#202C33",
+    cardHover: "#2A3942",
+    primary: "#22c55e",
+    accent: "#00A884",
+    danger: "#EF4444",
+    border: "#2A3942",
+    text: "#E9EDEF",
+    textMuted: "#8696A0"
+  },
+  t = {
+    chats: "Chats",
+    searchPlaceholder: "Search or start new chat..."
+  },
   isPinned,
   isMuted,
   onTogglePin,
@@ -71,13 +90,14 @@ export default function ChatView({
   setMobileView,
   showToast
 }) {
-  const currentUserId = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
+  const currentUserId =
+    currentUser?.uid || currentUser?.phone || currentUser?.id || "";
 
-  // 1-on-1 direct conversations strictly queried for current user
+  // 1. STRICT ISOLATION CONVERSATIONS (Empty by default for new accounts)
   const [conversations, setConversations] = useState([]);
   const [isLoadingConversations, setIsLoadingConversations] = useState(true);
 
-  // Active chat real-time live messages from Firestore
+  // Active chat real-time live messages
   const [liveMessages, setLiveMessages] = useState([]);
 
   // Search & View filter state
@@ -90,7 +110,7 @@ export default function ChatView({
   const [initialMessageText, setInitialMessageText] = useState("");
   const [isSearchingContact, setIsSearchingContact] = useState(false);
 
-  // Read status tracking per current user
+  // Local Read Tracker per user
   const [readChatIds, setReadChatIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`infinity_read_${currentUserId}`);
@@ -137,14 +157,14 @@ export default function ChatView({
     }
   });
 
-  // Long-press Context Modal state
+  // Long-press Context Modal states (~500ms trigger)
   const [contextItem, setContextItem] = useState(null);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const pressTimer = useRef(null);
   const touchStartPos = useRef({ x: 0, y: 0 });
   const isLongPressTriggered = useRef(false);
 
-  // Active chat thread states
+  // Active chat thread UI states
   const [inputText, setInputText] = useState("");
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showChatOptions, setShowChatOptions] = useState(false);
@@ -152,17 +172,17 @@ export default function ChatView({
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [pinnedMessage, setPinnedMessage] = useState(null);
 
-  // References for scrolling and inputs
+  // References for scrolling and input focus
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
-  // Controlled swipe-to-reply gesture references
+  // Swipe-to-reply gesture tracking
   const msgTouchStartPos = useRef({ x: 0, y: 0, time: 0 });
   const isBubbleSwiping = useRef(false);
   const [bubbleOffsets, setBubbleOffsets] = useState({});
 
-  // Helper to format clean 11-digit mobile numbers
+  // Helper to normalize phone numbers
   const cleanPhone = (val) => {
     if (!val) return "";
     const digits = val.toString().replace(/\D/g, "");
@@ -170,7 +190,7 @@ export default function ChatView({
     return digits.slice(0, 11);
   };
 
-  // Helper to parse timestamps for dynamic sorting
+  // Helper to get timestamp in milliseconds
   const getTimestampMillis = (item) => {
     const raw =
       item.lastMessageTimestamp ||
@@ -185,11 +205,17 @@ export default function ChatView({
     return isNaN(parsed) ? 0 : parsed;
   };
 
-  // --- 1. STRICT 1-ON-1 CHAT ISOLATION & LIVE ON-SNAPSHOT LISTENER ---
-  // Queries Firestore strictly WHERE 'participants' array contains current user ID.
-  // Real-time onSnapshot updates conversations continuously in the background.
+  // --- 1. ABSOLUTE PRIVACY & ISOLATION (NO AUTO-LEAKS FOR NEW USERS) ---
+  // Strict Query: Fetch conversations strictly where `participants` array contains `currentUser.uid`
+  // No global user directory is queried or auto-populated.
+  // When a new user logs in, their list is strictly 0 conversations until someone sends them a message or they add someone.
   useEffect(() => {
-    if (!currentUserId) return;
+    if (!currentUserId) {
+      setConversations([]);
+      setIsLoadingConversations(false);
+      return;
+    }
+
     setIsLoadingConversations(true);
 
     const convCol = collection(db, "conversations");
@@ -204,16 +230,23 @@ export default function ChatView({
       (snapshot) => {
         const list = [];
         snapshot.forEach((docSnap) => {
-          list.push({
-            id: docSnap.id,
-            ...docSnap.data()
-          });
+          const data = docSnap.data();
+          // Filter out if user is in deletedBy
+          const isDeletedByMe =
+            Array.isArray(data.deletedBy) && data.deletedBy.includes(currentUserId);
+
+          if (!isDeletedByMe) {
+            list.push({
+              id: docSnap.id,
+              ...data
+            });
+          }
         });
         setConversations(list);
         setIsLoadingConversations(false);
       },
       (err) => {
-        console.warn("Private conversations live listener error:", err.message);
+        console.warn("Private conversations query listener error:", err.message);
         setIsLoadingConversations(false);
       }
     );
@@ -222,7 +255,6 @@ export default function ChatView({
   }, [currentUserId]);
 
   // --- 2. ACTIVE CHAT REAL-TIME LIVE MESSAGES ON-SNAPSHOT LISTENER ---
-  // Background live sync: messages stream in real-time without requiring any manual drag-to-refresh
   useEffect(() => {
     if (!activeChat?.id) {
       setLiveMessages([]);
@@ -253,14 +285,17 @@ export default function ChatView({
     return () => unsubscribe();
   }, [activeChat?.id]);
 
-  // Combined messages to display (prefers live Firestore messages, fallbacks to prop)
   const displayedMessages = useMemo(() => {
     return liveMessages.length > 0 ? liveMessages : messages;
   }, [liveMessages, messages]);
 
-  // --- 3. LATEST MESSAGE SORTING & UNREAD BADGES ---
+  // --- 3. FILTERED & SORTED CONVERSATIONS ---
   const displayedConversations = useMemo(() => {
-    let list = conversations.filter((item) => !userDeletedIds.includes(item.id));
+    let list = conversations.filter(
+      (item) =>
+        !userDeletedIds.includes(item.id) &&
+        (!item.deletedBy || !item.deletedBy.includes(currentUserId))
+    );
 
     // Filter Active vs Archived
     list = list.filter((item) => {
@@ -268,7 +303,7 @@ export default function ChatView({
       return viewFilter === "archived" ? isArchived : !isArchived;
     });
 
-    // Search filter
+    // Search query filter
     if (searchTerm.trim()) {
       const term = searchTerm.toLowerCase().trim();
       list = list.filter((item) => {
@@ -279,7 +314,7 @@ export default function ChatView({
       });
     }
 
-    // Dynamic sort: Pinned on top, then sorted by lastMessageTimestamp descending (updatedAt)
+    // Dynamic sort: Pinned first, then sorted by lastMessageTimestamp descending
     return list.sort((a, b) => {
       const aPinned = userPinnedIds.includes(a.id);
       const bPinned = userPinnedIds.includes(b.id);
@@ -290,60 +325,80 @@ export default function ChatView({
       const timeB = getTimestampMillis(b);
       return timeB - timeA;
     });
-  }, [conversations, userDeletedIds, userArchivedIds, userPinnedIds, viewFilter, searchTerm]);
+  }, [
+    conversations,
+    userDeletedIds,
+    userArchivedIds,
+    userPinnedIds,
+    currentUserId,
+    viewFilter,
+    searchTerm
+  ]);
 
-  // Unread count for current user
+  // --- 4. REAL-TIME UNREAD MESSAGE COUNTER BADGES ---
+  // Calculates unread messages count where senderId !== currentUser.uid and read === false
   const getUnreadCount = (item) => {
     if (activeChat?.id === item.id) return 0;
     if (readChatIds.includes(item.id)) return 0;
 
+    // Direct user unread map in conversation
     if (item.unreadCount && typeof item.unreadCount === "object") {
       const count = item.unreadCount[currentUserId];
       if (typeof count === "number") return count;
     }
 
-    if (typeof item.unreadCount === "number" && item.lastSender !== currentUserId) {
+    // Single scalar count with senderId check
+    if (
+      typeof item.unreadCount === "number" &&
+      item.lastSenderId !== currentUserId &&
+      item.lastSender !== currentUserId
+    ) {
       return item.unreadCount;
     }
 
     return 0;
   };
 
-  // --- 4. OPEN CHAT & CLEAR UNREAD BADGE ---
+  // --- 5. OPEN CHAT & CLEAR UNREAD BADGES ---
   const handleOpenConversation = async (item) => {
     if (isLongPressTriggered.current) {
       isLongPressTriggered.current = false;
       return;
     }
 
-    // Mark as read locally
+    // Mark as read locally immediately
     if (!readChatIds.includes(item.id)) {
       const updated = [...readChatIds, item.id];
       setReadChatIds(updated);
       try {
-        localStorage.setItem(`infinity_read_${currentUserId}`, JSON.stringify(updated));
+        localStorage.setItem(
+          `infinity_read_${currentUserId}`,
+          JSON.stringify(updated)
+        );
       } catch (e) {}
     }
 
-    // Clear unread count in Firestore conversation doc
-    if (item.unreadCount && item.unreadCount[currentUserId]) {
-      try {
-        const convDocRef = doc(db, "conversations", item.id);
-        await updateDoc(convDocRef, {
-          [`unreadCount.${currentUserId}`]: 0
-        });
-      } catch (err) {}
-    }
+    // Update unread count in Firestore conversation doc
+    try {
+      const convDocRef = doc(db, "conversations", item.id);
+      await updateDoc(convDocRef, {
+        [`unreadCount.${currentUserId}`]: 0
+      });
+    } catch (err) {}
 
     setActiveChat(item);
     if (setMobileView) setMobileView("chat");
   };
 
-  // --- 5. LONG-PRESS CONTEXT MODAL HANDLERS (~500ms) ---
+  // --- 6. WORKING LONG-PRESS MENU (PIN, MUTE, ARCHIVE, DELETE) ---
+  // Long-pressing (~500ms) a chat item opens context modal
   const handleRowTouchStart = (e, item) => {
     isLongPressTriggered.current = false;
     if (e.touches && e.touches[0]) {
-      touchStartPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      touchStartPos.current = {
+        x: e.touches[0].clientX,
+        y: e.touches[0].clientY
+      };
     }
 
     pressTimer.current = setTimeout(() => {
@@ -380,14 +435,17 @@ export default function ChatView({
     let nextPinned;
     if (isCurrentlyPinned) {
       nextPinned = userPinnedIds.filter((itemId) => itemId !== id);
-      if (showToast) showToast("চ্যাট আনপিন করা হয়েছে");
+      if (showToast) showToast("Chat unpinned");
     } else {
       nextPinned = [...userPinnedIds, id];
-      if (showToast) showToast("চ্যাট উপরে পিন করা হয়েছে");
+      if (showToast) showToast("Chat pinned to top");
     }
     setUserPinnedIds(nextPinned);
     try {
-      localStorage.setItem(`infinity_pinned_${currentUserId}`, JSON.stringify(nextPinned));
+      localStorage.setItem(
+        `infinity_pinned_${currentUserId}`,
+        JSON.stringify(nextPinned)
+      );
     } catch (e) {}
     setContextItem(null);
   };
@@ -397,14 +455,17 @@ export default function ChatView({
     let nextMuted;
     if (isCurrentlyMuted) {
       nextMuted = userMutedIds.filter((itemId) => itemId !== id);
-      if (showToast) showToast("নোটিফিকেশন আনমিউট করা হয়েছে");
+      if (showToast) showToast("Notifications unmuted");
     } else {
       nextMuted = [...userMutedIds, id];
-      if (showToast) showToast("নোটিফিকেশন মিউট করা হয়েছে");
+      if (showToast) showToast("Notifications muted");
     }
     setUserMutedIds(nextMuted);
     try {
-      localStorage.setItem(`infinity_muted_${currentUserId}`, JSON.stringify(nextMuted));
+      localStorage.setItem(
+        `infinity_muted_${currentUserId}`,
+        JSON.stringify(nextMuted)
+      );
     } catch (e) {}
     setContextItem(null);
   };
@@ -414,51 +475,69 @@ export default function ChatView({
     let nextList;
     if (isCurrentlyArchived) {
       nextList = userArchivedIds.filter((item) => item !== id);
-      if (showToast) showToast("চ্যাট আনআর্কাইভ করা হয়েছে");
+      if (showToast) showToast("Chat unarchived");
     } else {
       nextList = [...userArchivedIds, id];
-      if (showToast) showToast("চ্যাট আর্কাইভে সরানো হয়েছে");
+      if (showToast) showToast("Chat archived");
       if (activeChat?.id === id) setActiveChat(null);
     }
     setUserArchivedIds(nextList);
     try {
-      localStorage.setItem(`infinity_archived_${currentUserId}`, JSON.stringify(nextList));
+      localStorage.setItem(
+        `infinity_archived_${currentUserId}`,
+        JSON.stringify(nextList)
+      );
     } catch (e) {}
     setContextItem(null);
   };
 
-  const handleExecuteDeleteChat = () => {
+  // DELETE LOGIC: Actively updates deletedBy in Firestore & removes permanently for current user
+  const handleExecuteDeleteChat = async () => {
     if (!contextItem) return;
     const targetId = contextItem.id;
+
+    // Immediately remove locally
     const nextDeleted = [...userDeletedIds, targetId];
     setUserDeletedIds(nextDeleted);
-
     try {
-      localStorage.setItem(`infinity_deleted_${currentUserId}`, JSON.stringify(nextDeleted));
+      localStorage.setItem(
+        `infinity_deleted_${currentUserId}`,
+        JSON.stringify(nextDeleted)
+      );
     } catch (e) {}
+
+    // Update Firestore reference: append to deletedBy array
+    try {
+      const convDocRef = doc(db, "conversations", targetId);
+      await updateDoc(convDocRef, {
+        deletedBy: arrayUnion(currentUserId)
+      });
+    } catch (err) {
+      console.warn("Could not update deletedBy on Firestore:", err.message);
+    }
 
     if (activeChat?.id === targetId) {
       setActiveChat(null);
       if (setMobileView) setMobileView("list");
     }
 
-    if (showToast) showToast("চ্যাট তালিকা থেকে মুছে ফেলা হয়েছে");
+    if (showToast) showToast("Chat permanently deleted from your view");
     setShowConfirmDelete(false);
     setContextItem(null);
   };
 
-  // --- 6. START NEW 1-ON-1 PHONE CHAT ---
+  // --- 7. DYNAMIC ADDITION: START CHAT BY SPECIFIC PHONE NUMBER ---
   const handleStartNewChat = async (e) => {
     e.preventDefault();
     const phone = cleanPhone(contactPhoneInput);
 
     if (phone.length !== 11) {
-      if (showToast) showToast("সঠিক ১১ ডিজিটের মোবাইল নম্বর লিখুন");
+      if (showToast) showToast("Please enter a valid 11-digit phone number");
       return;
     }
 
     if (phone === currentUserId) {
-      if (showToast) showToast("নিজের সাথে সরাসরি চ্যাট সম্ভব নয়");
+      if (showToast) showToast("Cannot start a chat with your own number");
       return;
     }
 
@@ -476,14 +555,15 @@ export default function ChatView({
         id: roomId,
         name: targetData.name || phone,
         phone: phone,
-        avatar: targetData.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${phone}`,
+        avatar:
+          targetData.avatar ||
+          `https://api.dicebear.com/7.x/identicon/svg?seed=${phone}`,
         participants: [currentUserId, phone],
-        participantDetails: {
-          [currentUserId]: { name: currentUser?.name || currentUserId, phone: currentUserId },
-          [phone]: { name: targetData.name || phone, phone: phone }
-        },
-        lastMessage: initialMessageText.trim() || "Started private conversation",
+        deletedBy: [],
+        lastMessage:
+          initialMessageText.trim() || "Started private conversation",
         lastMessageTimestamp: Date.now(),
+        lastSenderId: currentUserId,
         updatedAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         unreadCount: {
@@ -497,12 +577,14 @@ export default function ChatView({
       if (initialMessageText.trim()) {
         const msgId = Date.now().toString();
         await setDoc(doc(db, "rooms", roomId, "messages", msgId), {
+          senderId: currentUserId,
           senderPhone: currentUserId,
           senderName: currentUser?.name || currentUserId,
           recipientPhone: phone,
           content: initialMessageText.trim(),
           type: "text",
           status: "sent",
+          read: false,
           createdAt: new Date().toISOString()
         });
       }
@@ -511,16 +593,16 @@ export default function ChatView({
       setContactPhoneInput("");
       setInitialMessageText("");
       handleOpenConversation(conversationPayload);
-      if (showToast) showToast(`${targetData.name || phone}-এর সাথে চ্যাট শুরু হয়েছে`);
+      if (showToast) showToast(`Chat started with ${targetData.name || phone}`);
     } catch (err) {
       console.error("Error creating conversation:", err);
-      if (showToast) showToast("ত্রুটি: " + err.message);
+      if (showToast) showToast("Error: " + err.message);
     } finally {
       setIsSearchingContact(false);
     }
   };
 
-  // --- 7. AUTO-SCROLL TO BOTTOM IN ACTIVE CHAT ---
+  // --- 8. SMOOTH SCROLL TO BOTTOM ---
   useEffect(() => {
     if (activeChat && messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "auto" });
@@ -540,7 +622,7 @@ export default function ChatView({
     }
   }, [displayedMessages.length]);
 
-  // Focus input automatically whenever replyingTo changes
+  // Focus input automatically on reply
   useEffect(() => {
     if (replyingTo && inputRef.current) {
       inputRef.current.focus();
@@ -570,31 +652,34 @@ export default function ChatView({
 
     setReplyingTo(null);
 
-    // Call parent handler or write directly to Firestore
     if (onSendMessage) {
       onSendMessage(payload);
     } else {
       try {
         const msgId = Date.now().toString();
         const roomId = activeChat.id;
-        const otherParticipant = (activeChat.participants || []).find((p) => p !== currentUserId) || "";
+        const otherParticipant =
+          (activeChat.participants || []).find((p) => p !== currentUserId) || "";
 
         await setDoc(doc(db, "rooms", roomId, "messages", msgId), {
+          senderId: currentUserId,
           senderPhone: currentUserId,
           senderName: currentUser?.name || currentUserId,
           recipientPhone: otherParticipant,
           content: textToSend,
           type: "text",
           status: "sent",
+          read: false,
           createdAt: new Date().toISOString()
         });
 
         await updateDoc(doc(db, "conversations", roomId), {
           lastMessage: textToSend,
           lastMessageTimestamp: Date.now(),
+          lastSenderId: currentUserId,
           updatedAt: new Date().toISOString(),
-          lastSender: currentUserId,
-          [`unreadCount.${otherParticipant}`]: (activeChat.unreadCount?.[otherParticipant] || 0) + 1
+          [`unreadCount.${otherParticipant}`]:
+            (activeChat.unreadCount?.[otherParticipant] || 0) + 1
         });
       } catch (err) {
         console.error("Direct send error:", err);
@@ -611,7 +696,11 @@ export default function ChatView({
   // Controlled bubble swipe-to-reply gesture handlers
   const handleBubbleTouchStart = (e, msg) => {
     const touch = e.touches[0];
-    msgTouchStartPos.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+    msgTouchStartPos.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      time: Date.now()
+    };
     isBubbleSwiping.current = false;
   };
 
@@ -661,10 +750,10 @@ export default function ChatView({
         overflow: "hidden",
         position: "relative",
         backgroundColor: THEME.bg,
-        overscrollBehaviorY: "contain" // COMPLETELY DISABLES drag-down / pull-to-refresh at screen root
+        overscrollBehaviorY: "contain" // 4. COMPLETELY DISABLES ALL DRAG-TO-REFRESH
       }}
     >
-      {/* ================= LEFT PANE: 1-ON-1 DIRECT CONTACT & CHAT LIST ================= */}
+      {/* ================= LEFT PANE: PRIVATE 1-ON-1 CONVERSATIONS ================= */}
       <div
         style={{
           width: "100%",
@@ -675,7 +764,8 @@ export default function ChatView({
           backgroundColor: THEME.sidebar,
           height: "100%",
           overflow: "hidden",
-          position: "relative"
+          position: "relative",
+          overscrollBehaviorY: "contain"
         }}
       >
         {/* Header Bar */}
@@ -693,21 +783,30 @@ export default function ChatView({
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <Users size={18} color={THEME.primary || "#22c55e"} />
             <span style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>
-              {viewFilter === "archived" ? "আর্কাইভ করা চ্যাট" : "ব্যক্তিগত চ্যাট"}
+              {viewFilter === "archived" ? "Archived Chats" : "Private Chats"}
             </span>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <button
-              onClick={() => setViewFilter(viewFilter === "active" ? "archived" : "active")}
-              title={viewFilter === "active" ? "আর্কাইভ দেখুন" : "সক্রিয় চ্যাট দেখুন"}
+              onClick={() =>
+                setViewFilter(viewFilter === "active" ? "archived" : "active")
+              }
+              title={viewFilter === "active" ? "View Archive" : "View Active Chats"}
               style={{
                 ...styles.cleanBtn,
-                color: viewFilter === "archived" ? (THEME.primary || "#22c55e") : THEME.textMuted,
+                color:
+                  viewFilter === "archived"
+                    ? THEME.primary || "#22c55e"
+                    : THEME.textMuted,
                 padding: "6px"
               }}
             >
-              {viewFilter === "archived" ? <ArchiveRestore size={18} /> : <Archive size={18} />}
+              {viewFilter === "archived" ? (
+                <ArchiveRestore size={18} />
+              ) : (
+                <Archive size={18} />
+              )}
             </button>
 
             <button
@@ -725,14 +824,14 @@ export default function ChatView({
                 color: "#fff",
                 boxShadow: "0 2px 6px rgba(0,0,0,0.3)"
               }}
-              title="নতুন চ্যাট"
+              title="Start New Direct Chat"
             >
               <MessageSquarePlus size={16} />
             </button>
           </div>
         </div>
 
-        {/* Direct Phone Number Search Bar */}
+        {/* Search Bar */}
         <div
           style={{
             padding: "8px 12px",
@@ -754,7 +853,7 @@ export default function ChatView({
             <Search size={16} color={THEME.textMuted} />
             <input
               type="text"
-              placeholder="চ্যাট বা মোবাইল নম্বর খুঁজুন..."
+              placeholder="Search chat or phone..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               style={{
@@ -771,7 +870,7 @@ export default function ChatView({
           </div>
         </div>
 
-        {/* Smooth Scroll Contact Container (Dual Scrolling, No Page Reload) */}
+        {/* Conversation List Scroll Container (overscroll-behavior-y: contain) */}
         <div
           style={{
             flex: 1,
@@ -779,25 +878,51 @@ export default function ChatView({
             overflowY: "auto",
             overflowX: "hidden",
             WebkitOverflowScrolling: "touch",
-            overscrollBehaviorY: "contain", // PREVENTS pull-to-refresh on conversation list
+            overscrollBehaviorY: "contain",
             touchAction: "pan-y",
             padding: "6px"
           }}
         >
           {isLoadingConversations ? (
-            <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted, fontSize: "12px" }}>
-              চ্যাট তালিকা লোড হচ্ছে...
+            <div
+              style={{
+                textAlign: "center",
+                padding: "40px 16px",
+                color: THEME.textMuted,
+                fontSize: "12px"
+              }}
+            >
+              Loading private conversations...
             </div>
           ) : displayedConversations.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted }}>
-              <Users size={36} style={{ margin: "0 auto 10px", opacity: 0.4 }} />
-              <div style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
-                {viewFilter === "archived" ? "কোনো আর্কাইভ চ্যাট নেই" : "কোনো ব্যক্তিগত চ্যাট পাওয়া যায়নি"}
-              </div>
-              <div style={{ fontSize: "11px", marginTop: "6px", lineHeight: "1.5" }}>
+            /* EMPTY STATE FOR NEW USERS: Completely empty (0 conversations) */
+            <div
+              style={{
+                textAlign: "center",
+                padding: "48px 16px",
+                color: THEME.textMuted
+              }}
+            >
+              <Users size={38} style={{ margin: "0 auto 10px", opacity: 0.35 }} />
+              <div
+                style={{ fontSize: "14px", fontWeight: "700", color: THEME.text }}
+              >
                 {viewFilter === "archived"
-                  ? "চ্যাট চেপে ধরে রাখলে আর্কাইভ অপশন প্রদর্শিত হবে।"
-                  : "নতুন কারো সাথে চ্যাট শুরু করতে '+' বোতামে চাপ দিন বা নম্বর খুঁজুন।"}
+                  ? "No archived chats"
+                  : "No conversations yet"}
+              </div>
+              <div
+                style={{
+                  fontSize: "12px",
+                  marginTop: "6px",
+                  lineHeight: "1.5",
+                  maxWidth: "240px",
+                  marginInline: "auto"
+                }}
+              >
+                {viewFilter === "archived"
+                  ? "Long-press a conversation to archive it."
+                  : "Your chat list is strictly private. Tap '+' to start a direct chat with any phone number."}
               </div>
             </div>
           ) : (
@@ -807,7 +932,9 @@ export default function ChatView({
               const isMutedItem = userMutedIds.includes(item.id);
               const unreadCount = getUnreadCount(item);
               const displayName = item.name || item.phone || "Direct Chat";
-              const avatarUrl = item.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${item.id}`;
+              const avatarUrl =
+                item.avatar ||
+                `https://api.dicebear.com/7.x/identicon/svg?seed=${item.id}`;
 
               return (
                 <div
@@ -825,8 +952,12 @@ export default function ChatView({
                   }}
                   style={{
                     ...styles.contactItem,
-                    backgroundColor: isSelected ? THEME.cardHover : "transparent",
-                    borderLeft: isSelected ? `3px solid ${THEME.primary || "#22c55e"}` : "3px solid transparent",
+                    backgroundColor: isSelected
+                      ? THEME.cardHover
+                      : "transparent",
+                    borderLeft: isSelected
+                      ? `3px solid ${THEME.primary || "#22c55e"}`
+                      : "3px solid transparent",
                     userSelect: "none",
                     WebkitUserSelect: "none",
                     position: "relative",
@@ -839,10 +970,23 @@ export default function ChatView({
                   <img
                     src={avatarUrl}
                     alt=""
-                    style={{ width: "42px", height: "42px", borderRadius: "50%", objectFit: "cover", flexShrink: 0 }}
+                    style={{
+                      width: "42px",
+                      height: "42px",
+                      borderRadius: "50%",
+                      objectFit: "cover",
+                      flexShrink: 0
+                    }}
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2px" }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: "2px"
+                      }}
+                    >
                       <span
                         style={{
                           fontWeight: unreadCount > 0 ? "800" : "700",
@@ -855,26 +999,54 @@ export default function ChatView({
                       >
                         {displayName}
                       </span>
-                      <div style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
-                        {isPinnedItem && <Pin size={12} color={THEME.primary || "#22c55e"} />}
-                        {isMutedItem && <BellOff size={12} color={THEME.danger} />}
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "4px",
+                          flexShrink: 0
+                        }}
+                      >
+                        {isPinnedItem && (
+                          <Pin size={12} color={THEME.primary || "#22c55e"} />
+                        )}
+                        {isMutedItem && (
+                          <BellOff size={12} color={THEME.danger} />
+                        )}
                         <span
                           style={{
                             fontSize: "10px",
-                            color: unreadCount > 0 ? (THEME.primary || "#22c55e") : THEME.textMuted,
+                            color:
+                              unreadCount > 0
+                                ? THEME.primary || "#22c55e"
+                                : THEME.textMuted,
                             fontWeight: unreadCount > 0 ? "700" : "normal"
                           }}
                         >
                           {item.lastMessageTimestamp
-                            ? new Date(getTimestampMillis(item)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                            ? new Date(
+                                getTimestampMillis(item)
+                              ).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit"
+                              })
                             : item.updatedAt
-                            ? new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                            ? new Date(item.updatedAt).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit"
+                              })
                             : ""}
                         </span>
                       </div>
                     </div>
 
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center"
+                      }}
+                    >
                       <span
                         style={{
                           fontSize: "11px",
@@ -887,10 +1059,10 @@ export default function ChatView({
                           marginRight: "6px"
                         }}
                       >
-                        {item.lastMessage || "বার্তা শুরু করুন"}
+                        {item.lastMessage || "Tap to message"}
                       </span>
 
-                      {/* Green Circular Unread Badge */}
+                      {/* 3. REAL-TIME UNREAD MESSAGE COUNTER BADGE */}
                       {unreadCount > 0 && (
                         <span
                           style={{
@@ -926,7 +1098,7 @@ export default function ChatView({
                       padding: "6px",
                       flexShrink: 0
                     }}
-                    title="অপশন"
+                    title="Options"
                   >
                     <MoreVertical size={16} />
                   </button>
@@ -956,7 +1128,7 @@ export default function ChatView({
             cursor: "pointer",
             zIndex: 10
           }}
-          title="নতুন চ্যাট শুরু করুন"
+          title="New Direct Chat"
         >
           <MessageSquarePlus size={22} />
         </button>
@@ -972,10 +1144,11 @@ export default function ChatView({
             backgroundColor: THEME.bg,
             height: "100%",
             overflow: "hidden",
-            position: "relative"
+            position: "relative",
+            overscrollBehaviorY: "contain"
           }}
         >
-          {/* Active Chat Header Bar */}
+          {/* Active Chat Header */}
           <div
             style={{
               ...styles.headerBar,
@@ -988,25 +1161,52 @@ export default function ChatView({
               zIndex: 10
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                flex: 1,
+                minWidth: 0
+              }}
+            >
               <button
                 onClick={() => {
                   setActiveChat(null);
                   if (setMobileView) setMobileView("list");
                 }}
-                style={{ ...styles.cleanBtn, color: THEME.text, display: "flex", alignItems: "center" }}
+                style={{
+                  ...styles.cleanBtn,
+                  color: THEME.text,
+                  display: "flex",
+                  alignItems: "center"
+                }}
               >
                 <ArrowLeft size={18} />
               </button>
 
               <div
                 onClick={() => openProfile && openProfile(activeChat)}
-                style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", minWidth: 0 }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  cursor: "pointer",
+                  minWidth: 0
+                }}
               >
                 <img
-                  src={activeChat.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${activeChat.id}`}
+                  src={
+                    activeChat.avatar ||
+                    `https://api.dicebear.com/7.x/identicon/svg?seed=${activeChat.id}`
+                  }
                   alt=""
-                  style={{ width: "38px", height: "38px", borderRadius: "50%", objectFit: "cover" }}
+                  style={{
+                    width: "38px",
+                    height: "38px",
+                    borderRadius: "50%",
+                    objectFit: "cover"
+                  }}
                 />
                 <div style={{ minWidth: 0 }}>
                   <div
@@ -1021,8 +1221,19 @@ export default function ChatView({
                   >
                     {activeChat.name || activeChat.phone}
                   </div>
-                  <div style={{ fontSize: "11px", color: peerPresence.isOnline ? (THEME.primary || "#22c55e") : THEME.textMuted }}>
-                    {peerPresence.isOnline ? "Online" : peerPresence.lastSeen ? `Last seen ${peerPresence.lastSeen}` : activeChat.phone || ""}
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      color: peerPresence.isOnline
+                        ? THEME.primary || "#22c55e"
+                        : THEME.textMuted
+                    }}
+                  >
+                    {peerPresence.isOnline
+                      ? "Online"
+                      : peerPresence.lastSeen
+                      ? `Last seen ${peerPresence.lastSeen}`
+                      : activeChat.phone || ""}
                   </div>
                 </div>
               </div>
@@ -1086,8 +1297,19 @@ export default function ChatView({
                     textAlign: "left"
                   }}
                 >
-                  <Pin size={15} color={userPinnedIds.includes(activeChat.id) ? THEME.primary : THEME.textMuted} />
-                  <span>{userPinnedIds.includes(activeChat.id) ? "Unpin Chat" : "Pin Chat"}</span>
+                  <Pin
+                    size={15}
+                    color={
+                      userPinnedIds.includes(activeChat.id)
+                        ? THEME.primary
+                        : THEME.textMuted
+                    }
+                  />
+                  <span>
+                    {userPinnedIds.includes(activeChat.id)
+                      ? "Unpin Chat"
+                      : "Pin Chat"}
+                  </span>
                 </button>
 
                 <button
@@ -1109,14 +1331,25 @@ export default function ChatView({
                     textAlign: "left"
                   }}
                 >
-                  <BellOff size={15} color={userMutedIds.includes(activeChat.id) ? THEME.danger : THEME.textMuted} />
-                  <span>{userMutedIds.includes(activeChat.id) ? "Unmute Notifications" : "Mute Notifications"}</span>
+                  <BellOff
+                    size={15}
+                    color={
+                      userMutedIds.includes(activeChat.id)
+                        ? THEME.danger
+                        : THEME.textMuted
+                    }
+                  />
+                  <span>
+                    {userMutedIds.includes(activeChat.id)
+                      ? "Unmute Notifications"
+                      : "Mute Notifications"}
+                  </span>
                 </button>
               </div>
             )}
           </div>
 
-          {/* Messages Scroll Area (Dual Direction Smooth Scrolling, No Drag-To-Refresh) */}
+          {/* Messages Scroll Area (overscroll-behavior-y: contain) */}
           <div
             ref={messagesContainerRef}
             style={{
@@ -1125,7 +1358,7 @@ export default function ChatView({
               overflowY: "auto",
               overflowX: "hidden",
               WebkitOverflowScrolling: "touch",
-              overscrollBehaviorY: "contain", // PREVENTS browser reload / pull-to-refresh
+              overscrollBehaviorY: "contain",
               touchAction: "pan-y",
               padding: "14px 16px",
               display: "flex",
@@ -1134,7 +1367,13 @@ export default function ChatView({
             }}
           >
             {displayedMessages.length === 0 ? (
-              <div style={{ margin: "auto", textAlign: "center", color: THEME.textMuted }}>
+              <div
+                style={{
+                  margin: "auto",
+                  textAlign: "center",
+                  color: THEME.textMuted
+                }}
+              >
                 <div
                   style={{
                     display: "inline-block",
@@ -1145,12 +1384,14 @@ export default function ChatView({
                     border: `1px solid ${THEME.border}`
                   }}
                 >
-                  🔒 End-to-end direct phone messaging. Live real-time updates enabled.
+                  🔒 Private 1-on-1 direct phone messaging. Real-time background sync.
                 </div>
               </div>
             ) : (
               displayedMessages.map((msg) => {
-                const isMe = msg.senderPhone === currentUserId || msg.senderId === currentUserId;
+                const isMe =
+                  msg.senderId === currentUserId ||
+                  msg.senderPhone === currentUserId;
                 const isDeleted = msg.type === "deleted";
                 const offset = bubbleOffsets[msg.id] || 0;
 
@@ -1166,7 +1407,7 @@ export default function ChatView({
                       position: "relative"
                     }}
                   >
-                    {/* Swipe indicator */}
+                    {/* Swipe reply indicator */}
                     {offset > 8 && (
                       <div
                         style={{
@@ -1192,28 +1433,42 @@ export default function ChatView({
                         borderTopRightRadius: isMe ? "2px" : "12px",
                         borderTopLeftRadius: !isMe ? "2px" : "12px",
                         padding: "8px 12px",
-                        backgroundColor: isMe ? (THEME.primary || "#22c55e") : THEME.card,
+                        backgroundColor: isMe
+                          ? THEME.primary || "#22c55e"
+                          : THEME.card,
                         color: "#fff",
                         boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
                         position: "relative",
                         wordBreak: "break-word",
                         transform: `translateX(${offset}px)`,
-                        transition: offset === 0 ? "transform 0.18s ease" : "none"
+                        transition:
+                          offset === 0 ? "transform 0.18s ease" : "none"
                       }}
                     >
                       {msg.replyTo && !isDeleted && (
                         <div
                           style={{
                             backgroundColor: "rgba(0,0,0,0.2)",
-                            borderLeft: `3px solid ${isMe ? "#fff" : (THEME.primary || "#22c55e")}`,
+                            borderLeft: `3px solid ${
+                              isMe ? "#fff" : THEME.primary || "#22c55e"
+                            }`,
                             borderRadius: "4px",
                             padding: "4px 8px",
                             marginBottom: "6px",
                             fontSize: "11px"
                           }}
                         >
-                          <div style={{ fontWeight: "700", opacity: 0.9 }}>{msg.replyTo.senderName || "User"}</div>
-                          <div style={{ opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <div style={{ fontWeight: "700", opacity: 0.9 }}>
+                            {msg.replyTo.senderName || "User"}
+                          </div>
+                          <div
+                            style={{
+                              opacity: 0.8,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap"
+                            }}
+                          >
                             {msg.replyTo.content}
                           </div>
                         </div>
@@ -1235,11 +1490,20 @@ export default function ChatView({
                         }}
                       >
                         <span>
-                          {msg.createdAt ? new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                          {msg.createdAt
+                            ? new Date(msg.createdAt).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit"
+                              })
+                            : ""}
                         </span>
                         {isMe && !isDeleted && (
                           <span>
-                            {msg.status === "read" ? <CheckCheck size={13} color="#53bdeb" /> : <Check size={13} />}
+                            {msg.read ? (
+                              <CheckCheck size={13} color="#53bdeb" />
+                            ) : (
+                              <Check size={13} />
+                            )}
                           </span>
                         )}
                       </div>
@@ -1263,14 +1527,42 @@ export default function ChatView({
                 justifyContent: "space-between"
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text, minWidth: 0 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  fontSize: "12px",
+                  color: THEME.text,
+                  minWidth: 0
+                }}
+              >
                 <Reply size={15} color={THEME.primary || "#22c55e"} />
-                <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  <span style={{ color: THEME.primary || "#22c55e", fontWeight: "700" }}>{replyingTo.senderName}: </span>
-                  <span style={{ color: THEME.textMuted }}>{replyingTo.content}</span>
+                <div
+                  style={{
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap"
+                  }}
+                >
+                  <span
+                    style={{
+                      color: THEME.primary || "#22c55e",
+                      fontWeight: "700"
+                    }}
+                  >
+                    {replyingTo.senderName}:{" "}
+                  </span>
+                  <span style={{ color: THEME.textMuted }}>
+                    {replyingTo.content}
+                  </span>
                 </div>
               </div>
-              <button onClick={() => setReplyingTo(null)} style={styles.cleanBtn}>
+              <button
+                onClick={() => setReplyingTo(null)}
+                style={styles.cleanBtn}
+              >
                 <X size={16} color={THEME.textMuted} />
               </button>
             </div>
@@ -1351,9 +1643,20 @@ export default function ChatView({
           }}
         >
           <Users size={56} style={{ opacity: 0.3 }} />
-          <div style={{ fontSize: "16px", fontWeight: "600", color: THEME.text }}>ব্যক্তিগত ১-অন-১ চ্যাট</div>
-          <p style={{ fontSize: "12px", maxWidth: "320px", textAlign: "center", lineHeight: "1.5" }}>
-            একটি কথোপকথন নির্বাচন করুন অথবা পরিচিত ব্যক্তির নম্বর দিয়ে সরাসরি ব্যক্তিগত চ্যাট শুরু করুন।
+          <div
+            style={{ fontSize: "16px", fontWeight: "600", color: THEME.text }}
+          >
+            Private 1-on-1 Messages
+          </div>
+          <p
+            style={{
+              fontSize: "12px",
+              maxWidth: "320px",
+              textAlign: "center",
+              lineHeight: "1.5"
+            }}
+          >
+            Select a conversation or add a contact by phone number to begin.
           </p>
         </div>
       )}
@@ -1361,31 +1664,71 @@ export default function ChatView({
       {/* --- NEW 1-ON-1 PHONE CHAT MODAL --- */}
       {showNewChatModal && (
         <div style={styles.modalOverlay}>
-          <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border }}>
-            <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
-              <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text, display: "flex", alignItems: "center", gap: "8px" }}>
+          <div
+            style={{
+              ...styles.modalCard,
+              backgroundColor: THEME.sidebar,
+              borderColor: THEME.border
+            }}
+          >
+            <div
+              style={{
+                ...styles.modalHeader,
+                backgroundColor: THEME.header,
+                borderColor: THEME.border
+              }}
+            >
+              <div
+                style={{
+                  fontWeight: "700",
+                  fontSize: "15px",
+                  color: THEME.text,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px"
+                }}
+              >
                 <MessageSquarePlus size={18} color={THEME.primary || "#22c55e"} />
-                <span>নতুন ব্যক্তিগত চ্যাট</span>
+                <span>New Direct Message</span>
               </div>
-              <button onClick={() => setShowNewChatModal(false)} style={styles.cleanBtn}>
+              <button
+                onClick={() => setShowNewChatModal(false)}
+                style={styles.cleanBtn}
+              >
                 <X size={18} color={THEME.text} />
               </button>
             </div>
 
-            <form onSubmit={handleStartNewChat} style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
+            <form
+              onSubmit={handleStartNewChat}
+              style={{
+                padding: "16px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "12px"
+              }}
+            >
               <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                পরিচিত ব্যক্তির ১১ ডিজিটের মোবাইল নম্বর লিখুন। আপনার চ্যাট তালিকা সম্পূর্ণ ব্যক্তিগত ও সুরক্ষিত থাকবে।
+                Enter the recipient's 11-digit mobile number. Your conversation will be strictly 1-on-1 and private.
               </div>
 
               <div>
-                <label style={styles.label}>১১ ডিজিট মোবাইল নম্বর</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                <label style={styles.label}>11-digit Mobile Number</label>
+                <div
+                  style={{
+                    ...styles.inputWrap,
+                    backgroundColor: THEME.card,
+                    borderColor: THEME.border
+                  }}
+                >
                   <input
                     type="tel"
                     placeholder="01712345678"
                     maxLength={11}
                     value={contactPhoneInput}
-                    onChange={(e) => setContactPhoneInput(cleanPhone(e.target.value))}
+                    onChange={(e) =>
+                      setContactPhoneInput(cleanPhone(e.target.value))
+                    }
                     style={{ ...styles.bareInput, color: THEME.text }}
                     autoFocus
                     required
@@ -1394,11 +1737,17 @@ export default function ChatView({
               </div>
 
               <div>
-                <label style={styles.label}>প্রথম বার্তা (ঐচ্ছিক)</label>
-                <div style={{ ...styles.inputWrap, backgroundColor: THEME.card, borderColor: THEME.border }}>
+                <label style={styles.label}>Initial Message (Optional)</label>
+                <div
+                  style={{
+                    ...styles.inputWrap,
+                    backgroundColor: THEME.card,
+                    borderColor: THEME.border
+                  }}
+                >
                   <input
                     type="text"
-                    placeholder="কেমন আছেন?"
+                    placeholder="Hello there!"
                     value={initialMessageText}
                     onChange={(e) => setInitialMessageText(e.target.value)}
                     style={{ ...styles.bareInput, color: THEME.text }}
@@ -1408,22 +1757,29 @@ export default function ChatView({
 
               <button
                 type="submit"
-                disabled={isSearchingContact || cleanPhone(contactPhoneInput).length !== 11}
+                disabled={
+                  isSearchingContact ||
+                  cleanPhone(contactPhoneInput).length !== 11
+                }
                 style={{
                   ...styles.primaryBtn,
                   backgroundColor: THEME.primary || "#22c55e",
                   marginTop: "6px",
-                  opacity: isSearchingContact || cleanPhone(contactPhoneInput).length !== 11 ? 0.6 : 1
+                  opacity:
+                    isSearchingContact ||
+                    cleanPhone(contactPhoneInput).length !== 11
+                      ? 0.6
+                      : 1
                 }}
               >
-                {isSearchingContact ? "সন্ধান করা হচ্ছে..." : "চ্যাট শুরু করুন"}
+                {isSearchingContact ? "Connecting..." : "Start Chat"}
               </button>
             </form>
           </div>
         </div>
       )}
 
-      {/* --- LONG-PRESS CONTEXT ACTION MODAL / SHEET --- */}
+      {/* --- 2. WORKING LONG-PRESS MENU (PIN, MUTE, ARCHIVE, DELETE) --- */}
       {contextItem && (
         <div
           onClick={() => {
@@ -1454,17 +1810,36 @@ export default function ChatView({
               margin: "0 auto"
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", paddingBottom: "8px", borderBottom: `1px solid ${THEME.border}` }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                paddingBottom: "8px",
+                borderBottom: `1px solid ${THEME.border}`
+              }}
+            >
               <img
-                src={contextItem.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${contextItem.id}`}
+                src={
+                  contextItem.avatar ||
+                  `https://api.dicebear.com/7.x/identicon/svg?seed=${contextItem.id}`
+                }
                 alt=""
                 style={{ width: "38px", height: "38px", borderRadius: "50%" }}
               />
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                <div
+                  style={{
+                    fontWeight: "700",
+                    fontSize: "14px",
+                    color: THEME.text
+                  }}
+                >
                   {contextItem.name || contextItem.phone}
                 </div>
-                <div style={{ fontSize: "11px", color: THEME.textMuted }}>চ্যাট পরিচালনা অপশন</div>
+                <div style={{ fontSize: "11px", color: THEME.textMuted }}>
+                  Chat Management
+                </div>
               </div>
               <button
                 onClick={() => {
@@ -1478,31 +1853,69 @@ export default function ChatView({
             </div>
 
             {showConfirmDelete ? (
-              <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: "12px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "8px", color: THEME.danger, fontSize: "13px", fontWeight: "600" }}>
+              <div
+                style={{
+                  padding: "12px 0",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "12px"
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    color: THEME.danger,
+                    fontSize: "13px",
+                    fontWeight: "600"
+                  }}
+                >
                   <AlertTriangle size={18} />
-                  <span>আপনি কি এই চ্যাটটি মুছে ফেলতে চান?</span>
+                  <span>Permanently delete this chat from your view?</span>
                 </div>
                 <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                  এটি শুধুমাত্র আপনার প্রোফাইল থেকে চ্যাটটি সরিয়ে দেবে।
+                  This will remove the chat reference permanently from your account view in Firestore.
                 </div>
-                <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "8px",
+                    justifyContent: "flex-end"
+                  }}
+                >
                   <button
                     onClick={() => setShowConfirmDelete(false)}
-                    style={{ ...styles.pillBtn, backgroundColor: THEME.card, color: THEME.text }}
+                    style={{
+                      ...styles.pillBtn,
+                      backgroundColor: THEME.card,
+                      color: THEME.text
+                    }}
                   >
-                    বাতিল
+                    Cancel
                   </button>
                   <button
                     onClick={handleExecuteDeleteChat}
-                    style={{ ...styles.pillBtn, backgroundColor: THEME.danger, color: "#fff", fontWeight: "700" }}
+                    style={{
+                      ...styles.pillBtn,
+                      backgroundColor: THEME.danger,
+                      color: "#fff",
+                      fontWeight: "700"
+                    }}
                   >
-                    নিশ্চিত করুন
+                    Confirm Delete
                   </button>
                 </div>
               </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px"
+                }}
+              >
+                {/* Pin Chat */}
                 <button
                   onClick={() => handleTogglePinChat(contextItem.id)}
                   style={{
@@ -1523,16 +1936,17 @@ export default function ChatView({
                   {userPinnedIds.includes(contextItem.id) ? (
                     <>
                       <PinOff size={18} color={THEME.primary || "#22c55e"} />
-                      <span>চ্যাট আনপিন করুন</span>
+                      <span>Unpin Chat</span>
                     </>
                   ) : (
                     <>
                       <Pin size={18} color={THEME.primary || "#22c55e"} />
-                      <span>উপরে পিন করে রাখুন</span>
+                      <span>Pin Chat</span>
                     </>
                   )}
                 </button>
 
+                {/* Mute Notifications */}
                 <button
                   onClick={() => handleToggleMuteChat(contextItem.id)}
                   style={{
@@ -1553,16 +1967,17 @@ export default function ChatView({
                   {userMutedIds.includes(contextItem.id) ? (
                     <>
                       <Bell size={18} color={THEME.textMuted} />
-                      <span>নোটিফিকেশন আনমিউট করুন</span>
+                      <span>Unmute Notifications</span>
                     </>
                   ) : (
                     <>
                       <BellOff size={18} color={THEME.danger} />
-                      <span>নোটিফিকেশন মিউট করুন</span>
+                      <span>Mute Notifications</span>
                     </>
                   )}
                 </button>
 
+                {/* Archive Chat */}
                 <button
                   onClick={() => handleToggleArchiveChat(contextItem.id)}
                   style={{
@@ -1582,17 +1997,21 @@ export default function ChatView({
                 >
                   {userArchivedIds.includes(contextItem.id) ? (
                     <>
-                      <ArchiveRestore size={18} color={THEME.primary || "#22c55e"} />
-                      <span>আর্কাইভ থেকে আনআর্কাইভ করুন</span>
+                      <ArchiveRestore
+                        size={18}
+                        color={THEME.primary || "#22c55e"}
+                      />
+                      <span>Unarchive Chat</span>
                     </>
                   ) : (
                     <>
                       <Archive size={18} color={THEME.primary || "#22c55e"} />
-                      <span>চ্যাট আর্কাইভ করুন</span>
+                      <span>Archive Chat</span>
                     </>
                   )}
                 </button>
 
+                {/* Delete Chat */}
                 <button
                   onClick={() => setShowConfirmDelete(true)}
                   style={{
@@ -1611,7 +2030,7 @@ export default function ChatView({
                   }}
                 >
                   <Trash2 size={18} color={THEME.danger} />
-                  <span>চ্যাট মুছে ফেলুন</span>
+                  <span>Delete Chat</span>
                 </button>
 
                 <button
@@ -1628,7 +2047,7 @@ export default function ChatView({
                     marginTop: "6px"
                   }}
                 >
-                  বাতিল
+                  Cancel
                 </button>
               </div>
             )}
