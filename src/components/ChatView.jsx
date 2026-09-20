@@ -8,6 +8,7 @@ import {
   query,
   where,
   onSnapshot,
+  orderBy,
   limit
 } from "firebase/firestore";
 import {
@@ -76,7 +77,10 @@ export default function ChatView({
   const [conversations, setConversations] = useState([]);
   const [isLoadingConversations, setIsLoadingConversations] = useState(true);
 
-  // Search & Filter state
+  // Active chat real-time live messages from Firestore
+  const [liveMessages, setLiveMessages] = useState([]);
+
+  // Search & View filter state
   const [searchTerm, setSearchTerm] = useState("");
   const [viewFilter, setViewFilter] = useState("active"); // 'active' | 'archived'
 
@@ -143,19 +147,22 @@ export default function ChatView({
   // Active chat thread states
   const [inputText, setInputText] = useState("");
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [showChatOptions, setShowChatOptions] = useState(false);
   const [reactionPicker, setReactionPicker] = useState(null);
   const [selectedMessage, setSelectedMessage] = useState(null);
+  const [pinnedMessage, setPinnedMessage] = useState(null);
 
   // References for scrolling and inputs
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
-  // Swipe-to-reply gesture references
+  // Controlled swipe-to-reply gesture references
   const msgTouchStartPos = useRef({ x: 0, y: 0, time: 0 });
+  const isBubbleSwiping = useRef(false);
   const [bubbleOffsets, setBubbleOffsets] = useState({});
 
-  // Helper to format clean 11-digit Bangladeshi mobile numbers
+  // Helper to format clean 11-digit mobile numbers
   const cleanPhone = (val) => {
     if (!val) return "";
     const digits = val.toString().replace(/\D/g, "");
@@ -178,9 +185,9 @@ export default function ChatView({
     return isNaN(parsed) ? 0 : parsed;
   };
 
-  // --- 1. ABSOLUTE PRIVACY: STRICT PARTICIPANTS QUERY ---
+  // --- 1. STRICT 1-ON-1 CHAT ISOLATION & LIVE ON-SNAPSHOT LISTENER ---
   // Queries Firestore strictly WHERE 'participants' array contains current user ID.
-  // Unrelated contacts or conversations are NEVER loaded or leaked.
+  // Real-time onSnapshot updates conversations continuously in the background.
   useEffect(() => {
     if (!currentUserId) return;
     setIsLoadingConversations(true);
@@ -206,7 +213,7 @@ export default function ChatView({
         setIsLoadingConversations(false);
       },
       (err) => {
-        console.warn("Private conversations query error:", err.message);
+        console.warn("Private conversations live listener error:", err.message);
         setIsLoadingConversations(false);
       }
     );
@@ -214,7 +221,44 @@ export default function ChatView({
     return () => unsubscribe();
   }, [currentUserId]);
 
-  // --- 2. LATEST MESSAGE SORTING & SEARCH FILTERING ---
+  // --- 2. ACTIVE CHAT REAL-TIME LIVE MESSAGES ON-SNAPSHOT LISTENER ---
+  // Background live sync: messages stream in real-time without requiring any manual drag-to-refresh
+  useEffect(() => {
+    if (!activeChat?.id) {
+      setLiveMessages([]);
+      return;
+    }
+
+    const roomId = activeChat.id;
+    const msgCol = collection(db, "rooms", roomId, "messages");
+    const q = query(msgCol, orderBy("createdAt", "asc"), limit(100));
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const list = [];
+        snapshot.forEach((docSnap) => {
+          list.push({
+            id: docSnap.id,
+            ...docSnap.data()
+          });
+        });
+        setLiveMessages(list);
+      },
+      (err) => {
+        console.warn("Live messages onSnapshot error:", err.message);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [activeChat?.id]);
+
+  // Combined messages to display (prefers live Firestore messages, fallbacks to prop)
+  const displayedMessages = useMemo(() => {
+    return liveMessages.length > 0 ? liveMessages : messages;
+  }, [liveMessages, messages]);
+
+  // --- 3. LATEST MESSAGE SORTING & UNREAD BADGES ---
   const displayedConversations = useMemo(() => {
     let list = conversations.filter((item) => !userDeletedIds.includes(item.id));
 
@@ -235,7 +279,7 @@ export default function ChatView({
       });
     }
 
-    // Sort: Pinned conversations on top, then sorted by lastMessageTimestamp descending
+    // Dynamic sort: Pinned on top, then sorted by lastMessageTimestamp descending (updatedAt)
     return list.sort((a, b) => {
       const aPinned = userPinnedIds.includes(a.id);
       const bPinned = userPinnedIds.includes(b.id);
@@ -248,7 +292,7 @@ export default function ChatView({
     });
   }, [conversations, userDeletedIds, userArchivedIds, userPinnedIds, viewFilter, searchTerm]);
 
-  // Unread badge counter for current user
+  // Unread count for current user
   const getUnreadCount = (item) => {
     if (activeChat?.id === item.id) return 0;
     if (readChatIds.includes(item.id)) return 0;
@@ -265,7 +309,7 @@ export default function ChatView({
     return 0;
   };
 
-  // --- 3. OPEN CONVERSATION & CLEAR UNREAD BADGE ---
+  // --- 4. OPEN CHAT & CLEAR UNREAD BADGE ---
   const handleOpenConversation = async (item) => {
     if (isLongPressTriggered.current) {
       isLongPressTriggered.current = false;
@@ -281,7 +325,7 @@ export default function ChatView({
       } catch (e) {}
     }
 
-    // Reset unread count in Firestore
+    // Clear unread count in Firestore conversation doc
     if (item.unreadCount && item.unreadCount[currentUserId]) {
       try {
         const convDocRef = doc(db, "conversations", item.id);
@@ -295,7 +339,7 @@ export default function ChatView({
     if (setMobileView) setMobileView("chat");
   };
 
-  // --- 4. LONG-PRESS TOUCH HANDLERS (~500ms) ---
+  // --- 5. LONG-PRESS CONTEXT MODAL HANDLERS (~500ms) ---
   const handleRowTouchStart = (e, item) => {
     isLongPressTriggered.current = false;
     if (e.touches && e.touches[0]) {
@@ -331,8 +375,7 @@ export default function ChatView({
     }
   };
 
-  // --- 5. LONG-PRESS ACTIONS (PIN, MUTE, ARCHIVE, DELETE) ---
-  const handleTogglePin = (id) => {
+  const handleTogglePinChat = (id) => {
     const isCurrentlyPinned = userPinnedIds.includes(id);
     let nextPinned;
     if (isCurrentlyPinned) {
@@ -349,7 +392,7 @@ export default function ChatView({
     setContextItem(null);
   };
 
-  const handleToggleMute = (id) => {
+  const handleToggleMuteChat = (id) => {
     const isCurrentlyMuted = userMutedIds.includes(id);
     let nextMuted;
     if (isCurrentlyMuted) {
@@ -366,7 +409,7 @@ export default function ChatView({
     setContextItem(null);
   };
 
-  const handleToggleArchive = (id) => {
+  const handleToggleArchiveChat = (id) => {
     const isCurrentlyArchived = userArchivedIds.includes(id);
     let nextList;
     if (isCurrentlyArchived) {
@@ -384,7 +427,7 @@ export default function ChatView({
     setContextItem(null);
   };
 
-  const handleExecuteDelete = () => {
+  const handleExecuteDeleteChat = () => {
     if (!contextItem) return;
     const targetId = contextItem.id;
     const nextDeleted = [...userDeletedIds, targetId];
@@ -477,7 +520,7 @@ export default function ChatView({
     }
   };
 
-  // --- 7. AUTO-SCROLL TO BOTTOM IN ACTIVE CHAT THREAD ---
+  // --- 7. AUTO-SCROLL TO BOTTOM IN ACTIVE CHAT ---
   useEffect(() => {
     if (activeChat && messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "auto" });
@@ -485,32 +528,78 @@ export default function ChatView({
   }, [activeChat?.id]);
 
   useEffect(() => {
-    if (activeChat && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages.length]);
+    if (!messagesContainerRef.current) return;
+    const container = messagesContainerRef.current;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
 
-  const handleSendMessage = (e) => {
+    if (distanceFromBottom < 250) {
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+      }
+    }
+  }, [displayedMessages.length]);
+
+  // Focus input automatically whenever replyingTo changes
+  useEffect(() => {
+    if (replyingTo && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [replyingTo]);
+
+  // Send message
+  const handleSendMessage = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if (!inputText.trim()) return;
+    if (!inputText.trim() || !activeChat) return;
 
-    if (onSendMessage) {
-      onSendMessage({
-        content: inputText.trim(),
-        type: "text",
-        isViewOnce: !!viewOnceMode,
-        replyTo: replyingTo
-          ? {
-              id: replyingTo.id,
-              content: replyingTo.content,
-              senderName: replyingTo.senderName
-            }
-          : null
-      });
-    }
-
+    const textToSend = inputText.trim();
     setInputText("");
+
+    const payload = {
+      content: textToSend,
+      type: "text",
+      isViewOnce: !!viewOnceMode,
+      replyTo: replyingTo
+        ? {
+            id: replyingTo.id,
+            content: replyingTo.content,
+            senderName: replyingTo.senderName
+          }
+        : null
+    };
+
     setReplyingTo(null);
+
+    // Call parent handler or write directly to Firestore
+    if (onSendMessage) {
+      onSendMessage(payload);
+    } else {
+      try {
+        const msgId = Date.now().toString();
+        const roomId = activeChat.id;
+        const otherParticipant = (activeChat.participants || []).find((p) => p !== currentUserId) || "";
+
+        await setDoc(doc(db, "rooms", roomId, "messages", msgId), {
+          senderPhone: currentUserId,
+          senderName: currentUser?.name || currentUserId,
+          recipientPhone: otherParticipant,
+          content: textToSend,
+          type: "text",
+          status: "sent",
+          createdAt: new Date().toISOString()
+        });
+
+        await updateDoc(doc(db, "conversations", roomId), {
+          lastMessage: textToSend,
+          lastMessageTimestamp: Date.now(),
+          updatedAt: new Date().toISOString(),
+          lastSender: currentUserId,
+          [`unreadCount.${otherParticipant}`]: (activeChat.unreadCount?.[otherParticipant] || 0) + 1
+        });
+      } catch (err) {
+        console.error("Direct send error:", err);
+      }
+    }
 
     setTimeout(() => {
       if (messagesEndRef.current) {
@@ -519,8 +608,51 @@ export default function ChatView({
     }, 40);
   };
 
+  // Controlled bubble swipe-to-reply gesture handlers
+  const handleBubbleTouchStart = (e, msg) => {
+    const touch = e.touches[0];
+    msgTouchStartPos.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+    isBubbleSwiping.current = false;
+  };
+
+  const handleBubbleTouchMove = (e, msgId) => {
+    const touch = e.touches[0];
+    const deltaX = touch.clientX - msgTouchStartPos.current.x;
+    const deltaY = touch.clientY - msgTouchStartPos.current.y;
+
+    if (Math.abs(deltaY) > 8 && !isBubbleSwiping.current) return;
+
+    if (deltaX > 10 && Math.abs(deltaY) < 18) {
+      isBubbleSwiping.current = true;
+      const boundedOffset = Math.min(45, Math.max(0, deltaX));
+      setBubbleOffsets((prev) => ({ ...prev, [msgId]: boundedOffset }));
+    }
+  };
+
+  const handleBubbleTouchEnd = (e, msg) => {
+    const offset = bubbleOffsets[msg.id] || 0;
+    if (offset >= 30) {
+      if (window.navigator?.vibrate) {
+        window.navigator.vibrate(25);
+      }
+      setReplyingTo({
+        id: msg.id,
+        content: msg.content || (msg.fileUrl ? "Media file" : ""),
+        senderName: msg.senderName || "User"
+      });
+      setTimeout(() => {
+        if (inputRef.current) inputRef.current.focus();
+      }, 50);
+    }
+    setBubbleOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
+    isBubbleSwiping.current = false;
+  };
+
   return (
     <div
+      onClick={() => {
+        if (reactionPicker) setReactionPicker(null);
+      }}
       style={{
         display: "flex",
         flex: 1,
@@ -528,7 +660,8 @@ export default function ChatView({
         height: "100%",
         overflow: "hidden",
         position: "relative",
-        backgroundColor: THEME.bg
+        backgroundColor: THEME.bg,
+        overscrollBehaviorY: "contain" // COMPLETELY DISABLES drag-down / pull-to-refresh at screen root
       }}
     >
       {/* ================= LEFT PANE: 1-ON-1 DIRECT CONTACT & CHAT LIST ================= */}
@@ -638,7 +771,7 @@ export default function ChatView({
           </div>
         </div>
 
-        {/* Smooth Scroll Contact Container (No Pull-To-Refresh, Isolated) */}
+        {/* Smooth Scroll Contact Container (Dual Scrolling, No Page Reload) */}
         <div
           style={{
             flex: 1,
@@ -646,7 +779,7 @@ export default function ChatView({
             overflowY: "auto",
             overflowX: "hidden",
             WebkitOverflowScrolling: "touch",
-            overscrollBehaviorY: "contain",
+            overscrollBehaviorY: "contain", // PREVENTS pull-to-refresh on conversation list
             touchAction: "pan-y",
             padding: "6px"
           }}
@@ -911,16 +1044,79 @@ export default function ChatView({
                 <Video size={18} />
               </button>
               <button
-                onClick={() => setContextItem(activeChat)}
+                onClick={() => setShowChatOptions(!showChatOptions)}
                 style={{ ...styles.cleanBtn, color: THEME.text, padding: "8px" }}
                 title="Options"
               >
                 <MoreVertical size={18} />
               </button>
             </div>
+
+            {showChatOptions && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "54px",
+                  right: "14px",
+                  backgroundColor: THEME.sidebar,
+                  border: `1px solid ${THEME.border}`,
+                  borderRadius: "10px",
+                  padding: "6px 0",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+                  zIndex: 100,
+                  minWidth: "180px"
+                }}
+              >
+                <button
+                  onClick={() => {
+                    handleTogglePinChat(activeChat.id);
+                    setShowChatOptions(false);
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "10px",
+                    width: "100%",
+                    padding: "10px 14px",
+                    border: "none",
+                    background: "none",
+                    color: THEME.text,
+                    fontSize: "13px",
+                    cursor: "pointer",
+                    textAlign: "left"
+                  }}
+                >
+                  <Pin size={15} color={userPinnedIds.includes(activeChat.id) ? THEME.primary : THEME.textMuted} />
+                  <span>{userPinnedIds.includes(activeChat.id) ? "Unpin Chat" : "Pin Chat"}</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    handleToggleMuteChat(activeChat.id);
+                    setShowChatOptions(false);
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "10px",
+                    width: "100%",
+                    padding: "10px 14px",
+                    border: "none",
+                    background: "none",
+                    color: THEME.text,
+                    fontSize: "13px",
+                    cursor: "pointer",
+                    textAlign: "left"
+                  }}
+                >
+                  <BellOff size={15} color={userMutedIds.includes(activeChat.id) ? THEME.danger : THEME.textMuted} />
+                  <span>{userMutedIds.includes(activeChat.id) ? "Unmute Notifications" : "Mute Notifications"}</span>
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Messages Scroll Area */}
+          {/* Messages Scroll Area (Dual Direction Smooth Scrolling, No Drag-To-Refresh) */}
           <div
             ref={messagesContainerRef}
             style={{
@@ -929,7 +1125,7 @@ export default function ChatView({
               overflowY: "auto",
               overflowX: "hidden",
               WebkitOverflowScrolling: "touch",
-              overscrollBehaviorY: "contain",
+              overscrollBehaviorY: "contain", // PREVENTS browser reload / pull-to-refresh
               touchAction: "pan-y",
               padding: "14px 16px",
               display: "flex",
@@ -937,7 +1133,7 @@ export default function ChatView({
               gap: "8px"
             }}
           >
-            {messages.length === 0 ? (
+            {displayedMessages.length === 0 ? (
               <div style={{ margin: "auto", textAlign: "center", color: THEME.textMuted }}>
                 <div
                   style={{
@@ -949,13 +1145,14 @@ export default function ChatView({
                     border: `1px solid ${THEME.border}`
                   }}
                 >
-                  🔒 End-to-end direct phone messaging.
+                  🔒 End-to-end direct phone messaging. Live real-time updates enabled.
                 </div>
               </div>
             ) : (
-              messages.map((msg) => {
+              displayedMessages.map((msg) => {
                 const isMe = msg.senderPhone === currentUserId || msg.senderId === currentUserId;
                 const isDeleted = msg.type === "deleted";
+                const offset = bubbleOffsets[msg.id] || 0;
 
                 return (
                   <div
@@ -965,10 +1162,30 @@ export default function ChatView({
                       flexDirection: "column",
                       alignItems: isMe ? "flex-end" : "flex-start",
                       width: "100%",
-                      marginBottom: "2px"
+                      marginBottom: "2px",
+                      position: "relative"
                     }}
                   >
+                    {/* Swipe indicator */}
+                    {offset > 8 && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          left: "-28px",
+                          top: "50%",
+                          transform: "translateY(-50%)",
+                          color: THEME.primary,
+                          opacity: Math.min(1, offset / 30)
+                        }}
+                      >
+                        <Reply size={16} />
+                      </div>
+                    )}
+
                     <div
+                      onTouchStart={(e) => handleBubbleTouchStart(e, msg)}
+                      onTouchMove={(e) => handleBubbleTouchMove(e, msg.id)}
+                      onTouchEnd={(e) => handleBubbleTouchEnd(e, msg)}
                       style={{
                         maxWidth: "82%",
                         borderRadius: "12px",
@@ -979,7 +1196,9 @@ export default function ChatView({
                         color: "#fff",
                         boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
                         position: "relative",
-                        wordBreak: "break-word"
+                        wordBreak: "break-word",
+                        transform: `translateX(${offset}px)`,
+                        transition: offset === 0 ? "transform 0.18s ease" : "none"
                       }}
                     >
                       {msg.replyTo && !isDeleted && (
@@ -1031,6 +1250,31 @@ export default function ChatView({
             )}
             <div ref={messagesEndRef} />
           </div>
+
+          {/* Replying Banner */}
+          {replyingTo && (
+            <div
+              style={{
+                backgroundColor: THEME.card,
+                borderTop: `1.5px solid ${THEME.primary || "#22c55e"}`,
+                padding: "6px 14px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between"
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: THEME.text, minWidth: 0 }}>
+                <Reply size={15} color={THEME.primary || "#22c55e"} />
+                <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ color: THEME.primary || "#22c55e", fontWeight: "700" }}>{replyingTo.senderName}: </span>
+                  <span style={{ color: THEME.textMuted }}>{replyingTo.content}</span>
+                </div>
+              </div>
+              <button onClick={() => setReplyingTo(null)} style={styles.cleanBtn}>
+                <X size={16} color={THEME.textMuted} />
+              </button>
+            </div>
+          )}
 
           {/* Composer Input Bar */}
           <form
@@ -1210,7 +1454,6 @@ export default function ChatView({
               margin: "0 auto"
             }}
           >
-            {/* Context Item Header */}
             <div style={{ display: "flex", alignItems: "center", gap: "10px", paddingBottom: "8px", borderBottom: `1px solid ${THEME.border}` }}>
               <img
                 src={contextItem.avatar || `https://api.dicebear.com/7.x/identicon/svg?seed=${contextItem.id}`}
@@ -1234,7 +1477,6 @@ export default function ChatView({
               </button>
             </div>
 
-            {/* Confirm Delete State */}
             {showConfirmDelete ? (
               <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: "12px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px", color: THEME.danger, fontSize: "13px", fontWeight: "600" }}>
@@ -1252,7 +1494,7 @@ export default function ChatView({
                     বাতিল
                   </button>
                   <button
-                    onClick={handleExecuteDelete}
+                    onClick={handleExecuteDeleteChat}
                     style={{ ...styles.pillBtn, backgroundColor: THEME.danger, color: "#fff", fontWeight: "700" }}
                   >
                     নিশ্চিত করুন
@@ -1261,9 +1503,8 @@ export default function ChatView({
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                {/* 1. Pin / Unpin Chat */}
                 <button
-                  onClick={() => handleTogglePin(contextItem.id)}
+                  onClick={() => handleTogglePinChat(contextItem.id)}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -1278,8 +1519,6 @@ export default function ChatView({
                     cursor: "pointer",
                     textAlign: "left"
                   }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                 >
                   {userPinnedIds.includes(contextItem.id) ? (
                     <>
@@ -1294,9 +1533,8 @@ export default function ChatView({
                   )}
                 </button>
 
-                {/* 2. Mute / Unmute Notifications */}
                 <button
-                  onClick={() => handleToggleMute(contextItem.id)}
+                  onClick={() => handleToggleMuteChat(contextItem.id)}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -1311,8 +1549,6 @@ export default function ChatView({
                     cursor: "pointer",
                     textAlign: "left"
                   }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                 >
                   {userMutedIds.includes(contextItem.id) ? (
                     <>
@@ -1327,9 +1563,8 @@ export default function ChatView({
                   )}
                 </button>
 
-                {/* 3. Archive / Unarchive Chat */}
                 <button
-                  onClick={() => handleToggleArchive(contextItem.id)}
+                  onClick={() => handleToggleArchiveChat(contextItem.id)}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -1344,8 +1579,6 @@ export default function ChatView({
                     cursor: "pointer",
                     textAlign: "left"
                   }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                 >
                   {userArchivedIds.includes(contextItem.id) ? (
                     <>
@@ -1360,7 +1593,6 @@ export default function ChatView({
                   )}
                 </button>
 
-                {/* 4. Delete Chat */}
                 <button
                   onClick={() => setShowConfirmDelete(true)}
                   style={{
@@ -1377,14 +1609,11 @@ export default function ChatView({
                     cursor: "pointer",
                     textAlign: "left"
                   }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = THEME.cardHover)}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
                 >
                   <Trash2 size={18} color={THEME.danger} />
                   <span>চ্যাট মুছে ফেলুন</span>
                 </button>
 
-                {/* 5. Cancel */}
                 <button
                   onClick={() => setContextItem(null)}
                   style={{
