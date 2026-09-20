@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import {
   Image as ImageIcon,
   Video,
@@ -20,7 +20,8 @@ import {
   RefreshCw,
   CornerDownRight,
   Smile,
-  Compass
+  Compass,
+  ArrowUp
 } from "lucide-react";
 import { styles } from "../firebase";
 
@@ -49,6 +50,9 @@ export default function Feed({
   showToast
 }) {
   const currentUserId = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
+
+  // Main scrollable feed container ref
+  const feedContainerRef = useRef(null);
 
   // --- POST CREATOR STATE ---
   const [postText, setPostText] = useState("");
@@ -91,7 +95,7 @@ export default function Feed({
               type: "welcome",
               senderName: "Infinity Team",
               senderAvatar: "https://api.dicebear.com/7.x/identicon/svg?seed=Infinity",
-              text: "Welcome to the new News Feed! React, comment, and discover channels.",
+              text: "Welcome to the News Feed! React, comment, and discover channels.",
               time: "Just now",
               read: false
             }
@@ -105,6 +109,11 @@ export default function Feed({
   const [shuffleSeed, setShuffleSeed] = useState(1);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // --- PULL TO REFRESH TOUCH STATE ---
+  const touchStartY = useRef(0);
+  const [pullDistance, setPullDistance] = useState(0);
+  const isPullingRef = useRef(false);
+
   // --- CHANNEL PROFILE & SUBSCRIPTIONS ---
   const [selectedChannelProfile, setSelectedChannelProfile] = useState(null);
   const [showSubListType, setShowSubListType] = useState(null);
@@ -117,6 +126,108 @@ export default function Feed({
       return [];
     }
   });
+
+  // --- 1. FACEBOOK-STYLE BACK BUTTON HANDLING (SCROLL TO TOP ON BACK) ---
+  const isScrolledRef = useRef(false);
+
+  const scrollToTop = useCallback(() => {
+    if (feedContainerRef.current) {
+      feedContainerRef.current.scrollTo({ top: 0, behavior: "smooth" });
+    }
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      const currentScroll = feedContainerRef.current
+        ? feedContainerRef.current.scrollTop
+        : window.scrollY;
+
+      if (currentScroll > 150) {
+        if (!isScrolledRef.current) {
+          isScrolledRef.current = true;
+          // Push dummy state to capture back button
+          window.history.pushState({ feedScrolled: true }, "");
+        }
+      } else {
+        isScrolledRef.current = false;
+      }
+    };
+
+    const container = feedContainerRef.current;
+    if (container) {
+      container.addEventListener("scroll", handleScroll, { passive: true });
+    }
+    window.addEventListener("scroll", handleScroll, { passive: true });
+
+    const handlePopState = (e) => {
+      const currentScroll = feedContainerRef.current
+        ? feedContainerRef.current.scrollTop
+        : window.scrollY;
+
+      // If user is scrolled down, scroll up smoothly instead of closing app or leaving
+      if (currentScroll > 120 || isScrolledRef.current) {
+        scrollToTop();
+        isScrolledRef.current = false;
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+
+    return () => {
+      if (container) container.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("scroll", handleScroll);
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [scrollToTop]);
+
+  // --- 2. PULL-TO-REFRESH IMPLEMENTATION ---
+  const handleTouchStart = (e) => {
+    const container = feedContainerRef.current;
+    const isAtTop = !container || container.scrollTop <= 0;
+    if (isAtTop && e.touches && e.touches[0]) {
+      touchStartY.current = e.touches[0].clientY;
+      isPullingRef.current = true;
+    } else {
+      isPullingRef.current = false;
+    }
+  };
+
+  const handleTouchMove = (e) => {
+    if (!isPullingRef.current) return;
+    const currentY = e.touches[0].clientY;
+    const diff = currentY - touchStartY.current;
+
+    if (diff > 0) {
+      // Apply tension dampening
+      const distance = Math.min(80, diff * 0.45);
+      setPullDistance(distance);
+    } else {
+      setPullDistance(0);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (pullDistance >= 50) {
+      handleRefreshFeed();
+    }
+    setPullDistance(0);
+    isPullingRef.current = false;
+  };
+
+  // Re-shuffle and refresh feed
+  const handleRefreshFeed = () => {
+    setIsRefreshing(true);
+    setShuffleSeed((prev) => prev + 1);
+    if (window.navigator?.vibrate) {
+      window.navigator.vibrate(30);
+    }
+    setTimeout(() => {
+      setIsRefreshing(false);
+      scrollToTop();
+      if (showToast) showToast("Feed refreshed with latest updates!");
+    }, 500);
+  };
 
   // Save notifications locally
   const pushNotification = (notif) => {
@@ -303,7 +414,6 @@ export default function Feed({
     setHoveredReactionPostId(null);
     if (showToast) showToast(`Reacted ${reactionObj.emoji}`);
 
-    // If reacting to someone else's post, add alert
     if (post.creatorPhone && post.creatorPhone !== currentUserId) {
       pushNotification({
         type: "reaction",
@@ -346,7 +456,6 @@ export default function Feed({
       localStorage.setItem("infinity_feed_comments_v2", JSON.stringify(newMap));
     } catch (e) {}
 
-    // Add notification
     pushNotification({
       type: "comment",
       senderName: currentUser?.name || "User",
@@ -380,7 +489,7 @@ export default function Feed({
     } catch (e) {}
   };
 
-  // --- REACTION BADGE SUMMARY (TOP 3 EMOJIS) ---
+  // --- REACTION SUMMARY (TOP 3 EMOJIS) ---
   const getReactionSummary = (post) => {
     const reactions = post.reactions || {};
     const emojisCount = {};
@@ -403,18 +512,12 @@ export default function Feed({
     return { topEmojis, totalCount, details: reactions };
   };
 
-  // Refresh / Shuffle Feed
-  const handleRefreshFeed = () => {
-    setIsRefreshing(true);
-    setShuffleSeed((prev) => prev + 1);
-    setTimeout(() => {
-      setIsRefreshing(false);
-      if (showToast) showToast("Feed refreshed with latest updates!");
-    }, 450);
-  };
-
   return (
     <div
+      ref={feedContainerRef}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
       style={{
         flex: 1,
         height: "100%",
@@ -429,6 +532,34 @@ export default function Feed({
         position: "relative"
       }}
     >
+      {/* Pull-to-refresh Visual Indicator */}
+      {pullDistance > 0 && (
+        <div
+          style={{
+            height: `${pullDistance}px`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "100%",
+            color: THEME.primary || "#22c55e",
+            fontSize: "12px",
+            fontWeight: "600",
+            gap: "8px",
+            overflow: "hidden",
+            transition: pullDistance === 0 ? "height 0.2s ease" : "none"
+          }}
+        >
+          <RefreshCw
+            size={16}
+            style={{
+              transform: `rotate(${pullDistance * 4}deg)`,
+              transition: "transform 0.1s linear"
+            }}
+          />
+          <span>{pullDistance >= 50 ? "Release to refresh feed" : "Pull down to refresh"}</span>
+        </div>
+      )}
+
       <div style={{ width: "100%", maxWidth: "620px", display: "flex", flexDirection: "column", gap: "16px" }}>
 
         {/* --- FEED TOP NAVIGATION: REFRESH & NOTIFICATIONS TOGGLE --- */}
@@ -1297,6 +1428,31 @@ export default function Feed({
           })
         )}
       </div>
+
+      {/* Floating Scroll to Top Button */}
+      <button
+        onClick={scrollToTop}
+        style={{
+          position: "fixed",
+          bottom: "75px",
+          right: "20px",
+          backgroundColor: THEME.card,
+          border: `1px solid ${THEME.border}`,
+          borderRadius: "50%",
+          width: "40px",
+          height: "40px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          cursor: "pointer",
+          color: THEME.text,
+          boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
+          zIndex: 40
+        }}
+        title="Scroll to Top"
+      >
+        <ArrowUp size={18} />
+      </button>
 
       {/* --- NOTIFICATIONS DRAWER / SLIDE-OVER --- */}
       {showNotificationsDrawer && (
