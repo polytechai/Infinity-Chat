@@ -10,16 +10,11 @@ import {
   PlusCircle,
   UserCheck,
   UserPlus,
-  Play,
   X,
   Sparkles,
-  ExternalLink,
-  Copy,
-  Check,
   Bell,
   RefreshCw,
   CornerDownRight,
-  Smile,
   Compass,
   ArrowUp
 } from "lucide-react";
@@ -67,10 +62,10 @@ export default function Feed({
   // --- COMMENTS & NESTED REPLIES STATE ---
   const [activeCommentsPostId, setActiveCommentsPostId] = useState(null);
   const [commentInputMap, setCommentInputMap] = useState({});
-  const [replyingToCommentMap, setReplyingToCommentMap] = useState({}); // { [postId]: { commentId, authorName } }
+  const [replyingToCommentMap, setReplyingToCommentMap] = useState({}); // { [postId]: { commentId, authorName, authorId } }
   const [localCommentsMap, setLocalCommentsMap] = useState(() => {
     try {
-      const saved = localStorage.getItem("infinity_feed_comments_v2");
+      const saved = localStorage.getItem("infinity_feed_comments_v3");
       return saved ? JSON.parse(saved) : {};
     } catch (e) {
       return {};
@@ -82,34 +77,59 @@ export default function Feed({
   const [viewingReactionsPost, setViewingReactionsPost] = useState(null);
   const reactionTimerRef = useRef(null);
 
-  // --- NOTIFICATIONS STATE ---
+  // --- 1. STRICT USER & CHANNEL OWNER NOTIFICATIONS ISOLATION ---
+  // Notifications are stored and filtered STRICTLY by recipientId === currentUserId.
+  // Unrelated users NEVER see or receive another user's notifications.
   const [showNotificationsDrawer, setShowNotificationsDrawer] = useState(false);
   const [notifications, setNotifications] = useState(() => {
     try {
-      const saved = localStorage.getItem(`infinity_notifs_${currentUserId}`);
-      return saved
-        ? JSON.parse(saved)
-        : [
-            {
-              id: "notif_welcome",
-              type: "welcome",
-              senderName: "Infinity Team",
-              senderAvatar: "https://api.dicebear.com/7.x/identicon/svg?seed=Infinity",
-              text: "Welcome to the News Feed! React, comment, and discover channels.",
-              time: "Just now",
-              read: false
-            }
-          ];
+      const saved = localStorage.getItem(`infinity_notifs_isolated_${currentUserId}`);
+      return saved ? JSON.parse(saved) : [];
     } catch (e) {
       return [];
     }
   });
 
+  // Helper to strictly dispatch notification to a target user
+  const dispatchIsolatedNotification = (recipientId, notifData) => {
+    if (!recipientId || recipientId === currentUserId) return; // Do not notify oneself
+
+    try {
+      const existingKey = `infinity_notifs_isolated_${recipientId}`;
+      const saved = localStorage.getItem(existingKey);
+      const recipientNotifs = saved ? JSON.parse(saved) : [];
+      const updated = [
+        {
+          id: "notif_" + Date.now() + "_" + Math.random().toString(36).substr(2, 4),
+          recipientId,
+          time: "Just now",
+          read: false,
+          ...notifData
+        },
+        ...recipientNotifs
+      ].slice(0, 40);
+
+      localStorage.setItem(existingKey, JSON.stringify(updated));
+    } catch (e) {}
+  };
+
+  const unreadNotifCount = useMemo(() => {
+    return notifications.filter((n) => !n.read && n.recipientId === currentUserId).length;
+  }, [notifications, currentUserId]);
+
+  const markAllNotifsRead = () => {
+    const updated = notifications.map((n) => ({ ...n, read: true }));
+    setNotifications(updated);
+    try {
+      localStorage.setItem(`infinity_notifs_isolated_${currentUserId}`, JSON.stringify(updated));
+    } catch (e) {}
+  };
+
   // --- FEED DEDUPLICATION & SHUFFLE STATE ---
   const [shuffleSeed, setShuffleSeed] = useState(1);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // --- PULL TO REFRESH TOUCH STATE ---
+  // --- 2. PULL TO REFRESH TOUCH STATE (>80px threshold) ---
   const touchStartY = useRef(0);
   const [pullDistance, setPullDistance] = useState(0);
   const isPullingRef = useRef(false);
@@ -127,15 +147,64 @@ export default function Feed({
     }
   });
 
-  // --- 1. FACEBOOK-STYLE BACK BUTTON HANDLING (SCROLL TO TOP ON BACK) ---
+  // Current user's official channel
+  const myChannel = useMemo(() => {
+    return channels.find(
+      (c) =>
+        c.creatorPhone === currentUserId ||
+        c.creatorId === currentUserId ||
+        (Array.isArray(c.admins) && c.admins.includes(currentUserId))
+    );
+  }, [channels, currentUserId]);
+
+  // Suggested channels
+  const suggestedChannels = useMemo(() => {
+    return channels
+      .filter((c) => c.id !== myChannel?.id && !localSubscriptions.includes(c.id))
+      .slice(0, 6);
+  }, [channels, myChannel, localSubscriptions]);
+
+  // Deduplicated & engagement-weighted posts
+  const processedPosts = useMemo(() => {
+    const map = new Map();
+    feedPosts.forEach((post) => {
+      if (post && post.id && !map.has(post.id)) {
+        map.set(post.id, post);
+      }
+    });
+
+    const uniqueList = Array.from(map.values());
+
+    return uniqueList.sort((a, b) => {
+      const aReactions = Object.keys(a.reactions || a.likes || {}).length;
+      const bReactions = Object.keys(b.reactions || b.likes || {}).length;
+      const aComments = (localCommentsMap[a.id] || []).length;
+      const bComments = (localCommentsMap[b.id] || []).length;
+
+      const aScore = aReactions * 2 + aComments + (shuffleSeed % 2 === 0 ? 1 : 0);
+      const bScore = bReactions * 2 + bComments;
+
+      return bScore - aScore;
+    });
+  }, [feedPosts, localCommentsMap, shuffleSeed]);
+
+  // --- 3. FACEBOOK-STYLE BACK BUTTON: SCROLL TO TOP & AUTO-REFRESH ---
   const isScrolledRef = useRef(false);
 
-  const scrollToTop = useCallback(() => {
+  const scrollToTopAndRefresh = useCallback(() => {
     if (feedContainerRef.current) {
       feedContainerRef.current.scrollTo({ top: 0, behavior: "smooth" });
     }
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+
+    // Auto-refresh feed
+    setIsRefreshing(true);
+    setShuffleSeed((prev) => prev + 1);
+    setTimeout(() => {
+      setIsRefreshing(false);
+      if (showToast) showToast("Feed refreshed with latest posts!");
+    }, 400);
+  }, [showToast]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -146,7 +215,6 @@ export default function Feed({
       if (currentScroll > 150) {
         if (!isScrolledRef.current) {
           isScrolledRef.current = true;
-          // Push dummy state to capture back button
           window.history.pushState({ feedScrolled: true }, "");
         }
       } else {
@@ -160,14 +228,13 @@ export default function Feed({
     }
     window.addEventListener("scroll", handleScroll, { passive: true });
 
-    const handlePopState = (e) => {
+    const handlePopState = () => {
       const currentScroll = feedContainerRef.current
         ? feedContainerRef.current.scrollTop
         : window.scrollY;
 
-      // If user is scrolled down, scroll up smoothly instead of closing app or leaving
-      if (currentScroll > 120 || isScrolledRef.current) {
-        scrollToTop();
+      if (currentScroll > 100 || isScrolledRef.current) {
+        scrollToTopAndRefresh();
         isScrolledRef.current = false;
       }
     };
@@ -179,9 +246,9 @@ export default function Feed({
       window.removeEventListener("scroll", handleScroll);
       window.removeEventListener("popstate", handlePopState);
     };
-  }, [scrollToTop]);
+  }, [scrollToTopAndRefresh]);
 
-  // --- 2. PULL-TO-REFRESH IMPLEMENTATION ---
+  // --- 4. CONTROLLED PULL-TO-REFRESH AT EXACT TOP (>= 80px THRESHOLD) ---
   const handleTouchStart = (e) => {
     const container = feedContainerRef.current;
     const isAtTop = !container || container.scrollTop <= 0;
@@ -198,9 +265,9 @@ export default function Feed({
     const currentY = e.touches[0].clientY;
     const diff = currentY - touchStartY.current;
 
+    // Only allow downward pull when strictly at top
     if (diff > 0) {
-      // Apply tension dampening
-      const distance = Math.min(80, diff * 0.45);
+      const distance = Math.min(100, diff * 0.4);
       setPullDistance(distance);
     } else {
       setPullDistance(0);
@@ -208,97 +275,12 @@ export default function Feed({
   };
 
   const handleTouchEnd = () => {
-    if (pullDistance >= 50) {
-      handleRefreshFeed();
+    if (pullDistance >= 80) {
+      scrollToTopAndRefresh();
     }
     setPullDistance(0);
     isPullingRef.current = false;
   };
-
-  // Re-shuffle and refresh feed
-  const handleRefreshFeed = () => {
-    setIsRefreshing(true);
-    setShuffleSeed((prev) => prev + 1);
-    if (window.navigator?.vibrate) {
-      window.navigator.vibrate(30);
-    }
-    setTimeout(() => {
-      setIsRefreshing(false);
-      scrollToTop();
-      if (showToast) showToast("Feed refreshed with latest updates!");
-    }, 500);
-  };
-
-  // Save notifications locally
-  const pushNotification = (notif) => {
-    const updated = [
-      {
-        id: "notif_" + Date.now(),
-        time: "Just now",
-        read: false,
-        ...notif
-      },
-      ...notifications
-    ].slice(0, 30);
-
-    setNotifications(updated);
-    try {
-      localStorage.setItem(`infinity_notifs_${currentUserId}`, JSON.stringify(updated));
-    } catch (e) {}
-  };
-
-  const unreadNotifCount = notifications.filter((n) => !n.read).length;
-
-  const markAllNotifsRead = () => {
-    const updated = notifications.map((n) => ({ ...n, read: true }));
-    setNotifications(updated);
-    try {
-      localStorage.setItem(`infinity_notifs_${currentUserId}`, JSON.stringify(updated));
-    } catch (e) {}
-  };
-
-  // Check if current user owns a channel
-  const myChannel = useMemo(() => {
-    return channels.find(
-      (c) =>
-        c.creatorPhone === currentUserId ||
-        c.creatorId === currentUserId ||
-        (Array.isArray(c.admins) && c.admins.includes(currentUserId))
-    );
-  }, [channels, currentUserId]);
-
-  // Suggested channels (not yet subscribed by user)
-  const suggestedChannels = useMemo(() => {
-    return channels
-      .filter((c) => c.id !== myChannel?.id && !localSubscriptions.includes(c.id))
-      .slice(0, 6);
-  }, [channels, myChannel, localSubscriptions]);
-
-  // --- DEDUPLICATED & ALGORITHMIC ORDERED POSTS ---
-  const processedPosts = useMemo(() => {
-    const map = new Map();
-    // Unique deduplication by ID
-    feedPosts.forEach((post) => {
-      if (post && post.id && !map.has(post.id)) {
-        map.set(post.id, post);
-      }
-    });
-
-    const uniqueList = Array.from(map.values());
-
-    // Algorithmic weighting: (Likes * 2) + Comments count + freshness
-    return uniqueList.sort((a, b) => {
-      const aReactions = Object.keys(a.reactions || a.likes || {}).length;
-      const bReactions = Object.keys(b.reactions || b.likes || {}).length;
-      const aComments = (localCommentsMap[a.id] || []).length;
-      const bComments = (localCommentsMap[b.id] || []).length;
-
-      const aScore = aReactions * 2 + aComments + (shuffleSeed % 2 === 0 ? 1 : 0);
-      const bScore = bReactions * 2 + bComments;
-
-      return bScore - aScore;
-    });
-  }, [feedPosts, localCommentsMap, shuffleSeed]);
 
   // --- MEDIA PICKER ---
   const handleMediaSelect = (e, type) => {
@@ -378,10 +360,13 @@ export default function Feed({
     }
   };
 
-  // --- TOGGLE SUBSCRIBE ---
+  // --- SUBSCRIBE WITH CHANNEL OWNER NOTIFICATION ---
   const handleToggleSubscribe = (channelId, channelTitle = "Channel") => {
     const isSubscribed = localSubscriptions.includes(channelId);
     let updated;
+    const targetChannel = channels.find((c) => c.id === channelId);
+    const channelOwnerId = targetChannel?.creatorPhone || targetChannel?.creatorId;
+
     if (isSubscribed) {
       updated = localSubscriptions.filter((id) => id !== channelId);
       if (showToast) showToast(`Unsubscribed from ${channelTitle}`);
@@ -389,13 +374,16 @@ export default function Feed({
       updated = [...localSubscriptions, channelId];
       if (showToast) showToast(`Subscribed to ${channelTitle}! 🎉`);
 
-      // Trigger notification
-      pushNotification({
-        type: "subscriber",
-        senderName: channelTitle,
-        senderAvatar: `https://api.dicebear.com/7.x/identicon/svg?seed=${channelId}`,
-        text: `You subscribed to ${channelTitle}. You will receive fresh updates.`
-      });
+      // Notify strictly the channel owner
+      if (channelOwnerId) {
+        dispatchIsolatedNotification(channelOwnerId, {
+          type: "subscriber",
+          senderName: currentUser?.name || "A user",
+          senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+          text: `subscribed to your channel "${channelTitle}".`,
+          channelId
+        });
+      }
     }
 
     setLocalSubscriptions(updated);
@@ -404,7 +392,7 @@ export default function Feed({
     } catch (e) {}
   };
 
-  // --- REACTIONS ---
+  // --- REACTIONS WITH POST CREATOR NOTIFICATION ---
   const handleSelectReaction = (post, reactionObj) => {
     if (onReaction) {
       onReaction(post.id, reactionObj.emoji);
@@ -414,23 +402,26 @@ export default function Feed({
     setHoveredReactionPostId(null);
     if (showToast) showToast(`Reacted ${reactionObj.emoji}`);
 
-    if (post.creatorPhone && post.creatorPhone !== currentUserId) {
-      pushNotification({
+    // Notify strictly the post creator / channel owner
+    const postCreatorId = post.creatorPhone || post.creatorId;
+    if (postCreatorId && postCreatorId !== currentUserId) {
+      dispatchIsolatedNotification(postCreatorId, {
         type: "reaction",
-        senderName: currentUser?.name || "You",
+        senderName: currentUser?.name || "A user",
         senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
-        text: `Reacted ${reactionObj.emoji} to ${post.channelName || "Channel"}'s post.`,
+        text: `reacted ${reactionObj.emoji} to your post: "${(post.content || "").slice(0, 28)}..."`,
         postId: post.id
       });
     }
   };
 
-  // --- THREADED COMMENTS & REPLIES ---
+  // --- COMMENTS & REPLIES WITH RECIPIENT NOTIFICATION ---
   const handleAddComment = (postId) => {
     const text = (commentInputMap[postId] || "").trim();
     if (!text) return;
 
     const replyContext = replyingToCommentMap[postId];
+    const postObj = processedPosts.find((p) => p.id === postId);
 
     const newComment = {
       id: "comment_" + Date.now(),
@@ -453,24 +444,40 @@ export default function Feed({
     setReplyingToCommentMap((prev) => ({ ...prev, [postId]: null }));
 
     try {
-      localStorage.setItem("infinity_feed_comments_v2", JSON.stringify(newMap));
+      localStorage.setItem("infinity_feed_comments_v3", JSON.stringify(newMap));
     } catch (e) {}
 
-    pushNotification({
-      type: "comment",
-      senderName: currentUser?.name || "User",
-      senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
-      text: replyContext
-        ? `Replied to ${replyContext.authorName}: "${text.slice(0, 30)}..."`
-        : `Commented on post: "${text.slice(0, 30)}..."`,
-      postId: postId
-    });
+    // 1. If replying to a specific comment, notify strictly that comment's author
+    if (replyContext?.authorId && replyContext.authorId !== currentUserId) {
+      dispatchIsolatedNotification(replyContext.authorId, {
+        type: "reply",
+        senderName: currentUser?.name || "User",
+        senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+        text: `replied to your comment: "${text.slice(0, 30)}..."`,
+        postId
+      });
+    } else {
+      // 2. Otherwise, notify strictly the post author/owner
+      const postAuthorId = postObj?.creatorPhone || postObj?.creatorId;
+      if (postAuthorId && postAuthorId !== currentUserId) {
+        dispatchIsolatedNotification(postAuthorId, {
+          type: "comment",
+          senderName: currentUser?.name || "User",
+          senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+          text: `commented on your post: "${text.slice(0, 30)}..."`,
+          postId
+        });
+      }
+    }
   };
 
   const handleToggleCommentLike = (postId, commentId) => {
     const existing = localCommentsMap[postId] || [];
+    let likedCommentAuthorId = null;
+
     const updated = existing.map((comm) => {
       if (comm.id === commentId) {
+        likedCommentAuthorId = comm.authorId;
         const likes = { ...(comm.likes || {}) };
         if (likes[currentUserId]) {
           delete likes[currentUserId];
@@ -485,8 +492,19 @@ export default function Feed({
     const newMap = { ...localCommentsMap, [postId]: updated };
     setLocalCommentsMap(newMap);
     try {
-      localStorage.setItem("infinity_feed_comments_v2", JSON.stringify(newMap));
+      localStorage.setItem("infinity_feed_comments_v3", JSON.stringify(newMap));
     } catch (e) {}
+
+    // Notify strictly the comment author
+    if (likedCommentAuthorId && likedCommentAuthorId !== currentUserId) {
+      dispatchIsolatedNotification(likedCommentAuthorId, {
+        type: "comment_like",
+        senderName: currentUser?.name || "A user",
+        senderAvatar: currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
+        text: "liked your comment.",
+        postId
+      });
+    }
   };
 
   // --- REACTION SUMMARY (TOP 3 EMOJIS) ---
@@ -524,6 +542,7 @@ export default function Feed({
         overflowY: "auto",
         WebkitOverflowScrolling: "touch",
         overscrollBehaviorY: "contain",
+        touchAction: "pan-y", // STRICT TAB ISOLATION: Prevents horizontal swiping from changing tabs
         backgroundColor: THEME.bg,
         display: "flex",
         flexDirection: "column",
@@ -532,7 +551,7 @@ export default function Feed({
         position: "relative"
       }}
     >
-      {/* Pull-to-refresh Visual Indicator */}
+      {/* Pull-to-refresh Visual Indicator (Threshold >= 80px) */}
       {pullDistance > 0 && (
         <div
           style={{
@@ -543,7 +562,7 @@ export default function Feed({
             width: "100%",
             color: THEME.primary || "#22c55e",
             fontSize: "12px",
-            fontWeight: "600",
+            fontWeight: "700",
             gap: "8px",
             overflow: "hidden",
             transition: pullDistance === 0 ? "height 0.2s ease" : "none"
@@ -552,17 +571,17 @@ export default function Feed({
           <RefreshCw
             size={16}
             style={{
-              transform: `rotate(${pullDistance * 4}deg)`,
+              transform: `rotate(${pullDistance * 4.5}deg)`,
               transition: "transform 0.1s linear"
             }}
           />
-          <span>{pullDistance >= 50 ? "Release to refresh feed" : "Pull down to refresh"}</span>
+          <span>{pullDistance >= 80 ? "Release to refresh feed" : "Pull down to refresh"}</span>
         </div>
       )}
 
       <div style={{ width: "100%", maxWidth: "620px", display: "flex", flexDirection: "column", gap: "16px" }}>
 
-        {/* --- FEED TOP NAVIGATION: REFRESH & NOTIFICATIONS TOGGLE --- */}
+        {/* --- FEED TOP BAR --- */}
         <div
           style={{
             display: "flex",
@@ -574,7 +593,7 @@ export default function Feed({
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <span style={{ fontSize: "16px", fontWeight: "800", color: THEME.text }}>News Feed</span>
             <button
-              onClick={handleRefreshFeed}
+              onClick={scrollToTopAndRefresh}
               style={{
                 ...styles.cleanBtn,
                 color: THEME.textMuted,
@@ -590,7 +609,7 @@ export default function Feed({
             </button>
           </div>
 
-          {/* Notifications Drawer Toggle */}
+          {/* Isolated User Notifications Drawer Toggle */}
           <button
             onClick={() => {
               setShowNotificationsDrawer(true);
@@ -634,7 +653,7 @@ export default function Feed({
           </button>
         </div>
 
-        {/* --- BANNER: MANDATORY CHANNEL REMINDER IF NO CHANNEL EXISTS --- */}
+        {/* --- BANNER: MANDATORY CHANNEL CREATION --- */}
         {!myChannel && (
           <div
             style={{
@@ -682,7 +701,7 @@ export default function Feed({
           </div>
         )}
 
-        {/* --- FACEBOOK-STYLE POST CREATOR (TOP OF FEED) --- */}
+        {/* --- POST CREATOR BOX --- */}
         <div
           style={{
             backgroundColor: THEME.card,
@@ -729,7 +748,6 @@ export default function Feed({
               }}
             />
 
-            {/* Media Upload Preview */}
             {mediaPreview && (
               <div
                 style={{
@@ -770,7 +788,6 @@ export default function Feed({
               </div>
             )}
 
-            {/* Actions: Photo, Video, Submit */}
             <div
               style={{
                 display: "flex",
@@ -853,7 +870,7 @@ export default function Feed({
           </form>
         </div>
 
-        {/* --- SUGGESTED CHANNELS DISCOVERY CAROUSEL --- */}
+        {/* --- SUGGESTED CHANNELS CAROUSEL --- */}
         {suggestedChannels.length > 0 && (
           <div
             style={{
@@ -935,7 +952,7 @@ export default function Feed({
           </div>
         )}
 
-        {/* --- DYNAMIC NEWS FEED POSTS --- */}
+        {/* --- DYNAMIC POSTS LIST --- */}
         {processedPosts.length === 0 ? (
           <div style={{ textAlign: "center", padding: "40px 16px", color: THEME.textMuted }}>
             <Users size={48} style={{ margin: "0 auto 12px", opacity: 0.4 }} />
@@ -949,7 +966,7 @@ export default function Feed({
             const channelId = post.channelId || post.id;
             const isSubscribed = localSubscriptions.includes(channelId);
             const isLiked = post.likes && post.likes[currentUserId];
-            const { topEmojis, totalCount, details } = getReactionSummary(post);
+            const { topEmojis, totalCount } = getReactionSummary(post);
 
             const postComments = localCommentsMap[post.id] || [];
             const isCommentsOpen = activeCommentsPostId === post.id;
@@ -967,7 +984,7 @@ export default function Feed({
                   position: "relative"
                 }}
               >
-                {/* Header: Channel info & Subscribe button */}
+                {/* Header */}
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
                   <div
                     onClick={() => {
@@ -1018,7 +1035,7 @@ export default function Feed({
                   </button>
                 </div>
 
-                {/* Post Text */}
+                {/* Content */}
                 {post.content && (
                   <div
                     style={{
@@ -1033,7 +1050,7 @@ export default function Feed({
                   </div>
                 )}
 
-                {/* Media Preview (Video / Photo) */}
+                {/* Media */}
                 {post.fileUrl && (
                   <div
                     style={{
@@ -1063,7 +1080,7 @@ export default function Feed({
                   </div>
                 )}
 
-                {/* Reaction Summary Bar (Clicking opens Reaction List Modal) */}
+                {/* Reaction Summary */}
                 {totalCount > 0 && (
                   <div
                     style={{
@@ -1096,7 +1113,7 @@ export default function Feed({
                   </div>
                 )}
 
-                {/* Action Bar: Like (Floating Picker), Comment, Share */}
+                {/* Actions: Like, Comment, Share */}
                 <div
                   style={{
                     display: "flex",
@@ -1149,7 +1166,6 @@ export default function Feed({
                     </div>
                   )}
 
-                  {/* Like Button */}
                   <button
                     onMouseEnter={() => {
                       reactionTimerRef.current = setTimeout(() => {
@@ -1184,7 +1200,6 @@ export default function Feed({
                     <span>Like</span>
                   </button>
 
-                  {/* Comment Button */}
                   <button
                     onClick={() => setActiveCommentsPostId(isCommentsOpen ? null : post.id)}
                     style={{
@@ -1207,7 +1222,6 @@ export default function Feed({
                     <span>Comment</span>
                   </button>
 
-                  {/* Share Button */}
                   <button
                     onClick={() => {
                       if (navigator.share) {
@@ -1241,7 +1255,7 @@ export default function Feed({
                   </button>
                 </div>
 
-                {/* --- THREADED & NESTED COMMENTS SECTION --- */}
+                {/* --- THREADED & NESTED COMMENTS --- */}
                 {isCommentsOpen && (
                   <div
                     style={{
@@ -1253,7 +1267,7 @@ export default function Feed({
                       gap: "10px"
                     }}
                   >
-                    {/* Replying Context Indicator */}
+                    {/* Reply Banner */}
                     {currentReplyingTo && (
                       <div
                         style={{
@@ -1280,7 +1294,7 @@ export default function Feed({
                       </div>
                     )}
 
-                    {/* Input Composer */}
+                    {/* Comment Input */}
                     <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                       <img
                         src={currentUser?.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160"}
@@ -1327,7 +1341,7 @@ export default function Feed({
                       </button>
                     </div>
 
-                    {/* Threaded Comments List */}
+                    {/* Comments List */}
                     {postComments.length > 0 ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "4px" }}>
                         {postComments.map((comm) => {
@@ -1364,7 +1378,6 @@ export default function Feed({
                                     <span style={{ fontSize: "10px", color: THEME.textMuted }}>{comm.createdAt}</span>
                                   </div>
 
-                                  {/* Reply tag if nested */}
                                   {comm.replyToAuthor && (
                                     <div style={{ fontSize: "10px", color: THEME.primary || "#22c55e", marginBottom: "2px" }}>
                                       replying to @{comm.replyToAuthor}
@@ -1376,7 +1389,6 @@ export default function Feed({
                                   </div>
                                 </div>
 
-                                {/* Comment Actions: Like Comment & Reply */}
                                 <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "4px", paddingLeft: "6px" }}>
                                   <button
                                     onClick={() => handleToggleCommentLike(post.id, comm.id)}
@@ -1398,7 +1410,11 @@ export default function Feed({
                                     onClick={() => {
                                       setReplyingToCommentMap({
                                         ...replyingToCommentMap,
-                                        [post.id]: { commentId: comm.id, authorName: comm.authorName }
+                                        [post.id]: {
+                                          commentId: comm.id,
+                                          authorName: comm.authorName,
+                                          authorId: comm.authorId
+                                        }
                                       });
                                     }}
                                     style={{
@@ -1429,9 +1445,9 @@ export default function Feed({
         )}
       </div>
 
-      {/* Floating Scroll to Top Button */}
+      {/* Floating Scroll to Top & Refresh Button */}
       <button
-        onClick={scrollToTop}
+        onClick={scrollToTopAndRefresh}
         style={{
           position: "fixed",
           bottom: "75px",
@@ -1454,7 +1470,7 @@ export default function Feed({
         <ArrowUp size={18} />
       </button>
 
-      {/* --- NOTIFICATIONS DRAWER / SLIDE-OVER --- */}
+      {/* --- STRICTLY ISOLATED NOTIFICATIONS DRAWER --- */}
       {showNotificationsDrawer && (
         <div style={styles.modalOverlay}>
           <div
@@ -1468,7 +1484,7 @@ export default function Feed({
             <div style={{ ...styles.modalHeader, backgroundColor: THEME.header, borderColor: THEME.border }}>
               <div style={{ fontWeight: "700", fontSize: "15px", color: THEME.text, display: "flex", alignItems: "center", gap: "8px" }}>
                 <Bell size={18} color={THEME.primary || "#22c55e"} />
-                <span>Notifications & Alerts</span>
+                <span>Your Activity Alerts</span>
               </div>
               <button onClick={() => setShowNotificationsDrawer(false)} style={styles.cleanBtn}>
                 <X size={18} color={THEME.text} />
@@ -1488,7 +1504,7 @@ export default function Feed({
             >
               {notifications.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "30px", color: THEME.textMuted, fontSize: "13px" }}>
-                  No notifications yet.
+                  No alerts yet. When someone reacts to your posts or comments, you will see notifications here.
                 </div>
               ) : (
                 notifications.map((n) => (
@@ -1525,7 +1541,7 @@ export default function Feed({
         </div>
       )}
 
-      {/* --- REACTED BY MODAL (REACTION BREAKDOWN LIST) --- */}
+      {/* --- REACTED BY MODAL --- */}
       {viewingReactionsPost && (
         <div style={styles.modalOverlay}>
           <div style={{ ...styles.modalCard, backgroundColor: THEME.sidebar, borderColor: THEME.border, maxWidth: "420px" }}>
