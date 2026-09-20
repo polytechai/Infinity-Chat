@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { doc, updateDoc } from "firebase/firestore";
 import {
   ArrowLeft,
   Phone,
@@ -22,7 +23,7 @@ import {
   FileText,
   Image as ImageIcon
 } from "lucide-react";
-import { styles } from "../../firebase";
+import { db, styles } from "../../firebase";
 
 const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
@@ -84,20 +85,20 @@ export default function ChatBox({
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
-  // Gesture tracking
+  // Gesture tracking for controlled swipe-to-reply and long-press / double-tap
   const touchStartPos = useRef({ x: 0, y: 0, time: 0 });
   const lastTapRef = useRef({ time: 0, msgId: null });
   const longPressTimerRef = useRef(null);
   const isSwipingHorizontal = useRef(false);
   const [bubbleOffsets, setBubbleOffsets] = useState({}); // { [msgId]: number }
 
-  const myIdent = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
+  const currentUserId = currentUser?.phone || currentUser?.uid || currentUser?.id || "";
 
-  // --- 1. AUTO-SCROLL TO LATEST MESSAGE ON ENTRY & WHEN NEW MESSAGES ARRIVE ---
+  // --- 1. SMOOTH AUTO-SCROLL TO RECENT MESSAGES ON ENTRY & NEW MESSAGES ---
   useEffect(() => {
-    // Immediate scroll when opening a chat
+    // Smooth scroll to bottom upon entering the chat room
     if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "auto" });
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
     setSelectedMessage(null);
     setEditingMessage(null);
@@ -110,22 +111,22 @@ export default function ChatBox({
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
 
-    // Smooth auto-scroll when a new message arrives or if user is near bottom
-    if (distanceFromBottom < 250) {
+    // Auto-scroll smoothly to bottom on new messages or if user is near bottom
+    if (distanceFromBottom < 300) {
       if (messagesEndRef.current) {
         messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
     }
   }, [messages.length]);
 
-  // Focus input automatically whenever reply mode is triggered
+  // Immediately focus text input so mobile keyboard opens automatically when replying
   useEffect(() => {
     if (replyingTo && inputRef.current) {
       inputRef.current.focus();
     }
   }, [replyingTo]);
 
-  // --- 2. SEND / EDIT MESSAGE HANDLER ---
+  // --- 2. SEND MESSAGE HANDLER ---
   const handleSend = (e) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!inputText.trim()) return;
@@ -158,12 +159,12 @@ export default function ChatBox({
     setInputText("");
     setReplyingTo(null);
 
-    // Scroll to bottom immediately upon user send
+    // Smooth scroll to bottom upon sending
     setTimeout(() => {
       if (messagesEndRef.current) {
         messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
-    }, 40);
+    }, 50);
   };
 
   // --- 3. ATTACHMENT HANDLER ---
@@ -191,30 +192,33 @@ export default function ChatBox({
     reader.readAsDataURL(file);
   };
 
-  // --- 4. CONTROLLED SWIPE-TO-REPLY & DOUBLE-TAP / LONG-PRESS GESTURES ---
+  // --- 4. SWIPE-TO-REPLY & LONG-PRESS / DOUBLE-TAP GESTURES ---
   const handleTouchStart = (e, msg) => {
     const touch = e.touches[0];
     const now = Date.now();
     touchStartPos.current = { x: touch.clientX, y: touch.clientY, time: now };
     isSwipingHorizontal.current = false;
 
-    // Double-tap detection -> open emoji reaction popup
+    // Double-tap detection -> open emoji reaction picker
     if (lastTapRef.current.msgId === msg.id && now - lastTapRef.current.time < 320) {
-      clearTimeout(longPressTimerRef.current);
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
       openReactionPicker(msg.id, touch.clientX, touch.clientY);
       lastTapRef.current = { time: 0, msgId: null };
       return;
     }
     lastTapRef.current = { time: now, msgId: msg.id };
 
-    // Long press timer (380ms) -> open reaction picker & highlight context
+    // Long press timer (360ms) -> open emoji reaction picker
     longPressTimerRef.current = setTimeout(() => {
       if (window.navigator?.vibrate) {
-        window.navigator.vibrate(40);
+        window.navigator.vibrate(35);
       }
       openReactionPicker(msg.id, touch.clientX, touch.clientY);
       setSelectedMessage(msg);
-    }, 380);
+    }, 360);
   };
 
   const handleTouchMove = (e, msgId) => {
@@ -222,7 +226,7 @@ export default function ChatBox({
     const deltaX = touch.clientX - touchStartPos.current.x;
     const deltaY = touch.clientY - touchStartPos.current.y;
 
-    // If scrolling vertically, cancel long-press and horizontal swipe
+    // If scrolling vertically, cancel long-press and ignore horizontal swipe
     if (Math.abs(deltaY) > 8) {
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
@@ -232,8 +236,10 @@ export default function ChatBox({
     }
 
     // Controlled right-swipe strictly on the individual message bubble (0px to max 45px)
+    // Prevents horizontal swipe from translating or moving the overall chat window
     if (deltaX > 8 && Math.abs(deltaY) < 18) {
       isSwipingHorizontal.current = true;
+      e.stopPropagation(); // Stop parent window scroll / navigation gesture
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = null;
@@ -251,8 +257,8 @@ export default function ChatBox({
 
     const offset = bubbleOffsets[msg.id] || 0;
 
-    // Trigger reply if swiped right >= 32px
-    if (offset >= 32) {
+    // Trigger reply if swiped right >= 30px
+    if (offset >= 30) {
       if (window.navigator?.vibrate) {
         window.navigator.vibrate(25);
       }
@@ -261,15 +267,14 @@ export default function ChatBox({
         content: msg.content || (msg.fileUrl ? "Media file" : ""),
         senderName: msg.senderName || "User"
       });
-      // Automatically pop up mobile keyboard
+
+      // Focus input automatically so mobile keyboard pops up immediately
       setTimeout(() => {
-        if (inputRef.current) {
-          inputRef.current.focus();
-        }
+        inputRef.current?.focus();
       }, 50);
     }
 
-    // Elastic reset animation
+    // Reset offset with smooth animation
     setBubbleOffsets((prev) => ({ ...prev, [msg.id]: 0 }));
     isSwipingHorizontal.current = false;
   };
@@ -282,16 +287,29 @@ export default function ChatBox({
     });
   };
 
-  const handleApplyReaction = (emoji) => {
+  // --- 5. FIRESTORE EMOJI REACTION PERSISTENCE ---
+  const handleApplyReaction = async (emoji) => {
     if (!reactionPicker) return;
+    const msgId = reactionPicker.msgId;
+
     if (onReactMessage) {
-      onReactMessage(reactionPicker.msgId, emoji);
+      onReactMessage(msgId, emoji);
+    } else if (activeChat?.id && currentUserId) {
+      try {
+        const msgDocRef = doc(db, "rooms", activeChat.id, "messages", msgId);
+        await updateDoc(msgDocRef, {
+          [`reactions.${currentUserId}`]: emoji
+        });
+      } catch (err) {
+        console.error("Failed to update reaction in Firestore:", err);
+      }
     }
+
     setReactionPicker(null);
     if (showToast) showToast(`Reacted ${emoji}`);
   };
 
-  // --- 5. TOP CONTEXT ACTION HANDLERS ---
+  // --- 6. TOP CONTEXT ACTION HANDLERS ---
   const handleCopySelected = () => {
     if (!selectedMessage) return;
     navigator.clipboard.writeText(selectedMessage.content || "");
@@ -307,9 +325,7 @@ export default function ChatBox({
       senderName: selectedMessage.senderName || "User"
     });
     setTimeout(() => {
-      if (inputRef.current) {
-        inputRef.current.focus();
-      }
+      inputRef.current?.focus();
     }, 50);
     setSelectedMessage(null);
   };
@@ -325,9 +341,7 @@ export default function ChatBox({
     setEditingMessage(selectedMessage);
     setInputText(selectedMessage.content || "");
     setTimeout(() => {
-      if (inputRef.current) {
-        inputRef.current.focus();
-      }
+      inputRef.current?.focus();
     }, 50);
     setSelectedMessage(null);
   };
@@ -358,7 +372,7 @@ export default function ChatBox({
 
   const isSelectedSentByMe =
     selectedMessage &&
-    (selectedMessage.senderPhone === myIdent || selectedMessage.senderId === myIdent);
+    (selectedMessage.senderPhone === currentUserId || selectedMessage.senderId === currentUserId);
 
   return (
     <div
@@ -372,7 +386,10 @@ export default function ChatBox({
         height: "100%",
         backgroundColor: THEME.bg,
         position: "relative",
-        overflow: "hidden"
+        overflow: "hidden",
+        touchAction: "pan-y", // PREVENTS horizontal swipe from translating overall window
+        overscrollBehaviorX: "none",
+        overscrollBehaviorY: "contain"
       }}
     >
       {/* --- TOP HEADER: ACTION BAR OR CHAT BAR --- */}
@@ -680,7 +697,7 @@ export default function ChatBox({
         </div>
       )}
 
-      {/* --- 6. DUAL-DIRECTION VERTICAL SCROLLING CONTAINER --- */}
+      {/* --- 7. DUAL-DIRECTION VERTICAL SCROLLING CONTAINER --- */}
       <div
         ref={messagesContainerRef}
         style={{
@@ -690,6 +707,7 @@ export default function ChatBox({
           overflowX: "hidden",
           WebkitOverflowScrolling: "touch",
           overscrollBehaviorY: "contain",
+          overscrollBehaviorX: "none",
           touchAction: "pan-y",
           padding: "14px 16px",
           display: "flex",
@@ -714,7 +732,7 @@ export default function ChatBox({
           </div>
         ) : (
           messages.map((msg) => {
-            const isMe = msg.senderPhone === myIdent || msg.senderId === myIdent;
+            const isMe = msg.senderPhone === currentUserId || msg.senderId === currentUserId;
             const isVanished = msg.type === "vanished";
             const isDeleted = msg.type === "deleted";
             const isSelected = selectedMessage?.id === msg.id;
@@ -732,7 +750,7 @@ export default function ChatBox({
                   position: "relative"
                 }}
               >
-                {/* Swipe Reply Icon Indicator (Revealed as bubble translates right) */}
+                {/* Swipe Reply Icon Indicator */}
                 {currentOffset > 8 && (
                   <div
                     style={{
@@ -741,7 +759,7 @@ export default function ChatBox({
                       top: "50%",
                       transform: "translateY(-50%)",
                       color: THEME.primary,
-                      opacity: Math.min(1, currentOffset / 32),
+                      opacity: Math.min(1, currentOffset / 30),
                       transition: "opacity 0.1s ease"
                     }}
                   >
@@ -749,7 +767,7 @@ export default function ChatBox({
                   </div>
                 )}
 
-                {/* Individual Message Bubble with Controlled Right-Swipe (Max 45px) */}
+                {/* Individual Message Bubble with Controlled Right-Swipe */}
                 <div
                   onTouchStart={(e) => handleTouchStart(e, msg)}
                   onTouchMove={(e) => handleTouchMove(e, msg.id)}
@@ -780,7 +798,7 @@ export default function ChatBox({
                     transition: currentOffset === 0 ? "transform 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28)" : "none"
                   }}
                 >
-                  {/* Quoted Message */}
+                  {/* Quoted Reply Header */}
                   {msg.replyTo && !isDeleted && (
                     <div
                       style={{
@@ -1006,7 +1024,7 @@ export default function ChatBox({
         </div>
       )}
 
-      {/* --- 7. CHAT INPUT COMPOSER --- */}
+      {/* --- 8. CHAT INPUT COMPOSER --- */}
       <form
         onSubmit={handleSend}
         style={{
