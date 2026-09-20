@@ -25,9 +25,22 @@ import {
   Star,
   Clock,
   Plus,
-  Smile
+  Smile,
+  Mic,
+  MicOff,
+  Download,
+  Play,
+  Pause,
+  RotateCw,
+  Crop,
+  Palette,
+  Sparkles,
+  PhoneCall,
+  PhoneMissed,
+  Square,
+  AlertCircle
 } from "lucide-react";
-import { db, styles } from "../../firebase";
+import { db, styles, normalizePhone } from "../../firebase";
 
 // Fast reaction row emojis
 const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
@@ -43,6 +56,160 @@ const EXTENDED_EMOJIS = [
   "💡", "💯", "💔", "❤️‍🔥", "👏", "🙌", "🤝", "✌️", "🤞", "🤙", "👋", "🫡",
   "💪", "✨", "💥", "⚡", "⭐", "🌟", "🎯", "🏆", "🎁", "🎈", "🍻", "☕"
 ];
+
+// Helper to format seconds to mm:ss
+function formatTime(secs = 0) {
+  const totalSecs = Math.max(0, Math.floor(secs || 0));
+  const m = Math.floor(totalSecs / 60).toString().padStart(2, "0");
+  const s = (totalSecs % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+// Interactive Audio Bubble Player Component
+function AudioBubblePlayer({ fileUrl, duration = 0, THEME, isMe }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(duration || 0);
+  const audioRef = useRef(null);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const onLoadedMetadata = () => {
+      if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration)) {
+        setAudioDuration(Math.floor(audio.duration));
+      }
+    };
+    const onTimeUpdate = () => {
+      setCurrentTime(audio.currentTime);
+    };
+    const onEnded = () => {
+      setIsPlaying(false);
+      setCurrentTime(0);
+    };
+
+    audio.addEventListener("loadedmetadata", onLoadedMetadata);
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    audio.addEventListener("ended", onEnded);
+
+    return () => {
+      audio.removeEventListener("loadedmetadata", onLoadedMetadata);
+      audio.removeEventListener("timeupdate", onTimeUpdate);
+      audio.removeEventListener("ended", onEnded);
+    };
+  }, [fileUrl]);
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play().catch((err) => console.warn("Audio play error:", err));
+      setIsPlaying(true);
+    }
+  };
+
+  const handleSeek = (e) => {
+    if (!audioRef.current || !audioDuration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const pct = Math.max(0, Math.min(1, clickX / rect.width));
+    const newTime = pct * audioDuration;
+    audioRef.current.currentTime = newTime;
+    setCurrentTime(newTime);
+  };
+
+  const progressPct = audioDuration > 0 ? (currentTime / audioDuration) * 100 : 0;
+
+  // Render simulated waveform frequency bars
+  const waveBars = [35, 60, 45, 80, 95, 70, 50, 85, 60, 40, 75, 90, 65, 45, 70, 55];
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "10px",
+        padding: "8px 10px",
+        borderRadius: "10px",
+        backgroundColor: "rgba(0,0,0,0.18)",
+        minWidth: "220px",
+        maxWidth: "280px"
+      }}
+    >
+      <audio ref={audioRef} src={fileUrl} preload="metadata" />
+
+      {/* Play / Pause button */}
+      <button
+        type="button"
+        onClick={togglePlay}
+        style={{
+          width: "36px",
+          height: "36px",
+          borderRadius: "50%",
+          backgroundColor: isMe ? THEME.primary : THEME.accent,
+          border: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          cursor: "pointer",
+          color: "#fff",
+          flexShrink: 0
+        }}
+      >
+        {isPlaying ? <Pause size={16} fill="#fff" /> : <Play size={16} fill="#fff" style={{ marginLeft: "2px" }} />}
+      </button>
+
+      {/* Waveform Scrubber & Timer */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          onClick={handleSeek}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "2px",
+            height: "26px",
+            cursor: "pointer",
+            padding: "2px 0"
+          }}
+          title="Click to seek"
+        >
+          {waveBars.map((height, idx) => {
+            const barPct = (idx / waveBars.length) * 100;
+            const isPlayed = barPct <= progressPct;
+            return (
+              <div
+                key={idx}
+                style={{
+                  flex: 1,
+                  height: `${height}%`,
+                  backgroundColor: isPlayed ? (isMe ? THEME.primary : THEME.accent) : "rgba(255,255,255,0.3)",
+                  borderRadius: "2px",
+                  transition: "background-color 0.1s linear"
+                }}
+              />
+            );
+          })}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: "10px",
+            opacity: 0.75,
+            marginTop: "2px"
+          }}
+        >
+          <span>{formatTime(currentTime)}</span>
+          <span>{formatTime(audioDuration || duration)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function ChatBox({
   activeChat,
@@ -118,6 +285,103 @@ export default function ChatBox({
   const isLongPressTriggered = useRef(false);
   const [bubbleOffsets, setBubbleOffsets] = useState({});
 
+  // -------------------------------------------------------------
+  // 1. MEDIA PREVIEW & EDIT STATE (Point 15)
+  // -------------------------------------------------------------
+  const [pendingMedia, setPendingMedia] = useState(null);
+  const canvasRef = useRef(null);
+  const isDrawingRef = useRef(false);
+  const [brushColor, setBrushColor] = useState("#22c55e");
+  const [brushSize, setBrushSize] = useState(5);
+  const [isBrushActive, setIsBrushActive] = useState(false);
+  const [mediaRotation, setMediaRotation] = useState(0); // 0, 90, 180, 270
+
+  // -------------------------------------------------------------
+  // 2. REAL-TIME VOICE MESSAGES (Point 16)
+  // -------------------------------------------------------------
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
+  const [recordedAudioBlob, setRecordedAudioBlob] = useState(null);
+  const [recordedAudioUrl, setRecordedAudioUrl] = useState(null);
+  const [voiceWaveform, setVoiceWaveform] = useState([10, 25, 40, 20, 60, 30, 80, 45, 20]);
+  const [isPreviewingVoice, setIsPreviewingVoice] = useState(false);
+  const [isVoicePreviewPlaying, setIsVoicePreviewPlaying] = useState(false);
+
+  const mediaRecorderRef = useRef(null);
+  const audioStreamRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const recordingTimerRef = useRef(null);
+  const visualizerAnimRef = useRef(null);
+  const previewAudioRef = useRef(null);
+
+  // -------------------------------------------------------------
+  // 3. PUSH NOTIFICATIONS TRACKING (Point 11 & 14)
+  // -------------------------------------------------------------
+  const lastKnownMsgIdRef = useRef(null);
+
+  // Request browser Notification permission on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+    }
+  }, []);
+
+  // Check incoming messages and trigger push notifications if window in background or not active
+  useEffect(() => {
+    if (!messages || messages.length === 0) return;
+    const latestMsg = messages[messages.length - 1];
+    if (!latestMsg || !latestMsg.id) return;
+
+    if (lastKnownMsgIdRef.current && lastKnownMsgIdRef.current !== latestMsg.id) {
+      const isFromPeer =
+        latestMsg.senderPhone !== currentUserId &&
+        latestMsg.senderId !== currentUserId;
+
+      if (isFromPeer) {
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          const title = activeChat?.name || latestMsg.senderName || "New Message";
+          let body = latestMsg.content || "";
+          if (latestMsg.type === "call" || latestMsg.callType) {
+            body = latestMsg.content;
+          } else if (latestMsg.type === "image") {
+            body = "📷 Photo received";
+          } else if (latestMsg.type === "video") {
+            body = "📹 Video received";
+          } else if (latestMsg.type === "voice" || latestMsg.type === "audio") {
+            body = "🎤 Voice message";
+          } else if (latestMsg.type === "file") {
+            body = `📎 File: ${latestMsg.fileName || "document"}`;
+          }
+
+          const icon =
+            activeChat?.avatar ||
+            latestMsg.senderAvatar ||
+            `https://api.dicebear.com/7.x/identicon/svg?seed=${latestMsg.senderId || "user"}`;
+
+          try {
+            const notification = new Notification(title, {
+              body,
+              icon,
+              badge: icon,
+              tag: latestMsg.id,
+              silent: false
+            });
+            notification.onclick = () => {
+              window.focus();
+            };
+          } catch (e) {
+            console.warn("Push notification failed:", e);
+          }
+        }
+      }
+    }
+
+    lastKnownMsgIdRef.current = latestMsg.id;
+  }, [messages, currentUserId, activeChat]);
+
   // Synchronize pinned message
   useEffect(() => {
     if (activeChat?.pinnedMessage) {
@@ -134,6 +398,8 @@ export default function ChatBox({
     setShowFullEmojiPicker(false);
     setShowDeleteDialog(false);
     setShowScheduleModal(false);
+    setPendingMedia(null);
+    cleanupVoiceRecording();
   }, [activeChat?.id]);
 
   // Smooth scroll to bottom on new message if user is near bottom
@@ -143,7 +409,7 @@ export default function ChatBox({
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
 
-    if (distanceFromBottom < 280) {
+    if (distanceFromBottom < 320) {
       if (messagesEndRef.current) {
         messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
       }
@@ -170,7 +436,30 @@ export default function ChatBox({
     });
   }, [messages, currentUserId]);
 
-  // --- SEND MESSAGE & STICKY KEYBOARD FOCUS RETENTION ---
+  // -------------------------------------------------------------
+  // ATTACHMENT DOWNLOAD TO LOCAL STORAGE
+  // -------------------------------------------------------------
+  const handleDownloadAttachment = (e, fileUrl, fileName = "infinity_download") => {
+    e.stopPropagation();
+    if (!fileUrl) return;
+
+    try {
+      const a = document.createElement("a");
+      a.href = fileUrl;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      if (showToast) showToast(`Downloaded: ${fileName}`);
+    } catch (err) {
+      console.warn("Download error, opening directly:", err);
+      window.open(fileUrl, "_blank");
+    }
+  };
+
+  // -------------------------------------------------------------
+  // SEND MESSAGE & STICKY KEYBOARD FOCUS
+  // -------------------------------------------------------------
   const handleSend = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!inputText.trim() || !activeChat) return;
@@ -203,7 +492,6 @@ export default function ChatBox({
       setEditingMessage(null);
       setInputText("");
 
-      // Sticky keyboard retention
       setTimeout(() => {
         inputRef.current?.focus();
       }, 30);
@@ -258,7 +546,7 @@ export default function ChatBox({
       }
     }
 
-    // STICKY KEYBOARD RETENTION: Keep mobile virtual keyboard focused and open
+    // Sticky keyboard retention
     setTimeout(() => {
       inputRef.current?.focus();
       if (messagesEndRef.current) {
@@ -267,7 +555,290 @@ export default function ChatBox({
     }, 40);
   };
 
-  // --- SWIPE-TO-REPLY & LONG-PRESS GESTURE CONTROLS ---
+  // -------------------------------------------------------------
+  // MEDIA PREVIEW & EDITING MODAL (Point 15)
+  // -------------------------------------------------------------
+  const handleFileSelect = (e, fileType) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setShowAttachMenu(false);
+    const reader = new FileReader();
+
+    reader.onload = (loadEvt) => {
+      const base64Data = loadEvt.target.result;
+      setPendingMedia({
+        file,
+        fileType,
+        rawDataUrl: base64Data,
+        fileName: file.name,
+        fileSize: (file.size / 1024).toFixed(1) + " KB",
+        isHD: false,
+        caption: ""
+      });
+      setMediaRotation(0);
+      setIsBrushActive(false);
+    };
+
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  // Draw image into canvas on initial load or rotation
+  useEffect(() => {
+    if (!pendingMedia || pendingMedia.fileType !== "image" || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = pendingMedia.rawDataUrl;
+
+    img.onload = () => {
+      const isRotated = mediaRotation % 180 !== 0;
+      const targetW = isRotated ? img.height : img.width;
+      const targetH = isRotated ? img.width : img.height;
+
+      const maxDim = 800;
+      const scale = Math.min(1, maxDim / Math.max(targetW, targetH));
+      canvas.width = targetW * scale;
+      canvas.height = targetH * scale;
+
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((mediaRotation * Math.PI) / 180);
+      const drawW = isRotated ? canvas.height : canvas.width;
+      const drawH = isRotated ? canvas.width : canvas.height;
+      ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
+      ctx.restore();
+    };
+  }, [pendingMedia?.rawDataUrl, mediaRotation]);
+
+  // Canvas Brush Drawing handlers
+  const startDrawing = (e) => {
+    if (!isBrushActive || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const clientX = e.clientX || e.touches?.[0]?.clientX;
+    const clientY = e.clientY || e.touches?.[0]?.clientY;
+    if (clientX === undefined || clientY === undefined) return;
+
+    isDrawingRef.current = true;
+    ctx.beginPath();
+    ctx.moveTo((clientX - rect.left) * scaleX, (clientY - rect.top) * scaleY);
+    ctx.strokeStyle = brushColor;
+    ctx.lineWidth = brushSize;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+  };
+
+  const drawOnCanvas = (e) => {
+    if (!isDrawingRef.current || !isBrushActive || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    const clientX = e.clientX || e.touches?.[0]?.clientX;
+    const clientY = e.clientY || e.touches?.[0]?.clientY;
+    if (clientX === undefined || clientY === undefined) return;
+
+    ctx.lineTo((clientX - rect.left) * scaleX, (clientY - rect.top) * scaleY);
+    ctx.stroke();
+  };
+
+  const stopDrawing = () => {
+    isDrawingRef.current = false;
+  };
+
+  const handleRotateImage = () => {
+    setMediaRotation((prev) => (prev + 90) % 360);
+  };
+
+  const handleSendEditedMedia = () => {
+    if (!pendingMedia) return;
+
+    let finalDataUrl = pendingMedia.rawDataUrl;
+    if (pendingMedia.fileType === "image" && canvasRef.current) {
+      finalDataUrl = canvasRef.current.toDataURL(
+        "image/jpeg",
+        pendingMedia.isHD ? 0.98 : 0.75
+      );
+    }
+
+    const payload = {
+      type: pendingMedia.fileType,
+      fileUrl: finalDataUrl,
+      fileName: pendingMedia.fileName,
+      fileSize: pendingMedia.fileSize,
+      isHD: pendingMedia.isHD,
+      content: pendingMedia.caption.trim() || (pendingMedia.fileType === "image" ? "Photo" : pendingMedia.fileType === "video" ? "Video" : pendingMedia.fileName),
+      isViewOnce: !!viewOnceMode
+    };
+
+    if (onSendMedia) {
+      onSendMedia(payload);
+    } else if (onSendMessage) {
+      onSendMessage(payload);
+    }
+
+    setPendingMedia(null);
+    if (showToast) showToast(`${pendingMedia.isHD ? "HD " : ""}${pendingMedia.fileType} sent!`);
+  };
+
+  // -------------------------------------------------------------
+  // REAL-TIME VOICE RECORDING LOGIC (Point 16)
+  // -------------------------------------------------------------
+  const cleanupVoiceRecording = () => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (visualizerAnimRef.current) {
+      cancelAnimationFrame(visualizerAnimRef.current);
+      visualizerAnimRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((t) => t.stop());
+      audioStreamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+    setIsRecordingVoice(false);
+    setVoiceRecordingSeconds(0);
+    setRecordedAudioBlob(null);
+    if (recordedAudioUrl) {
+      URL.revokeObjectURL(recordedAudioUrl);
+      setRecordedAudioUrl(null);
+    }
+    setIsPreviewingVoice(false);
+  };
+
+  const startVoiceRecording = async () => {
+    try {
+      cleanupVoiceRecording();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+
+      // Setup Web Audio Analyser for dynamic voice wave bars
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioContextRef.current = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 64;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const updateWave = () => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteFrequencyData(dataArray);
+        const bars = [];
+        const step = Math.floor(dataArray.length / 9);
+        for (let i = 0; i < 9; i++) {
+          const val = dataArray[i * step] || 0;
+          bars.push(Math.max(12, Math.min(100, Math.floor((val / 255) * 100))));
+        }
+        setVoiceWaveform(bars);
+        visualizerAnimRef.current = requestAnimationFrame(updateWave);
+      };
+      updateWave();
+
+      // Setup MediaRecorder
+      const chunks = [];
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+        ? "audio/mp4"
+        : "audio/ogg";
+
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        setRecordedAudioBlob(blob);
+        setRecordedAudioUrl(url);
+        setIsPreviewingVoice(true);
+      };
+
+      recorder.start(100);
+      setIsRecordingVoice(true);
+      setVoiceRecordingSeconds(0);
+
+      recordingTimerRef.current = setInterval(() => {
+        setVoiceRecordingSeconds((prev) => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.warn("Microphone access error:", err);
+      if (showToast) {
+        showToast("Microphone access denied. Enable mic in browser settings.");
+      }
+    }
+  };
+
+  const stopVoiceRecording = () => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (visualizerAnimRef.current) {
+      cancelAnimationFrame(visualizerAnimRef.current);
+      visualizerAnimRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((t) => t.stop());
+    }
+    setIsRecordingVoice(false);
+  };
+
+  const handleSendVoiceNote = () => {
+    if (!recordedAudioBlob) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64Data = reader.result;
+      const durationText = formatTime(voiceRecordingSeconds);
+      const payload = {
+        type: "voice",
+        fileUrl: base64Data,
+        fileName: `Voice_${Date.now()}.webm`,
+        duration: voiceRecordingSeconds,
+        content: `🎤 Voice note (${durationText})`,
+        isViewOnce: !!viewOnceMode
+      };
+
+      if (onSendMedia) {
+        onSendMedia(payload);
+      } else if (onSendMessage) {
+        onSendMessage(payload);
+      }
+      cleanupVoiceRecording();
+      if (showToast) showToast("Voice message sent!");
+    };
+    reader.readAsDataURL(recordedAudioBlob);
+  };
+
+  // -------------------------------------------------------------
+  // GESTURE & ACTION CONTROLS (Swipe to reply, long press, etc)
+  // -------------------------------------------------------------
   const handleTouchStart = (e, msg) => {
     const touch = e.touches[0];
     touchStartPos.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
@@ -278,7 +849,6 @@ export default function ChatBox({
       clearTimeout(longPressTimerRef.current);
     }
 
-    // 400ms long-press triggers WhatsApp floating actions modal
     longPressTimerRef.current = setTimeout(() => {
       isLongPressTriggered.current = true;
       if (window.navigator?.vibrate) {
@@ -294,7 +864,6 @@ export default function ChatBox({
     const deltaX = touch.clientX - touchStartPos.current.x;
     const deltaY = touch.clientY - touchStartPos.current.y;
 
-    // Vertical scroll: cancel long-press and let container scroll smoothly
     if (Math.abs(deltaY) > 8) {
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
@@ -303,7 +872,6 @@ export default function ChatBox({
       if (!isSwipingHorizontal.current) return;
     }
 
-    // Controlled right swipe on the individual message bubble
     if (deltaX > 10 && Math.abs(deltaY) < 18) {
       isSwipingHorizontal.current = true;
       if (longPressTimerRef.current) {
@@ -322,8 +890,6 @@ export default function ChatBox({
     }
 
     const offset = bubbleOffsets[msg.id] || 0;
-
-    // Swiping right >= 30px activates reply mode & sticky focuses input
     if (offset >= 30 && !isLongPressTriggered.current) {
       if (window.navigator?.vibrate) {
         window.navigator.vibrate(25);
@@ -334,7 +900,6 @@ export default function ChatBox({
         senderName: msg.senderName || "User"
       });
 
-      // Sticky input focus
       setTimeout(() => {
         inputRef.current?.focus();
       }, 40);
@@ -344,26 +909,7 @@ export default function ChatBox({
     isSwipingHorizontal.current = false;
   };
 
-  // Mouse fallback for testing
-  const handleMouseDown = (e, msg) => {
-    touchStartPos.current = { x: e.clientX, y: e.clientY, time: Date.now() };
-    isLongPressTriggered.current = false;
-
-    longPressTimerRef.current = setTimeout(() => {
-      isLongPressTriggered.current = true;
-      setToolbarMessage(msg);
-      setShowFullEmojiPicker(false);
-    }, 450);
-  };
-
-  const handleMouseUp = () => {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-  };
-
-  // --- FIRESTORE ACTIONS: REACTION, STAR, PIN, EDIT, DELETE, SCHEDULE ---
+  // Long-press Actions
   const handleApplyReaction = async (emoji, msgTarget = toolbarMessage) => {
     if (!msgTarget || !activeChat?.id) return;
     const msgId = msgTarget.id;
@@ -480,14 +1026,6 @@ export default function ChatBox({
     }, 50);
   };
 
-  const handleOpenSchedule = (msg = toolbarMessage) => {
-    if (!msg) return;
-    const nowPlus1Hr = new Date(Date.now() + 60 * 60 * 1000);
-    const formatted = nowPlus1Hr.toISOString().slice(0, 16);
-    setScheduleDateTime(formatted);
-    setShowScheduleModal(true);
-  };
-
   const handleConfirmSchedule = async () => {
     if (!toolbarMessage || !activeChat?.id) return;
     try {
@@ -507,15 +1045,12 @@ export default function ChatBox({
       });
       if (showToast) {
         showToast(
-          `Reminder scheduled for ${new Date(scheduleDateTime).toLocaleString(
-            [],
-            {
-              month: "short",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit"
-            }
-          )}`
+          `Reminder scheduled for ${new Date(scheduleDateTime).toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit"
+          })}`
         );
       }
     } catch (err) {
@@ -561,45 +1096,13 @@ export default function ChatBox({
     setToolbarMessage(null);
   };
 
-  const handleFileSelect = (e, fileType) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setShowAttachMenu(false);
-    const reader = new FileReader();
-
-    reader.onload = (loadEvt) => {
-      const base64Data = loadEvt.target.result;
-      if (onSendMedia) {
-        onSendMedia({
-          type: fileType,
-          fileUrl: base64Data,
-          fileName: file.name,
-          fileSize: (file.size / 1024).toFixed(1) + " KB",
-          content:
-            fileType === "image"
-              ? "Photo"
-              : fileType === "video"
-              ? "Video"
-              : file.name,
-          isViewOnce: !!viewOnceMode
-        });
-      }
-    };
-
-    reader.readAsDataURL(file);
-  };
-
   const isMsgSentByMe = (msg) =>
     msg && (msg.senderPhone === currentUserId || msg.senderId === currentUserId);
 
   return (
     <div
       className="chatbox-root"
-      onContextMenu={(e) => {
-        // 4. DISABLE BROWSER CONTEXTUAL TEXT SELECTION POPUPS
-        e.preventDefault();
-      }}
+      onContextMenu={(e) => e.preventDefault()}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -615,7 +1118,6 @@ export default function ChatBox({
         WebkitUserSelect: "none"
       }}
     >
-      {/* Strict CSS Rules for disabling browser selection & touch-callouts */}
       <style>{`
         .chatbox-root, .chatbox-root * {
           -webkit-user-select: none !important;
@@ -834,9 +1336,7 @@ export default function ChatBox({
                 size={15}
                 color={isMuted ? THEME.danger : THEME.textMuted}
               />
-              <span>
-                {isMuted ? "Unmute Notifications" : "Mute Notifications"}
-              </span>
+              <span>{isMuted ? "Unmute Notifications" : "Mute Notifications"}</span>
             </button>
 
             <button
@@ -845,9 +1345,7 @@ export default function ChatBox({
                 setShowChatOptions(false);
                 if (showToast)
                   showToast(
-                    !vanishMode
-                      ? "Vanish Mode ON (15s)"
-                      : "Vanish Mode OFF"
+                    !vanishMode ? "Vanish Mode ON (15s)" : "Vanish Mode OFF"
                   );
               }}
               style={{
@@ -921,14 +1419,11 @@ export default function ChatBox({
         </div>
       )}
 
-      {/* --- 1. SMOOTH DUAL-SCROLLING MESSAGES CONTAINER --- */}
+      {/* --- MESSAGES CONTAINER --- */}
       <div
         ref={messagesContainerRef}
         className="overflow-y-auto overscroll-y-contain -webkit-overflow-scrolling-touch h-full"
-        onTouchMove={(e) => {
-          // Prevent scroll chaining or pull-to-refresh reload from bubbling outside thread
-          e.stopPropagation();
-        }}
+        onTouchMove={(e) => e.stopPropagation()}
         style={{
           flex: 1,
           height: "100%",
@@ -949,112 +1444,96 @@ export default function ChatBox({
             style={{
               margin: "auto",
               textAlign: "center",
-              color: THEME.textMuted
+              color: THEME.textMuted,
+              fontSize: "13px"
             }}
           >
-            <div
-              style={{
-                display: "inline-block",
-                padding: "6px 14px",
-                borderRadius: "8px",
-                backgroundColor: THEME.card,
-                fontSize: "12px",
-                border: `1px solid ${THEME.border}`
-              }}
-            >
-              🔒 End-to-end encrypted. Long-press any message for full WhatsApp toolbar.
-            </div>
+            No messages yet. Send a greeting, share media, or record a voice note!
           </div>
         ) : (
           visibleMessages.map((msg) => {
             const isMe = isMsgSentByMe(msg);
-            const isDeleted = msg.type === "deleted";
-            const isVanished = msg.type === "vanished";
-            const isStarred =
-              msg.starred?.[currentUserId] || msg.isStarred;
-            const currentOffset = bubbleOffsets[msg.id] || 0;
-            const isSelected = toolbarMessage?.id === msg.id;
+            const isDeleted = msg.type === "deleted" || msg.isDeleted;
+            const isCall = msg.type === "call" || msg.callType;
+            const isVoice = msg.type === "voice" || msg.type === "audio";
+            const isMedia = !!msg.fileUrl && !isVoice;
+            const isStarred = msg.starred?.[currentUserId] || msg.isStarred;
+            const offset = bubbleOffsets[msg.id] || 0;
 
             return (
               <div
                 key={msg.id}
+                onTouchStart={(e) => handleTouchStart(e, msg)}
+                onTouchMove={(e) => handleTouchMove(e, msg.id)}
+                onTouchEnd={(e) => handleTouchEnd(e, msg)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setToolbarMessage(msg);
+                  setShowFullEmojiPicker(false);
+                }}
                 style={{
                   display: "flex",
                   flexDirection: "column",
                   alignItems: isMe ? "flex-end" : "flex-start",
-                  width: "100%",
-                  marginBottom: "2px",
+                  transform: `translateX(${offset}px)`,
+                  transition: isSwipingHorizontal.current ? "none" : "transform 0.15s ease",
                   position: "relative"
                 }}
               >
-                {/* Swipe Reply Icon Indicator */}
-                {currentOffset > 8 && (
+                {/* Swipe Reply indicator icon */}
+                {offset > 10 && (
                   <div
                     style={{
                       position: "absolute",
                       left: "-28px",
                       top: "50%",
                       transform: "translateY(-50%)",
-                      color: THEME.primary,
-                      opacity: Math.min(1, currentOffset / 30),
-                      transition: "opacity 0.1s ease"
+                      opacity: Math.min(1, offset / 30)
                     }}
                   >
-                    <Reply size={18} />
+                    <Reply size={18} color={THEME.primary} />
                   </div>
                 )}
 
-                {/* Individual Message Bubble */}
+                {/* --- MESSAGE BUBBLE --- */}
                 <div
-                  onTouchStart={(e) => handleTouchStart(e, msg)}
-                  onTouchMove={(e) => handleTouchMove(e, msg.id)}
-                  onTouchEnd={(e) => handleTouchEnd(e, msg)}
-                  onMouseDown={(e) => handleMouseDown(e, msg)}
-                  onMouseUp={handleMouseUp}
-                  onMouseLeave={handleMouseUp}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setToolbarMessage(msg);
-                    setShowFullEmojiPicker(false);
-                  }}
                   style={{
                     maxWidth: "82%",
-                    borderRadius: "12px",
-                    borderTopRightRadius: isMe ? "2px" : "12px",
-                    borderTopLeftRadius: !isMe ? "2px" : "12px",
-                    padding: "8px 12px",
-                    backgroundColor: isSelected
-                      ? "rgba(34, 197, 94, 0.4)"
+                    padding: isCall ? "10px 14px" : isMedia ? "6px" : "8px 12px",
+                    borderRadius: "14px",
+                    backgroundColor: isCall
+                      ? msg.status === "missed" || msg.content?.toLowerCase().includes("missed")
+                        ? "rgba(239, 68, 68, 0.15)"
+                        : "rgba(34, 197, 94, 0.15)"
                       : isMe
                       ? THEME.primary
                       : THEME.card,
-                    border: isSelected
-                      ? `1.5px solid ${THEME.primary}`
-                      : "1.5px solid transparent",
-                    color: "#fff",
-                    boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+                    color: isMe && !isCall ? "#fff" : THEME.text,
+                    border: isCall
+                      ? `1px solid ${
+                          msg.status === "missed" || msg.content?.toLowerCase().includes("missed")
+                            ? "rgba(239, 68, 68, 0.45)"
+                            : "rgba(34, 197, 94, 0.45)"
+                        }`
+                      : `1px solid ${THEME.border}`,
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
                     position: "relative",
-                    wordBreak: "break-word",
-                    userSelect: "none",
-                    WebkitUserSelect: "none",
-                    transform: `translateX(${currentOffset}px)`,
-                    transition:
-                      currentOffset === 0
-                        ? "transform 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28)"
-                        : "none"
+                    cursor: "pointer"
+                  }}
+                  onClick={() => {
+                    if (isCall && startCall) {
+                      startCall(activeChat, msg.callType || "audio");
+                    }
                   }}
                 >
-                  {/* Quoted Reply Header */}
-                  {msg.replyTo && !isDeleted && (
+                  {/* Quoted Replying Header */}
+                  {msg.replyTo && (
                     <div
                       style={{
-                        backgroundColor: "rgba(0,0,0,0.2)",
-                        borderLeft: `3px solid ${
-                          isMe ? "#fff" : THEME.primary
-                        }`,
-                        borderRadius: "4px",
+                        backgroundColor: "rgba(0,0,0,0.18)",
+                        borderLeft: `3px solid ${isMe ? "#fff" : THEME.primary}`,
                         padding: "4px 8px",
+                        borderRadius: "4px",
                         marginBottom: "6px",
                         fontSize: "11px"
                       }}
@@ -1064,10 +1543,10 @@ export default function ChatBox({
                       </div>
                       <div
                         style={{
-                          opacity: 0.8,
+                          opacity: 0.75,
+                          whiteSpace: "nowrap",
                           overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap"
+                          textOverflow: "ellipsis"
                         }}
                       >
                         {msg.replyTo.content}
@@ -1075,41 +1554,185 @@ export default function ChatBox({
                     </div>
                   )}
 
-                  {/* Media Content */}
-                  {msg.fileUrl && !isVanished && !isDeleted && (
+                  {/* 1. CALL LOG BUBBLE (Point 11 & 14) */}
+                  {isCall && (
                     <div
-                      onClick={() =>
-                        onLightbox &&
-                        onLightbox({
-                          url: msg.fileUrl,
-                          type: msg.type,
-                          name: msg.fileName
-                        })
-                      }
                       style={{
-                        cursor: "pointer",
-                        borderRadius: "8px",
-                        overflow: "hidden",
-                        marginBottom: "6px"
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "10px",
+                        minWidth: "210px"
                       }}
                     >
+                      <div
+                        style={{
+                          width: "36px",
+                          height: "36px",
+                          borderRadius: "50%",
+                          backgroundColor:
+                            msg.status === "missed" || msg.content?.toLowerCase().includes("missed")
+                              ? "rgba(239, 68, 68, 0.2)"
+                              : "rgba(34, 197, 94, 0.2)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          flexShrink: 0
+                        }}
+                      >
+                        {msg.status === "missed" || msg.content?.toLowerCase().includes("missed") ? (
+                          <PhoneMissed size={18} color="#EF4444" />
+                        ) : msg.callType === "video" ? (
+                          <Video size={18} color="#22C55E" />
+                        ) : (
+                          <PhoneCall size={18} color="#22C55E" />
+                        )}
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div
+                          style={{
+                            fontWeight: "700",
+                            fontSize: "13px",
+                            color:
+                              msg.status === "missed" || msg.content?.toLowerCase().includes("missed")
+                                ? "#EF4444"
+                                : "#22C55E"
+                          }}
+                        >
+                          {msg.content || (msg.status === "missed" ? "Missed Call" : "Audio Call")}
+                        </div>
+                        <div style={{ fontSize: "11px", color: THEME.textMuted }}>
+                          {msg.status === "missed" || msg.content?.toLowerCase().includes("missed")
+                            ? "Unanswered • Tap to call back"
+                            : "Completed • Tap to call back"}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 2. REAL-TIME VOICE NOTE PLAYER BUBBLE (Point 16) */}
+                  {isVoice && (
+                    <div style={{ position: "relative" }}>
+                      <AudioBubblePlayer
+                        fileUrl={msg.fileUrl}
+                        duration={msg.duration || 0}
+                        THEME={THEME}
+                        isMe={isMe}
+                      />
+
+                      {/* Download button for voice note */}
+                      <button
+                        onClick={(e) =>
+                          handleDownloadAttachment(
+                            e,
+                            msg.fileUrl,
+                            msg.fileName || `voice_note_${Date.now()}.webm`
+                          )
+                        }
+                        style={{
+                          position: "absolute",
+                          right: "6px",
+                          top: "6px",
+                          background: "none",
+                          border: "none",
+                          color: isMe ? "rgba(255,255,255,0.7)" : THEME.textMuted,
+                          cursor: "pointer",
+                          padding: "4px"
+                        }}
+                        title="Download Voice Note"
+                      >
+                        <Download size={14} />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 3. MEDIA ATTACHMENT BUBBLE WITH DOWNLOAD BUTTON (Point 15) */}
+                  {isMedia && (
+                    <div
+                      style={{
+                        borderRadius: "8px",
+                        overflow: "hidden",
+                        marginBottom: "4px",
+                        position: "relative"
+                      }}
+                    >
+                      {/* HD Badge if sent in HD quality */}
+                      {msg.isHD && (
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: "8px",
+                            left: "8px",
+                            backgroundColor: "rgba(0,0,0,0.65)",
+                            color: "#38BDF8",
+                            fontSize: "10px",
+                            fontWeight: "800",
+                            padding: "2px 6px",
+                            borderRadius: "4px",
+                            backdropFilter: "blur(4px)",
+                            zIndex: 2
+                          }}
+                        >
+                          HD
+                        </div>
+                      )}
+
+                      {/* Attachment Download Action Button */}
+                      <button
+                        onClick={(e) =>
+                          handleDownloadAttachment(
+                            e,
+                            msg.fileUrl,
+                            msg.fileName || (msg.type === "image" ? "photo.jpg" : msg.type === "video" ? "video.mp4" : "document")
+                          )
+                        }
+                        style={{
+                          position: "absolute",
+                          top: "8px",
+                          right: "8px",
+                          backgroundColor: "rgba(0,0,0,0.65)",
+                          color: "#fff",
+                          border: "none",
+                          borderRadius: "50%",
+                          width: "30px",
+                          height: "30px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: "pointer",
+                          backdropFilter: "blur(4px)",
+                          zIndex: 2,
+                          transition: "transform 0.15s ease"
+                        }}
+                        title="Download Attachment"
+                      >
+                        <Download size={15} />
+                      </button>
+
                       {msg.type === "video" ? (
                         <video
                           src={msg.fileUrl}
+                          controls
                           style={{
                             width: "100%",
-                            maxHeight: "200px",
-                            objectFit: "cover"
+                            maxHeight: "220px",
+                            borderRadius: "8px",
+                            objectFit: "cover",
+                            display: "block"
                           }}
                         />
                       ) : msg.type === "image" ? (
                         <img
                           src={msg.fileUrl}
                           alt=""
+                          onClick={() => onLightbox && onLightbox(msg.fileUrl)}
                           style={{
                             width: "100%",
-                            maxHeight: "200px",
-                            objectFit: "cover"
+                            maxHeight: "240px",
+                            borderRadius: "8px",
+                            objectFit: "cover",
+                            display: "block",
+                            cursor: "pointer"
                           }}
                         />
                       ) : (
@@ -1119,35 +1742,45 @@ export default function ChatBox({
                             alignItems: "center",
                             gap: "8px",
                             backgroundColor: "rgba(0,0,0,0.15)",
-                            padding: "8px",
-                            borderRadius: "6px"
+                            padding: "10px",
+                            borderRadius: "8px"
                           }}
                         >
-                          <FileText size={20} />
-                          <span
-                            style={{
-                              fontSize: "12px",
-                              textDecoration: "underline"
-                            }}
-                          >
-                            {msg.fileName || "Download file"}
-                          </span>
+                          <FileText size={22} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                fontWeight: "600",
+                                textOverflow: "ellipsis",
+                                overflow: "hidden",
+                                whiteSpace: "nowrap"
+                              }}
+                            >
+                              {msg.fileName || "Download file"}
+                            </div>
+                            <div style={{ fontSize: "10px", opacity: 0.7 }}>
+                              {msg.fileSize || "File attachment"}
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
                   )}
 
                   {/* Message Text */}
-                  <div
-                    style={{
-                      fontSize: "13px",
-                      lineHeight: "1.4",
-                      fontStyle: isDeleted ? "italic" : "normal",
-                      opacity: isDeleted ? 0.75 : 1
-                    }}
-                  >
-                    {msg.content}
-                  </div>
+                  {!isCall && !isVoice && (
+                    <div
+                      style={{
+                        fontSize: "13px",
+                        lineHeight: "1.4",
+                        fontStyle: isDeleted ? "italic" : "normal",
+                        opacity: isDeleted ? 0.75 : 1
+                      }}
+                    >
+                      {msg.content}
+                    </div>
+                  )}
 
                   {/* Timestamp, Edited Tag, Star Icon & Read Receipts */}
                   <div
@@ -1226,626 +1859,472 @@ export default function ChatBox({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* --- 2. LONG-PRESS MESSAGE FLOATING TOOLBAR MODAL --- */}
-      {toolbarMessage && (
+      {/* ------------------------------------------------------------- */}
+      {/* 4. MEDIA PREVIEW & EDIT MODAL (Point 15) */}
+      {/* ------------------------------------------------------------- */}
+      {pendingMedia && (
         <div
-          onClick={() => {
-            setToolbarMessage(null);
-            setShowFullEmojiPicker(false);
-          }}
           style={{
             ...styles.modalOverlay,
-            zIndex: 4000,
+            zIndex: 5000,
             alignItems: "center",
             justifyContent: "center",
-            backgroundColor: "rgba(0,0,0,0.65)",
-            backdropFilter: "blur(3px)"
+            backgroundColor: "rgba(0,0,0,0.85)",
+            backdropFilter: "blur(6px)"
           }}
         >
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
               width: "92%",
-              maxWidth: "380px",
+              maxWidth: "460px",
               backgroundColor: THEME.sidebar,
               border: `1px solid ${THEME.border}`,
-              borderRadius: "18px",
-              padding: "16px",
+              borderRadius: "16px",
               display: "flex",
               flexDirection: "column",
-              gap: "14px",
-              boxShadow: "0 10px 30px rgba(0,0,0,0.6)",
-              animation: "fadeIn 0.15s ease",
-              maxHeight: "85vh",
-              overflowY: "auto"
+              overflow: "hidden",
+              boxShadow: "0 20px 40px rgba(0,0,0,0.7)"
             }}
           >
-            {/* Quick Reaction Bar with '+' Button */}
+            {/* Modal Header with HD Toggle & Tools */}
             <div
               style={{
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
-                backgroundColor: THEME.card,
-                borderRadius: "30px",
-                padding: "6px 12px",
-                border: `1px solid ${THEME.border}`
+                padding: "10px 14px",
+                borderBottom: `1px solid ${THEME.border}`,
+                backgroundColor: THEME.header
               }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  overflowX: "auto",
-                  paddingBottom: "2px"
-                }}
-              >
-                {QUICK_EMOJIS.map((emo) => (
-                  <button
-                    key={emo}
-                    onClick={() => handleApplyReaction(emo)}
-                    style={{
-                      background: "none",
-                      border: "none",
-                      fontSize: "22px",
-                      cursor: "pointer",
-                      padding: "2px",
-                      transition: "transform 0.15s ease",
-                      lineHeight: "1"
-                    }}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.transform = "scale(1.3)")
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.transform = "scale(1)")
-                    }
-                  >
-                    {emo}
-                  </button>
-                ))}
-              </div>
-
-              {/* + Button to expand all mobile device emojis */}
-              <button
-                onClick={() => setShowFullEmojiPicker(!showFullEmojiPicker)}
-                style={{
-                  backgroundColor: showFullEmojiPicker
-                    ? THEME.primary
-                    : THEME.header,
-                  color: showFullEmojiPicker ? "#fff" : THEME.text,
-                  border: `1px solid ${THEME.border}`,
-                  borderRadius: "50%",
-                  width: "32px",
-                  height: "32px",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  cursor: "pointer",
-                  flexShrink: 0,
-                  marginLeft: "6px"
-                }}
-                title="All Emojis"
-              >
-                <Plus size={18} />
-              </button>
-            </div>
-
-            {/* Expanded Full Device Emoji Tray */}
-            {showFullEmojiPicker && (
-              <div
-                style={{
-                  backgroundColor: THEME.card,
-                  borderRadius: "12px",
-                  padding: "10px",
-                  border: `1px solid ${THEME.border}`,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "8px",
-                  maxHeight: "180px",
-                  overflowY: "auto"
-                }}
-              >
-                {/* Custom Keyboard Emoji Input */}
-                <div
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span style={{ fontWeight: "700", color: THEME.text, fontSize: "14px" }}>
+                  Preview & Edit
+                </span>
+                {/* HD Quality Toggle */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPendingMedia((prev) => ({ ...prev, isHD: !prev.isHD }))
+                  }
                   style={{
+                    backgroundColor: pendingMedia.isHD ? THEME.primary : THEME.card,
+                    color: pendingMedia.isHD ? "#fff" : THEME.textMuted,
+                    border: `1px solid ${THEME.border}`,
+                    borderRadius: "14px",
+                    padding: "2px 8px",
+                    fontSize: "11px",
+                    fontWeight: "700",
                     display: "flex",
                     alignItems: "center",
-                    gap: "6px",
-                    backgroundColor: THEME.sidebar,
-                    borderRadius: "8px",
-                    padding: "4px 8px",
-                    border: `1px solid ${THEME.border}`
+                    gap: "4px",
+                    cursor: "pointer"
                   }}
+                  title="Toggle High Definition (HD)"
                 >
-                  <Smile size={16} color={THEME.textMuted} />
-                  <input
-                    type="text"
-                    placeholder="Type or paste any emoji..."
-                    value={customEmojiInput}
-                    onChange={(e) => setCustomEmojiInput(e.target.value)}
-                    className="chatbox-input"
-                    style={{
-                      ...styles.bareInput,
-                      color: THEME.text,
-                      fontSize: "13px"
-                    }}
-                  />
-                  {customEmojiInput && (
+                  <Sparkles size={12} />
+                  <span>{pendingMedia.isHD ? "HD ON" : "Standard"}</span>
+                </button>
+              </div>
+
+              {/* Editing Tools (Rotate & Brush/Draw) for Image */}
+              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                {pendingMedia.fileType === "image" && (
+                  <>
                     <button
-                      onClick={() => {
-                        handleApplyReaction(customEmojiInput.trim());
-                        setCustomEmojiInput("");
-                      }}
+                      type="button"
+                      onClick={handleRotateImage}
                       style={{
-                        backgroundColor: THEME.primary,
-                        color: "#fff",
-                        border: "none",
-                        borderRadius: "6px",
-                        padding: "3px 8px",
-                        fontSize: "11px",
-                        cursor: "pointer",
-                        fontWeight: "700"
+                        ...styles.cleanBtn,
+                        color: THEME.text,
+                        padding: "6px",
+                        backgroundColor: THEME.card,
+                        borderRadius: "8px"
                       }}
+                      title="Rotate 90°"
                     >
-                      React
+                      <RotateCw size={17} />
                     </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsBrushActive(!isBrushActive)}
+                      style={{
+                        ...styles.cleanBtn,
+                        color: isBrushActive ? THEME.primary : THEME.text,
+                        padding: "6px",
+                        backgroundColor: isBrushActive ? "rgba(34, 197, 94, 0.2)" : THEME.card,
+                        borderRadius: "8px"
+                      }}
+                      title="Brush / Draw"
+                    >
+                      <Palette size={17} />
+                    </button>
+                  </>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setPendingMedia(null)}
+                  style={{ ...styles.cleanBtn, color: THEME.textMuted, padding: "6px" }}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Brush Colors Bar when Brush Active */}
+            {isBrushActive && pendingMedia.fileType === "image" && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "6px 14px",
+                  backgroundColor: THEME.card,
+                  borderBottom: `1px solid ${THEME.border}`
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  {["#ffffff", "#ef4444", "#22c55e", "#38bdf8", "#facc15", "#ec4899", "#000000"].map(
+                    (color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        onClick={() => setBrushColor(color)}
+                        style={{
+                          width: "20px",
+                          height: "20px",
+                          borderRadius: "50%",
+                          backgroundColor: color,
+                          border: brushColor === color ? "2px solid #fff" : "1px solid rgba(0,0,0,0.4)",
+                          cursor: "pointer",
+                          transform: brushColor === color ? "scale(1.2)" : "scale(1)"
+                        }}
+                      />
+                    )
                   )}
                 </div>
-
-                {/* Categorized Emoji Grid */}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(8, 1fr)",
-                    gap: "6px",
-                    justifyItems: "center"
-                  }}
-                >
-                  {EXTENDED_EMOJIS.map((emo) => (
-                    <button
-                      key={emo}
-                      onClick={() => handleApplyReaction(emo)}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        fontSize: "20px",
-                        cursor: "pointer",
-                        padding: "2px"
-                      }}
-                    >
-                      {emo}
-                    </button>
-                  ))}
+                <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: THEME.textMuted }}>
+                  <span>Size:</span>
+                  <input
+                    type="range"
+                    min="2"
+                    max="20"
+                    value={brushSize}
+                    onChange={(e) => setBrushSize(Number(e.target.value))}
+                    style={{ width: "70px", cursor: "pointer" }}
+                  />
                 </div>
               </div>
             )}
 
-            {/* Message Preview snippet */}
+            {/* Canvas / Preview Display */}
             <div
               style={{
-                backgroundColor: THEME.card,
-                padding: "8px 12px",
-                borderRadius: "8px",
-                fontSize: "12px",
-                color: THEME.textMuted,
-                borderLeft: `3px solid ${THEME.primary}`,
-                maxHeight: "50px",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap"
-              }}
-            >
-              {toolbarMessage.content || "Media attachment"}
-            </div>
-
-            {/* Action Buttons List */}
-            <div
-              style={{
+                padding: "12px",
                 display: "flex",
-                flexDirection: "column",
-                gap: "2px"
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: "#000",
+                maxHeight: "360px",
+                overflow: "hidden"
               }}
             >
-              {/* Reply */}
-              <button
-                onClick={() => handleReplyAction()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  border: "none",
-                  backgroundColor: "transparent",
-                  color: THEME.text,
-                  fontSize: "14px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Reply size={18} color={THEME.primary} />
-                <span>Reply</span>
-              </button>
-
-              {/* Copy */}
-              <button
-                onClick={() => handleCopyAction()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  border: "none",
-                  backgroundColor: "transparent",
-                  color: THEME.text,
-                  fontSize: "14px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Copy size={18} color={THEME.text} />
-                <span>Copy</span>
-              </button>
-
-              {/* Forward */}
-              <button
-                onClick={() => handleForwardAction()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  border: "none",
-                  backgroundColor: "transparent",
-                  color: THEME.text,
-                  fontSize: "14px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Share2 size={18} color={THEME.text} />
-                <span>Forward</span>
-              </button>
-
-              {/* Pin */}
-              <button
-                onClick={() => handlePinAction()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  border: "none",
-                  backgroundColor: "transparent",
-                  color: THEME.text,
-                  fontSize: "14px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Pin
-                  size={18}
-                  color={
-                    pinnedMessage?.id === toolbarMessage.id
-                      ? THEME.primary
-                      : THEME.text
-                  }
+              {pendingMedia.fileType === "image" ? (
+                <canvas
+                  ref={canvasRef}
+                  onMouseDown={startDrawing}
+                  onMouseMove={drawOnCanvas}
+                  onMouseUp={stopDrawing}
+                  onMouseLeave={stopDrawing}
+                  onTouchStart={startDrawing}
+                  onTouchMove={drawOnCanvas}
+                  onTouchEnd={stopDrawing}
+                  style={{
+                    maxWidth: "100%",
+                    maxHeight: "340px",
+                    borderRadius: "8px",
+                    cursor: isBrushActive ? "crosshair" : "default",
+                    touchAction: "none"
+                  }}
                 />
-                <span>
-                  {pinnedMessage?.id === toolbarMessage.id
-                    ? "Unpin Message"
-                    : "Pin Message"}
-                </span>
-              </button>
-
-              {/* Edit (if sender and text) */}
-              {isMsgSentByMe(toolbarMessage) &&
-                toolbarMessage.type === "text" && (
-                  <button
-                    onClick={() => handleEditAction()}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "12px",
-                      padding: "10px 12px",
-                      borderRadius: "8px",
-                      border: "none",
-                      backgroundColor: "transparent",
-                      color: THEME.text,
-                      fontSize: "14px",
-                      cursor: "pointer",
-                      textAlign: "left"
-                    }}
-                  >
-                    <Edit2 size={18} color={THEME.accent} />
-                    <span>Edit</span>
-                  </button>
-                )}
-
-              {/* Schedule Reminder */}
-              <button
-                onClick={() => handleOpenSchedule()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  border: "none",
-                  backgroundColor: "transparent",
-                  color: THEME.text,
-                  fontSize: "14px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Clock size={18} color="#60A5FA" />
-                <span>Schedule Reminder</span>
-              </button>
-
-              {/* Favorite / Star */}
-              <button
-                onClick={() => handleStarAction()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  border: "none",
-                  backgroundColor: "transparent",
-                  color: THEME.text,
-                  fontSize: "14px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Star
-                  size={18}
-                  color={
-                    toolbarMessage.starred?.[currentUserId] ||
-                    toolbarMessage.isStarred
-                      ? "#FACC15"
-                      : THEME.text
-                  }
-                  fill={
-                    toolbarMessage.starred?.[currentUserId] ||
-                    toolbarMessage.isStarred
-                      ? "#FACC15"
-                      : "none"
-                  }
+              ) : pendingMedia.fileType === "video" ? (
+                <video
+                  src={pendingMedia.rawDataUrl}
+                  controls
+                  style={{ maxWidth: "100%", maxHeight: "340px", borderRadius: "8px" }}
                 />
-                <span>
-                  {toolbarMessage.starred?.[currentUserId] ||
-                  toolbarMessage.isStarred
-                    ? "Unstar Message"
-                    : "Star / Favorite"}
-                </span>
-              </button>
-
-              {/* Delete */}
-              <button
-                onClick={() => setShowDeleteDialog(true)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  border: "none",
-                  backgroundColor: "transparent",
-                  color: THEME.danger,
-                  fontSize: "14px",
-                  cursor: "pointer",
-                  textAlign: "left"
-                }}
-              >
-                <Trash2 size={18} color={THEME.danger} />
-                <span>Delete</span>
-              </button>
+              ) : (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: "10px",
+                    padding: "30px",
+                    color: THEME.text
+                  }}
+                >
+                  <FileText size={48} color={THEME.accent} />
+                  <span style={{ fontWeight: "600", fontSize: "14px" }}>
+                    {pendingMedia.fileName}
+                  </span>
+                  <span style={{ fontSize: "12px", color: THEME.textMuted }}>
+                    {pendingMedia.fileSize}
+                  </span>
+                </div>
+              )}
             </div>
 
-            {/* Cancel Button */}
-            <button
-              onClick={() => {
-                setToolbarMessage(null);
-                setShowFullEmojiPicker(false);
-              }}
+            {/* Caption Input Field */}
+            <div
               style={{
-                padding: "10px",
-                borderRadius: "8px",
-                border: `1px solid ${THEME.border}`,
-                backgroundColor: THEME.card,
-                color: THEME.textMuted,
-                fontSize: "13px",
-                fontWeight: "600",
-                cursor: "pointer",
-                marginTop: "4px"
+                padding: "10px 14px",
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                backgroundColor: THEME.sidebar,
+                borderTop: `1px solid ${THEME.border}`
               }}
             >
-              Cancel
+              <input
+                type="text"
+                placeholder="Add a caption..."
+                value={pendingMedia.caption}
+                onChange={(e) =>
+                  setPendingMedia((prev) => ({ ...prev, caption: e.target.value }))
+                }
+                className="chatbox-input"
+                style={{
+                  ...styles.bareInput,
+                  color: THEME.text,
+                  backgroundColor: THEME.card,
+                  padding: "10px 14px",
+                  borderRadius: "20px",
+                  fontSize: "13px",
+                  flex: 1,
+                  border: `1px solid ${THEME.border}`
+                }}
+              />
+
+              {/* Send Button */}
+              <button
+                type="button"
+                onClick={handleSendEditedMedia}
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "50%",
+                  backgroundColor: THEME.primary,
+                  color: "#fff",
+                  border: "none",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                  flexShrink: 0
+                }}
+                title="Send"
+              >
+                <Send size={18} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* 5. VOICE NOTE PREVIEW BANNER (Point 16) */}
+      {/* ------------------------------------------------------------- */}
+      {isPreviewingVoice && recordedAudioUrl && (
+        <div
+          style={{
+            backgroundColor: THEME.header,
+            borderTop: `1.5px solid ${THEME.accent}`,
+            padding: "8px 14px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "10px"
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
+            <audio
+              ref={previewAudioRef}
+              src={recordedAudioUrl}
+              onPlay={() => setIsVoicePreviewPlaying(true)}
+              onPause={() => setIsVoicePreviewPlaying(false)}
+              onEnded={() => setIsVoicePreviewPlaying(false)}
+            />
+
+            <button
+              type="button"
+              onClick={() => {
+                if (!previewAudioRef.current) return;
+                if (isVoicePreviewPlaying) {
+                  previewAudioRef.current.pause();
+                } else {
+                  previewAudioRef.current.play();
+                }
+              }}
+              style={{
+                width: "34px",
+                height: "34px",
+                borderRadius: "50%",
+                backgroundColor: THEME.accent,
+                border: "none",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#fff",
+                cursor: "pointer",
+                flexShrink: 0
+              }}
+            >
+              {isVoicePreviewPlaying ? <Pause size={15} fill="#fff" /> : <Play size={15} fill="#fff" style={{ marginLeft: "2px" }} />}
+            </button>
+
+            <div style={{ fontSize: "13px", color: THEME.text }}>
+              Voice Note ({formatTime(voiceRecordingSeconds)})
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <button
+              type="button"
+              onClick={cleanupVoiceRecording}
+              style={{
+                ...styles.cleanBtn,
+                color: THEME.danger,
+                padding: "8px"
+              }}
+              title="Discard"
+            >
+              <Trash2 size={18} />
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSendVoiceNote}
+              style={{
+                backgroundColor: THEME.primary,
+                color: "#fff",
+                border: "none",
+                borderRadius: "20px",
+                padding: "6px 14px",
+                fontSize: "12px",
+                fontWeight: "700",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                cursor: "pointer"
+              }}
+            >
+              <Send size={14} />
+              <span>Send</span>
             </button>
           </div>
         </div>
       )}
 
-      {/* --- SCHEDULE MODAL --- */}
-      {showScheduleModal && toolbarMessage && (
-        <div style={styles.modalOverlay}>
+      {/* ------------------------------------------------------------- */}
+      {/* 6. REAL-TIME RECORDING BAR (Wave Visualizer & Timer) (Point 16) */}
+      {/* ------------------------------------------------------------- */}
+      {isRecordingVoice && (
+        <div
+          style={{
+            backgroundColor: THEME.header,
+            borderTop: `1px solid ${THEME.danger}`,
+            padding: "8px 14px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "12px"
+          }}
+        >
+          {/* Pulsing Recording Indicator & Timer */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <div
+              style={{
+                width: "10px",
+                height: "10px",
+                borderRadius: "50%",
+                backgroundColor: THEME.danger,
+                boxShadow: "0 0 8px #EF4444"
+              }}
+            />
+            <span style={{ color: THEME.text, fontWeight: "700", fontSize: "13px" }}>
+              {formatTime(voiceRecordingSeconds)}
+            </span>
+          </div>
+
+          {/* Real-time Waveform Visualizer */}
           <div
             style={{
-              ...styles.modalCard,
-              backgroundColor: THEME.sidebar,
-              borderColor: THEME.border
+              display: "flex",
+              alignItems: "center",
+              gap: "3px",
+              height: "28px",
+              flex: 1,
+              justifyContent: "center",
+              maxWidth: "200px"
             }}
           >
-            <div
-              style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
-              }}
-            >
+            {voiceWaveform.map((h, idx) => (
               <div
+                key={idx}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  color: THEME.text,
-                  fontWeight: "700",
-                  fontSize: "14px"
-                }}
-              >
-                <Clock size={18} color="#60A5FA" />
-                <span>Schedule Reminder</span>
-              </div>
-              <button
-                onClick={() => setShowScheduleModal(false)}
-                style={styles.cleanBtn}
-              >
-                <X size={16} color={THEME.textMuted} />
-              </button>
-            </div>
-
-            <div
-              style={{
-                padding: "16px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "12px"
-              }}
-            >
-              <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                Choose when you would like a reminder for this message:
-              </div>
-
-              <input
-                type="datetime-local"
-                value={scheduleDateTime}
-                onChange={(e) => setScheduleDateTime(e.target.value)}
-                className="chatbox-input"
-                style={{
-                  backgroundColor: THEME.card,
-                  color: THEME.text,
-                  border: `1px solid ${THEME.border}`,
-                  padding: "10px",
-                  borderRadius: "8px",
-                  fontSize: "13px"
+                  width: "4px",
+                  height: `${h}%`,
+                  backgroundColor: THEME.primary,
+                  borderRadius: "2px",
+                  transition: "height 0.08s ease"
                 }}
               />
-
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "flex-end",
-                  gap: "8px",
-                  marginTop: "8px"
-                }}
-              >
-                <button
-                  onClick={() => setShowScheduleModal(false)}
-                  style={{
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.card,
-                    color: THEME.text
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleConfirmSchedule}
-                  style={{
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.primary,
-                    color: "#fff",
-                    fontWeight: "700"
-                  }}
-                >
-                  Save Reminder
-                </button>
-              </div>
-            </div>
+            ))}
           </div>
-        </div>
-      )}
 
-      {/* --- DELETE CONFIRMATION MODAL --- */}
-      {showDeleteDialog && toolbarMessage && (
-        <div style={styles.modalOverlay}>
-          <div
-            style={{
-              ...styles.modalCard,
-              backgroundColor: THEME.sidebar,
-              borderColor: THEME.border
-            }}
-          >
-            <div
+          {/* Cancel & Stop Actions */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <button
+              type="button"
+              onClick={cleanupVoiceRecording}
               style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
+                ...styles.cleanBtn,
+                color: THEME.textMuted,
+                padding: "6px"
               }}
+              title="Cancel Recording"
             >
-              <div
-                style={{
-                  fontWeight: "700",
-                  fontSize: "14px",
-                  color: THEME.text
-                }}
-              >
-                Delete message?
-              </div>
-              <button
-                onClick={() => setShowDeleteDialog(false)}
-                style={styles.cleanBtn}
-              >
-                <X size={16} color={THEME.textMuted} />
-              </button>
-            </div>
-            <div
+              <Trash2 size={18} />
+            </button>
+
+            <button
+              type="button"
+              onClick={stopVoiceRecording}
               style={{
-                padding: "16px",
+                backgroundColor: THEME.danger,
+                color: "#fff",
+                border: "none",
+                borderRadius: "50%",
+                width: "36px",
+                height: "36px",
                 display: "flex",
-                flexDirection: "column",
-                gap: "10px"
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer"
               }}
+              title="Stop & Preview"
             >
-              <button
-                onClick={() => handleDeleteAction(false)}
-                style={{
-                  ...styles.pillBtn,
-                  backgroundColor: THEME.card,
-                  color: THEME.text,
-                  padding: "10px"
-                }}
-              >
-                Delete for Me
-              </button>
-              {isMsgSentByMe(toolbarMessage) && (
-                <button
-                  onClick={() => handleDeleteAction(true)}
-                  style={{
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.danger,
-                    color: "#fff",
-                    padding: "10px",
-                    fontWeight: "700"
-                  }}
-                >
-                  Delete for Everyone
-                </button>
-              )}
-            </div>
+              <Square size={16} fill="#fff" />
+            </button>
           </div>
         </div>
       )}
 
       {/* Replying Banner */}
-      {replyingTo && (
+      {replyingTo && !isRecordingVoice && !isPreviewingVoice && (
         <div
           style={{
             backgroundColor: THEME.card,
@@ -1930,196 +2409,563 @@ export default function ChatBox({
         </div>
       )}
 
-      {/* --- 3. CHAT INPUT COMPOSER WITH STICKY KEYBOARD FOCUS --- */}
-      <form
-        onSubmit={handleSend}
-        style={{
-          padding: "8px 12px",
-          backgroundColor: THEME.header,
-          borderTop: `1px solid ${THEME.border}`,
-          display: "flex",
-          alignItems: "center",
-          gap: "8px",
-          position: "relative"
-        }}
-      >
-        {/* Attachment Toggle */}
-        <div style={{ position: "relative" }}>
+      {/* --- 7. CHAT INPUT COMPOSER --- */}
+      {!isRecordingVoice && !isPreviewingVoice && (
+        <form
+          onSubmit={handleSend}
+          style={{
+            padding: "8px 12px",
+            backgroundColor: THEME.header,
+            borderTop: `1px solid ${THEME.border}`,
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            position: "relative"
+          }}
+        >
+          {/* Attachment Toggle */}
+          <div style={{ position: "relative" }}>
+            <button
+              type="button"
+              onClick={() => setShowAttachMenu(!showAttachMenu)}
+              style={{
+                ...styles.cleanBtn,
+                color: THEME.textMuted,
+                padding: "6px"
+              }}
+              title="Attach"
+            >
+              <Paperclip size={20} />
+            </button>
+
+            {showAttachMenu && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "45px",
+                  left: 0,
+                  backgroundColor: THEME.sidebar,
+                  border: `1px solid ${THEME.border}`,
+                  borderRadius: "10px",
+                  padding: "8px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px",
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+                  zIndex: 50,
+                  minWidth: "140px"
+                }}
+              >
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "6px 10px",
+                    color: THEME.text,
+                    fontSize: "12px",
+                    cursor: "pointer",
+                    borderRadius: "6px"
+                  }}
+                >
+                  <ImageIcon size={16} color={THEME.primary} />
+                  <span>Photo</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleFileSelect(e, "image")}
+                    style={{ display: "none" }}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "6px 10px",
+                    color: THEME.text,
+                    fontSize: "12px",
+                    cursor: "pointer",
+                    borderRadius: "6px"
+                  }}
+                >
+                  <Video size={16} color="#34B7F1" />
+                  <span>Video</span>
+                  <input
+                    type="file"
+                    accept="video/*"
+                    onChange={(e) => handleFileSelect(e, "video")}
+                    style={{ display: "none" }}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "6px 10px",
+                    color: THEME.text,
+                    fontSize: "12px",
+                    cursor: "pointer",
+                    borderRadius: "6px"
+                  }}
+                >
+                  <FileText size={16} color="#5F6368" />
+                  <span>Document</span>
+                  <input
+                    type="file"
+                    onChange={(e) => handleFileSelect(e, "file")}
+                    style={{ display: "none" }}
+                  />
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* View Once Toggle */}
           <button
             type="button"
-            onClick={() => setShowAttachMenu(!showAttachMenu)}
+            onClick={() => {
+              setViewOnceMode && setViewOnceMode(!viewOnceMode);
+              if (showToast)
+                showToast(
+                  !viewOnceMode
+                    ? "View Once mode enabled"
+                    : "View Once mode disabled"
+                );
+            }}
             style={{
               ...styles.cleanBtn,
-              color: THEME.textMuted,
+              color: viewOnceMode ? THEME.primary : THEME.textMuted,
               padding: "6px"
             }}
-            title="Attach"
+            title="View Once"
           >
-            <Paperclip size={20} />
+            <Eye size={20} />
           </button>
 
-          {showAttachMenu && (
-            <div
-              style={{
-                position: "absolute",
-                bottom: "45px",
-                left: 0,
-                backgroundColor: THEME.sidebar,
-                border: `1px solid ${THEME.border}`,
-                borderRadius: "10px",
-                padding: "8px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "6px",
-                boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
-                zIndex: 50,
-                minWidth: "140px"
-              }}
-            >
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "6px 10px",
-                  color: THEME.text,
-                  fontSize: "12px",
-                  cursor: "pointer",
-                  borderRadius: "6px"
-                }}
-              >
-                <ImageIcon size={16} color={THEME.primary} />
-                <span>Photo</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => handleFileSelect(e, "image")}
-                  style={{ display: "none" }}
-                />
-              </label>
-
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "6px 10px",
-                  color: THEME.text,
-                  fontSize: "12px",
-                  cursor: "pointer",
-                  borderRadius: "6px"
-                }}
-              >
-                <Video size={16} color="#34B7F1" />
-                <span>Video</span>
-                <input
-                  type="file"
-                  accept="video/*"
-                  onChange={(e) => handleFileSelect(e, "video")}
-                  style={{ display: "none" }}
-                />
-              </label>
-
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "6px 10px",
-                  color: THEME.text,
-                  fontSize: "12px",
-                  cursor: "pointer",
-                  borderRadius: "6px"
-                }}
-              >
-                <FileText size={16} color="#5F6368" />
-                <span>Document</span>
-                <input
-                  type="file"
-                  onChange={(e) => handleFileSelect(e, "file")}
-                  style={{ display: "none" }}
-                />
-              </label>
-            </div>
-          )}
-        </div>
-
-        {/* View Once Toggle */}
-        <button
-          type="button"
-          onClick={() => {
-            setViewOnceMode && setViewOnceMode(!viewOnceMode);
-            if (showToast)
-              showToast(
-                !viewOnceMode
-                  ? "View Once mode enabled"
-                  : "View Once mode disabled"
-              );
-          }}
-          style={{
-            ...styles.cleanBtn,
-            color: viewOnceMode ? THEME.primary : THEME.textMuted,
-            padding: "6px"
-          }}
-          title="View Once"
-        >
-          <Eye size={20} />
-        </button>
-
-        {/* Input Box with ref for sticky keyboard focus & retention */}
-        <div
-          style={{
-            flex: 1,
-            backgroundColor: THEME.card,
-            borderRadius: "20px",
-            border: `1px solid ${THEME.border}`,
-            display: "flex",
-            alignItems: "center",
-            padding: "0 12px"
-          }}
-        >
-          <input
-            ref={inputRef}
-            type="text"
-            placeholder={
-              editingMessage ? "Edit message..." : "Type a message..."
-            }
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            className="chatbox-input"
+          {/* Input Box with ref for sticky keyboard focus */}
+          <div
             style={{
-              ...styles.bareInput,
-              color: THEME.text,
-              fontSize: "14px",
-              padding: "9px 0"
+              flex: 1,
+              backgroundColor: THEME.card,
+              borderRadius: "20px",
+              border: `1px solid ${THEME.border}`,
+              display: "flex",
+              alignItems: "center",
+              padding: "0 12px"
             }}
-          />
-        </div>
+          >
+            <input
+              ref={inputRef}
+              type="text"
+              placeholder={
+                editingMessage ? "Edit message..." : "Type a message..."
+              }
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              className="chatbox-input"
+              style={{
+                ...styles.bareInput,
+                color: THEME.text,
+                fontSize: "14px",
+                padding: "9px 0"
+              }}
+            />
+          </div>
 
-        {/* Send Button with onMouseDown preventDefault to retain input focus */}
-        <button
-          type="submit"
-          onMouseDown={(e) => e.preventDefault()}
-          disabled={!inputText.trim()}
+          {/* Send button when text typed, Microphone button when empty */}
+          {inputText.trim() || editingMessage ? (
+            <button
+              type="submit"
+              onMouseDown={(e) => e.preventDefault()}
+              style={{
+                backgroundColor: editingMessage ? THEME.accent : THEME.primary,
+                color: "#fff",
+                border: "none",
+                borderRadius: "50%",
+                width: "38px",
+                height: "38px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                flexShrink: 0
+              }}
+              title={editingMessage ? "Update message" : "Send message"}
+            >
+              {editingMessage ? <CheckCircle size={18} /> : <Send size={17} />}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={startVoiceRecording}
+              style={{
+                backgroundColor: THEME.primary,
+                color: "#fff",
+                border: "none",
+                borderRadius: "50%",
+                width: "38px",
+                height: "38px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                flexShrink: 0
+              }}
+              title="Record Voice Note"
+            >
+              <Mic size={18} />
+            </button>
+          )}
+        </form>
+      )}
+
+      {/* --- LONG-PRESS MESSAGE TOOLBAR MODAL --- */}
+      {toolbarMessage && (
+        <div
+          onClick={() => {
+            setToolbarMessage(null);
+            setShowFullEmojiPicker(false);
+          }}
           style={{
-            backgroundColor: editingMessage ? THEME.accent : THEME.primary,
-            color: "#fff",
-            border: "none",
-            borderRadius: "50%",
-            width: "38px",
-            height: "38px",
-            display: "flex",
+            ...styles.modalOverlay,
+            zIndex: 4000,
             alignItems: "center",
             justifyContent: "center",
-            cursor: "pointer",
-            opacity: !inputText.trim() ? 0.6 : 1,
-            flexShrink: 0
+            backgroundColor: "rgba(0,0,0,0.65)",
+            backdropFilter: "blur(3px)"
           }}
-          title={editingMessage ? "Update message" : "Send message"}
         >
-          {editingMessage ? <CheckCircle size={18} /> : <Send size={17} />}
-        </button>
-      </form>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "92%",
+              maxWidth: "380px",
+              backgroundColor: THEME.sidebar,
+              border: `1px solid ${THEME.border}`,
+              borderRadius: "18px",
+              padding: "16px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "14px",
+              boxShadow: "0 10px 30px rgba(0,0,0,0.6)",
+              maxHeight: "85vh",
+              overflowY: "auto"
+            }}
+          >
+            {/* Quick Reaction Bar */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                backgroundColor: THEME.card,
+                borderRadius: "30px",
+                padding: "6px 12px",
+                border: `1px solid ${THEME.border}`
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  overflowX: "auto",
+                  paddingBottom: "2px"
+                }}
+              >
+                {QUICK_EMOJIS.map((emo) => (
+                  <button
+                    key={emo}
+                    onClick={() => handleApplyReaction(emo)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      fontSize: "22px",
+                      cursor: "pointer",
+                      padding: "2px",
+                      lineHeight: "1"
+                    }}
+                  >
+                    {emo}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={() => setShowFullEmojiPicker(!showFullEmojiPicker)}
+                style={{
+                  backgroundColor: showFullEmojiPicker ? THEME.primary : THEME.header,
+                  color: showFullEmojiPicker ? "#fff" : THEME.text,
+                  border: `1px solid ${THEME.border}`,
+                  borderRadius: "50%",
+                  width: "32px",
+                  height: "32px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                  flexShrink: 0
+                }}
+                title="All Emojis"
+              >
+                <Plus size={18} />
+              </button>
+            </div>
+
+            {/* Extended Emoji Picker */}
+            {showFullEmojiPicker && (
+              <div
+                style={{
+                  backgroundColor: THEME.card,
+                  borderRadius: "12px",
+                  padding: "10px",
+                  border: `1px solid ${THEME.border}`,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "8px",
+                  maxHeight: "180px",
+                  overflowY: "auto"
+                }}
+              >
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(8, 1fr)",
+                    gap: "6px",
+                    textAlign: "center"
+                  }}
+                >
+                  {EXTENDED_EMOJIS.map((emo) => (
+                    <button
+                      key={emo}
+                      onClick={() => handleApplyReaction(emo)}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        fontSize: "20px",
+                        cursor: "pointer",
+                        padding: "4px 0"
+                      }}
+                    >
+                      {emo}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Actions List */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "2px",
+                backgroundColor: THEME.card,
+                borderRadius: "14px",
+                overflow: "hidden",
+                border: `1px solid ${THEME.border}`
+              }}
+            >
+              <button
+                onClick={() => handleReplyAction()}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  padding: "12px 16px",
+                  border: "none",
+                  backgroundColor: "transparent",
+                  color: THEME.text,
+                  fontSize: "14px",
+                  cursor: "pointer"
+                }}
+              >
+                <Reply size={16} color={THEME.accent} />
+                <span>Reply</span>
+              </button>
+
+              <button
+                onClick={() => handleCopyAction()}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  padding: "12px 16px",
+                  border: "none",
+                  backgroundColor: "transparent",
+                  color: THEME.text,
+                  fontSize: "14px",
+                  cursor: "pointer"
+                }}
+              >
+                <Copy size={16} color="#60A5FA" />
+                <span>Copy</span>
+              </button>
+
+              <button
+                onClick={() => handleForwardAction()}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  padding: "12px 16px",
+                  border: "none",
+                  backgroundColor: "transparent",
+                  color: THEME.text,
+                  fontSize: "14px",
+                  cursor: "pointer"
+                }}
+              >
+                <Share2 size={16} color="#A78BFA" />
+                <span>Forward</span>
+              </button>
+
+              <button
+                onClick={() => handleStarAction()}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  padding: "12px 16px",
+                  border: "none",
+                  backgroundColor: "transparent",
+                  color: THEME.text,
+                  fontSize: "14px",
+                  cursor: "pointer"
+                }}
+              >
+                <Star size={16} color="#FACC15" />
+                <span>Star</span>
+              </button>
+
+              <button
+                onClick={() => handlePinAction()}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  padding: "12px 16px",
+                  border: "none",
+                  backgroundColor: "transparent",
+                  color: THEME.text,
+                  fontSize: "14px",
+                  cursor: "pointer"
+                }}
+              >
+                <Pin size={16} color={THEME.primary} />
+                <span>Pin Message</span>
+              </button>
+
+              {isMsgSentByMe(toolbarMessage) && (
+                <button
+                  onClick={() => handleEditAction()}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    padding: "12px 16px",
+                    border: "none",
+                    backgroundColor: "transparent",
+                    color: THEME.text,
+                    fontSize: "14px",
+                    cursor: "pointer"
+                  }}
+                >
+                  <Edit2 size={16} color="#34D399" />
+                  <span>Edit Message</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => setShowDeleteDialog(true)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  padding: "12px 16px",
+                  border: "none",
+                  backgroundColor: "transparent",
+                  color: THEME.danger,
+                  fontSize: "14px",
+                  cursor: "pointer"
+                }}
+              >
+                <Trash2 size={16} color={THEME.danger} />
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- DELETE DIALOG MODAL --- */}
+      {showDeleteDialog && toolbarMessage && (
+        <div style={styles.modalOverlay}>
+          <div
+            style={{
+              ...styles.modalCard,
+              backgroundColor: THEME.sidebar,
+              borderColor: THEME.border
+            }}
+          >
+            <div
+              style={{
+                ...styles.modalHeader,
+                backgroundColor: THEME.header,
+                borderColor: THEME.border
+              }}
+            >
+              <div style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                Delete message?
+              </div>
+              <button
+                onClick={() => setShowDeleteDialog(false)}
+                style={styles.cleanBtn}
+              >
+                <X size={16} color={THEME.textMuted} />
+              </button>
+            </div>
+            <div
+              style={{
+                padding: "16px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px"
+              }}
+            >
+              <button
+                onClick={() => handleDeleteAction(false)}
+                style={{
+                  ...styles.pillBtn,
+                  backgroundColor: THEME.card,
+                  color: THEME.text,
+                  padding: "10px"
+                }}
+              >
+                Delete for Me
+              </button>
+              {isMsgSentByMe(toolbarMessage) && (
+                <button
+                  onClick={() => handleDeleteAction(true)}
+                  style={{
+                    ...styles.pillBtn,
+                    backgroundColor: THEME.danger,
+                    color: "#fff",
+                    padding: "10px",
+                    fontWeight: "700"
+                  }}
+                >
+                  Delete for Everyone
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
