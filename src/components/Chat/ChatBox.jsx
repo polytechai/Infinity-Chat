@@ -41,6 +41,8 @@ import {
   AlertCircle
 } from "lucide-react";
 import { db, styles, normalizePhone } from "../../firebase";
+import UserProfileModal from "./UserProfileModal";
+import MediaPreviewModal from "./MediaPreviewModal";
 
 // Fast reaction row emojis
 const QUICK_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"];
@@ -123,7 +125,7 @@ function AudioBubblePlayer({ fileUrl, duration = 0, THEME, isMe }) {
 
   const progressPct = audioDuration > 0 ? (currentTime / audioDuration) * 100 : 0;
 
-  // Render simulated waveform frequency bars
+  // Render 16 simulated waveform frequency bars
   const waveBars = [35, 60, 45, 80, 95, 70, 50, 85, 60, 40, 75, 90, 65, 45, 70, 55];
 
   return (
@@ -258,6 +260,7 @@ export default function ChatBox({
   const [inputText, setInputText] = useState("");
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showChatOptions, setShowChatOptions] = useState(false);
+  const [showUserProfile, setShowUserProfile] = useState(false);
 
   // Long-press modal & action toolbar state
   const [toolbarMessage, setToolbarMessage] = useState(null);
@@ -289,12 +292,7 @@ export default function ChatBox({
   // 1. MEDIA PREVIEW & EDIT STATE (Point 15)
   // -------------------------------------------------------------
   const [pendingMedia, setPendingMedia] = useState(null);
-  const canvasRef = useRef(null);
-  const isDrawingRef = useRef(false);
-  const [brushColor, setBrushColor] = useState("#22c55e");
-  const [brushSize, setBrushSize] = useState(5);
-  const [isBrushActive, setIsBrushActive] = useState(false);
-  const [mediaRotation, setMediaRotation] = useState(0); // 0, 90, 180, 270
+  // { file, fileType, rawDataUrl, fileName, fileSize, isHD, caption }
 
   // -------------------------------------------------------------
   // 2. REAL-TIME VOICE MESSAGES (Point 16)
@@ -335,12 +333,14 @@ export default function ChatBox({
     const latestMsg = messages[messages.length - 1];
     if (!latestMsg || !latestMsg.id) return;
 
+    // Only inspect newly received message
     if (lastKnownMsgIdRef.current && lastKnownMsgIdRef.current !== latestMsg.id) {
       const isFromPeer =
         latestMsg.senderPhone !== currentUserId &&
         latestMsg.senderId !== currentUserId;
 
       if (isFromPeer) {
+        // Trigger browser push notification
         if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
           const title = activeChat?.name || latestMsg.senderName || "New Message";
           let body = latestMsg.content || "";
@@ -576,118 +576,10 @@ export default function ChatBox({
         isHD: false,
         caption: ""
       });
-      setMediaRotation(0);
-      setIsBrushActive(false);
     };
 
     reader.readAsDataURL(file);
-    e.target.value = "";
-  };
-
-  // Draw image into canvas on initial load or rotation
-  useEffect(() => {
-    if (!pendingMedia || pendingMedia.fileType !== "image" || !canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = pendingMedia.rawDataUrl;
-
-    img.onload = () => {
-      const isRotated = mediaRotation % 180 !== 0;
-      const targetW = isRotated ? img.height : img.width;
-      const targetH = isRotated ? img.width : img.height;
-
-      const maxDim = 800;
-      const scale = Math.min(1, maxDim / Math.max(targetW, targetH));
-      canvas.width = targetW * scale;
-      canvas.height = targetH * scale;
-
-      ctx.save();
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((mediaRotation * Math.PI) / 180);
-      const drawW = isRotated ? canvas.height : canvas.width;
-      const drawH = isRotated ? canvas.width : canvas.height;
-      ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
-      ctx.restore();
-    };
-  }, [pendingMedia?.rawDataUrl, mediaRotation]);
-
-  // Canvas Brush Drawing handlers
-  const startDrawing = (e) => {
-    if (!isBrushActive || !canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-
-    const clientX = e.clientX || e.touches?.[0]?.clientX;
-    const clientY = e.clientY || e.touches?.[0]?.clientY;
-    if (clientX === undefined || clientY === undefined) return;
-
-    isDrawingRef.current = true;
-    ctx.beginPath();
-    ctx.moveTo((clientX - rect.left) * scaleX, (clientY - rect.top) * scaleY);
-    ctx.strokeStyle = brushColor;
-    ctx.lineWidth = brushSize;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-  };
-
-  const drawOnCanvas = (e) => {
-    if (!isDrawingRef.current || !isBrushActive || !canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-
-    const clientX = e.clientX || e.touches?.[0]?.clientX;
-    const clientY = e.clientY || e.touches?.[0]?.clientY;
-    if (clientX === undefined || clientY === undefined) return;
-
-    ctx.lineTo((clientX - rect.left) * scaleX, (clientY - rect.top) * scaleY);
-    ctx.stroke();
-  };
-
-  const stopDrawing = () => {
-    isDrawingRef.current = false;
-  };
-
-  const handleRotateImage = () => {
-    setMediaRotation((prev) => (prev + 90) % 360);
-  };
-
-  const handleSendEditedMedia = () => {
-    if (!pendingMedia) return;
-
-    let finalDataUrl = pendingMedia.rawDataUrl;
-    if (pendingMedia.fileType === "image" && canvasRef.current) {
-      finalDataUrl = canvasRef.current.toDataURL(
-        "image/jpeg",
-        pendingMedia.isHD ? 0.98 : 0.75
-      );
-    }
-
-    const payload = {
-      type: pendingMedia.fileType,
-      fileUrl: finalDataUrl,
-      fileName: pendingMedia.fileName,
-      fileSize: pendingMedia.fileSize,
-      isHD: pendingMedia.isHD,
-      content: pendingMedia.caption.trim() || (pendingMedia.fileType === "image" ? "Photo" : pendingMedia.fileType === "video" ? "Video" : pendingMedia.fileName),
-      isViewOnce: !!viewOnceMode
-    };
-
-    if (onSendMedia) {
-      onSendMedia(payload);
-    } else if (onSendMessage) {
-      onSendMessage(payload);
-    }
-
-    setPendingMedia(null);
-    if (showToast) showToast(`${pendingMedia.isHD ? "HD " : ""}${pendingMedia.fileType} sent!`);
+    e.target.value = ""; // reset file input
   };
 
   // -------------------------------------------------------------
@@ -742,6 +634,7 @@ export default function ChatBox({
       const updateWave = () => {
         if (!analyserRef.current) return;
         analyserRef.current.getByteFrequencyData(dataArray);
+        // sample 9 bars
         const bars = [];
         const step = Math.floor(dataArray.length / 9);
         for (let i = 0; i < 9; i++) {
@@ -1180,7 +1073,10 @@ export default function ChatBox({
           </button>
 
           <div
-            onClick={() => openProfile && openProfile(activeChat)}
+            onClick={() => {
+              setShowUserProfile(true);
+              if (openProfile) openProfile(activeChat);
+            }}
             style={{
               display: "flex",
               alignItems: "center",
@@ -1564,6 +1460,7 @@ export default function ChatBox({
                         minWidth: "210px"
                       }}
                     >
+                      {/* Call Type Icon */}
                       <div
                         style={{
                           width: "36px",
@@ -1768,7 +1665,7 @@ export default function ChatBox({
                     </div>
                   )}
 
-                  {/* Message Text */}
+                  {/* Message Text (if not a pure call card) */}
                   {!isCall && !isVoice && (
                     <div
                       style={{
@@ -1863,275 +1760,24 @@ export default function ChatBox({
       {/* 4. MEDIA PREVIEW & EDIT MODAL (Point 15) */}
       {/* ------------------------------------------------------------- */}
       {pendingMedia && (
-        <div
-          style={{
-            ...styles.modalOverlay,
-            zIndex: 5000,
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: "rgba(0,0,0,0.85)",
-            backdropFilter: "blur(6px)"
+        <MediaPreviewModal
+          media={pendingMedia}
+          THEME={THEME}
+          onClose={() => setPendingMedia(null)}
+          onSend={(mediaPayload) => {
+            if (onSendMedia) {
+              onSendMedia(mediaPayload);
+            } else if (onSendMessage) {
+              onSendMessage(mediaPayload);
+            }
+            setPendingMedia(null);
+            if (showToast) {
+              showToast(`${mediaPayload?.isHD ? "HD " : ""}${mediaPayload?.type || "Media"} sent!`);
+            }
           }}
-        >
-          <div
-            style={{
-              width: "92%",
-              maxWidth: "460px",
-              backgroundColor: THEME.sidebar,
-              border: `1px solid ${THEME.border}`,
-              borderRadius: "16px",
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              boxShadow: "0 20px 40px rgba(0,0,0,0.7)"
-            }}
-          >
-            {/* Modal Header with HD Toggle & Tools */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "10px 14px",
-                borderBottom: `1px solid ${THEME.border}`,
-                backgroundColor: THEME.header
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span style={{ fontWeight: "700", color: THEME.text, fontSize: "14px" }}>
-                  Preview & Edit
-                </span>
-                {/* HD Quality Toggle */}
-                <button
-                  type="button"
-                  onClick={() =>
-                    setPendingMedia((prev) => ({ ...prev, isHD: !prev.isHD }))
-                  }
-                  style={{
-                    backgroundColor: pendingMedia.isHD ? THEME.primary : THEME.card,
-                    color: pendingMedia.isHD ? "#fff" : THEME.textMuted,
-                    border: `1px solid ${THEME.border}`,
-                    borderRadius: "14px",
-                    padding: "2px 8px",
-                    fontSize: "11px",
-                    fontWeight: "700",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "4px",
-                    cursor: "pointer"
-                  }}
-                  title="Toggle High Definition (HD)"
-                >
-                  <Sparkles size={12} />
-                  <span>{pendingMedia.isHD ? "HD ON" : "Standard"}</span>
-                </button>
-              </div>
-
-              {/* Editing Tools (Rotate & Brush/Draw) for Image */}
-              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                {pendingMedia.fileType === "image" && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleRotateImage}
-                      style={{
-                        ...styles.cleanBtn,
-                        color: THEME.text,
-                        padding: "6px",
-                        backgroundColor: THEME.card,
-                        borderRadius: "8px"
-                      }}
-                      title="Rotate 90°"
-                    >
-                      <RotateCw size={17} />
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setIsBrushActive(!isBrushActive)}
-                      style={{
-                        ...styles.cleanBtn,
-                        color: isBrushActive ? THEME.primary : THEME.text,
-                        padding: "6px",
-                        backgroundColor: isBrushActive ? "rgba(34, 197, 94, 0.2)" : THEME.card,
-                        borderRadius: "8px"
-                      }}
-                      title="Brush / Draw"
-                    >
-                      <Palette size={17} />
-                    </button>
-                  </>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => setPendingMedia(null)}
-                  style={{ ...styles.cleanBtn, color: THEME.textMuted, padding: "6px" }}
-                >
-                  <X size={18} />
-                </button>
-              </div>
-            </div>
-
-            {/* Brush Colors Bar when Brush Active */}
-            {isBrushActive && pendingMedia.fileType === "image" && (
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "6px 14px",
-                  backgroundColor: THEME.card,
-                  borderBottom: `1px solid ${THEME.border}`
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                  {["#ffffff", "#ef4444", "#22c55e", "#38bdf8", "#facc15", "#ec4899", "#000000"].map(
-                    (color) => (
-                      <button
-                        key={color}
-                        type="button"
-                        onClick={() => setBrushColor(color)}
-                        style={{
-                          width: "20px",
-                          height: "20px",
-                          borderRadius: "50%",
-                          backgroundColor: color,
-                          border: brushColor === color ? "2px solid #fff" : "1px solid rgba(0,0,0,0.4)",
-                          cursor: "pointer",
-                          transform: brushColor === color ? "scale(1.2)" : "scale(1)"
-                        }}
-                      />
-                    )
-                  )}
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: THEME.textMuted }}>
-                  <span>Size:</span>
-                  <input
-                    type="range"
-                    min="2"
-                    max="20"
-                    value={brushSize}
-                    onChange={(e) => setBrushSize(Number(e.target.value))}
-                    style={{ width: "70px", cursor: "pointer" }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Canvas / Preview Display */}
-            <div
-              style={{
-                padding: "12px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: "#000",
-                maxHeight: "360px",
-                overflow: "hidden"
-              }}
-            >
-              {pendingMedia.fileType === "image" ? (
-                <canvas
-                  ref={canvasRef}
-                  onMouseDown={startDrawing}
-                  onMouseMove={drawOnCanvas}
-                  onMouseUp={stopDrawing}
-                  onMouseLeave={stopDrawing}
-                  onTouchStart={startDrawing}
-                  onTouchMove={drawOnCanvas}
-                  onTouchEnd={stopDrawing}
-                  style={{
-                    maxWidth: "100%",
-                    maxHeight: "340px",
-                    borderRadius: "8px",
-                    cursor: isBrushActive ? "crosshair" : "default",
-                    touchAction: "none"
-                  }}
-                />
-              ) : pendingMedia.fileType === "video" ? (
-                <video
-                  src={pendingMedia.rawDataUrl}
-                  controls
-                  style={{ maxWidth: "100%", maxHeight: "340px", borderRadius: "8px" }}
-                />
-              ) : (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    gap: "10px",
-                    padding: "30px",
-                    color: THEME.text
-                  }}
-                >
-                  <FileText size={48} color={THEME.accent} />
-                  <span style={{ fontWeight: "600", fontSize: "14px" }}>
-                    {pendingMedia.fileName}
-                  </span>
-                  <span style={{ fontSize: "12px", color: THEME.textMuted }}>
-                    {pendingMedia.fileSize}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Caption Input Field */}
-            <div
-              style={{
-                padding: "10px 14px",
-                display: "flex",
-                alignItems: "center",
-                gap: "10px",
-                backgroundColor: THEME.sidebar,
-                borderTop: `1px solid ${THEME.border}`
-              }}
-            >
-              <input
-                type="text"
-                placeholder="Add a caption..."
-                value={pendingMedia.caption}
-                onChange={(e) =>
-                  setPendingMedia((prev) => ({ ...prev, caption: e.target.value }))
-                }
-                className="chatbox-input"
-                style={{
-                  ...styles.bareInput,
-                  color: THEME.text,
-                  backgroundColor: THEME.card,
-                  padding: "10px 14px",
-                  borderRadius: "20px",
-                  fontSize: "13px",
-                  flex: 1,
-                  border: `1px solid ${THEME.border}`
-                }}
-              />
-
-              {/* Send Button */}
-              <button
-                type="button"
-                onClick={handleSendEditedMedia}
-                style={{
-                  width: "40px",
-                  height: "40px",
-                  borderRadius: "50%",
-                  backgroundColor: THEME.primary,
-                  color: "#fff",
-                  border: "none",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  cursor: "pointer",
-                  flexShrink: 0
-                }}
-                title="Send"
-              >
-                <Send size={18} />
-              </button>
-            </div>
-          </div>
-        </div>
+          onSendMedia={onSendMedia}
+          showToast={showToast}
+        />
       )}
 
       {/* ------------------------------------------------------------- */}
@@ -2150,6 +1796,7 @@ export default function ChatBox({
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: "10px", flex: 1, minWidth: 0 }}>
+            {/* Audio Playback for preview */}
             <audio
               ref={previewAudioRef}
               src={recordedAudioUrl}
@@ -2409,7 +2056,7 @@ export default function ChatBox({
         </div>
       )}
 
-      {/* --- 7. CHAT INPUT COMPOSER --- */}
+      {/* --- 7. CHAT INPUT COMPOSER (With Mic Button) --- */}
       {!isRecordingVoice && !isPreviewingVoice && (
         <form
           onSubmit={handleSend}
@@ -2576,7 +2223,7 @@ export default function ChatBox({
             />
           </div>
 
-          {/* Send button when text typed, Microphone button when empty */}
+          {/* Action Button: Send button when text typed, Microphone button when empty */}
           {inputText.trim() || editingMessage ? (
             <button
               type="submit"
@@ -2965,6 +2612,30 @@ export default function ChatBox({
             </div>
           </div>
         </div>
+      )}
+
+      {/* User Profile Modal */}
+      {showUserProfile && (
+        <UserProfileModal
+          user={activeChat}
+          onClose={() => setShowUserProfile(false)}
+          currentUser={currentUser}
+          messages={messages}
+          THEME={THEME}
+          onClearChat={() => {
+            setShowUserProfile(false);
+            if (showToast) showToast("Chat history cleared");
+          }}
+          onBlockUser={(targetUser) => {
+            if (showToast) showToast(`${targetUser?.name || "Contact"} blocked`);
+          }}
+          onMuteUser={(targetUser) => {
+            if (onToggleMute) onToggleMute(activeChat?.id);
+          }}
+          onLightbox={onLightbox}
+          startCall={startCall}
+          showToast={showToast}
+        />
       )}
     </div>
   );
