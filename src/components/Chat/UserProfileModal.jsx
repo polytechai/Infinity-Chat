@@ -7,11 +7,10 @@ import {
   Bell,
   BellOff,
   Lock,
+  Unlock,
   Clock,
-  Database,
   Trash2,
   ShieldAlert,
-  ShieldCheck,
   Download,
   FileText,
   Film,
@@ -19,10 +18,19 @@ import {
   ChevronRight,
   Check,
   AlertTriangle,
-  KeyRound
+  KeyRound,
+  Users,
+  Image as ImageIcon
 } from "lucide-react";
-import { doc, updateDoc, collection, addDoc } from "firebase/firestore";
+import { doc, updateDoc, collection, addDoc, getDocs, deleteDoc } from "firebase/firestore";
 import { db, styles } from "../../firebase";
+
+const DISAPPEARING_OPTIONS = [
+  { label: "Off", value: "off", durationMs: 0 },
+  { label: "24 Hours", value: "24h", durationMs: 24 * 60 * 60 * 1000 },
+  { label: "7 Days", value: "7d", durationMs: 7 * 24 * 60 * 60 * 1000 },
+  { label: "90 Days", value: "90d", durationMs: 90 * 24 * 60 * 60 * 1000 }
+];
 
 export default function UserProfileModal({
   user = {},
@@ -46,6 +54,7 @@ export default function UserProfileModal({
   onBlockUser,
   onMuteUser,
   onLightbox,
+  onCreateGroupWithUser,
   startCall,
   showToast
 }) {
@@ -59,45 +68,38 @@ export default function UserProfileModal({
     `https://api.dicebear.com/7.x/identicon/svg?seed=${peerUserId || "user"}`;
   const peerAbout = user?.about || user?.bio || "Available on Infinity Chat";
 
-  // Navigation & Sub-modals
-  const [activeTab, setActiveTab] = useState("media"); // "media" | "docs" | "audio"
+  // Tab & Modal Navigation States
+  const [activeMediaTab, setActiveMediaTab] = useState("media"); // "media" | "docs"
   const [showBlockConfirm, setShowBlockConfirm] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportReason, setReportReason] = useState("spam");
-  const [blockOnReport, setBlockOnReport] = useState(true);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [showDisappearingModal, setShowDisappearingModal] = useState(false);
   const [showLockPinModal, setShowLockPinModal] = useState(false);
-  const [showStorageModal, setShowStorageModal] = useState(false);
 
-  // States with Local & Remote persistence
-  const [isFavorite, setIsFavorite] = useState(() => {
-    try {
-      const favs = JSON.parse(localStorage.getItem("infinity_favorite_contacts") || "[]");
-      return favs.includes(peerUserId);
-    } catch (e) {
-      return false;
-    }
-  });
-
-  const [isBlocked, setIsBlocked] = useState(() => {
-    try {
-      const blk = JSON.parse(localStorage.getItem("infinity_blocked_contacts") || "[]");
-      return blk.includes(peerUserId);
-    } catch (e) {
-      return false;
-    }
-  });
-
+  // -------------------------------------------------------------
+  // 1. MUTE NOTIFICATIONS TOGGLE
+  // -------------------------------------------------------------
   const [isMuted, setIsMuted] = useState(() => {
     try {
-      const muted = JSON.parse(localStorage.getItem("infinity_muted_chats") || "[]");
-      return muted.includes(peerUserId);
+      const stored = localStorage.getItem(`infinity_muted_${peerUserId}`);
+      return stored === "true";
     } catch (e) {
       return false;
     }
   });
 
+  const toggleMute = () => {
+    const next = !isMuted;
+    setIsMuted(next);
+    localStorage.setItem(`infinity_muted_${peerUserId}`, String(next));
+    if (onMuteUser) onMuteUser(peerUserId, next);
+    if (showToast) showToast(next ? "Notifications muted" : "Notifications unmuted");
+  };
+
+  // -------------------------------------------------------------
+  // 2. DISAPPEARING MESSAGES TIMER & PURGE (Points 10 & 17)
+  // -------------------------------------------------------------
   const [disappearingTimer, setDisappearingTimer] = useState(() => {
     try {
       return localStorage.getItem(`infinity_disappearing_${peerUserId}`) || "off";
@@ -106,6 +108,41 @@ export default function UserProfileModal({
     }
   });
 
+  const handleSelectDisappearingOption = async (option) => {
+    setDisappearingTimer(option.value);
+    localStorage.setItem(`infinity_disappearing_${peerUserId}`, option.value);
+
+    // If duration is active, automatically purge expired messages from Firestore
+    if (option.durationMs > 0 && db && user?.id) {
+      try {
+        const threshold = Date.now() - option.durationMs;
+        const messagesRef = collection(db, "rooms", user.id, "messages");
+        const snap = await getDocs(messagesRef);
+        snap.forEach(async (docSnap) => {
+          const data = docSnap.data();
+          const createdTime = data.createdAt ? new Date(data.createdAt).getTime() : 0;
+          if (createdTime > 0 && createdTime < threshold) {
+            await deleteDoc(doc(db, "rooms", user.id, "messages", docSnap.id));
+          }
+        });
+      } catch (err) {
+        console.warn("Disappearing purge error:", err);
+      }
+    }
+
+    if (showToast) {
+      showToast(
+        option.value === "off"
+          ? "Disappearing messages turned off"
+          : `Disappearing messages set to ${option.label}`
+      );
+    }
+    setShowDisappearingModal(false);
+  };
+
+  // -------------------------------------------------------------
+  // 3. CHAT LOCK WITH 4-DIGIT PIN (Points 10 & 17)
+  // -------------------------------------------------------------
   const [isChatLocked, setIsChatLocked] = useState(() => {
     try {
       return !!localStorage.getItem(`infinity_chatlock_pin_${peerUserId}`);
@@ -113,310 +150,133 @@ export default function UserProfileModal({
       return false;
     }
   });
-
   const [pinInput, setPinInput] = useState("");
   const [pinConfirmInput, setPinConfirmInput] = useState("");
   const [pinError, setPinError] = useState("");
 
-  // -------------------------------------------------------------
-  // 1. SENT MEDIA GALLERY EXTRACTION & STATS
-  // -------------------------------------------------------------
-  const { mediaList, docList, audioList, totalStorageBytes } = useMemo(() => {
-    const media = [];
-    const docs = [];
-    const audios = [];
-    let bytes = 0;
-
-    messages.forEach((msg) => {
-      if (!msg || msg.type === "deleted" || msg.isDeleted) return;
-
-      if (msg.fileUrl) {
-        const estimatedSize =
-          typeof msg.fileSize === "number"
-            ? msg.fileSize
-            : typeof msg.fileSize === "string" && msg.fileSize.includes("KB")
-            ? parseFloat(msg.fileSize) * 1024
-            : typeof msg.fileSize === "string" && msg.fileSize.includes("MB")
-            ? parseFloat(msg.fileSize) * 1024 * 1024
-            : 180 * 1024;
-
-        bytes += estimatedSize;
-
-        if (msg.type === "image" || msg.type === "video") {
-          media.push(msg);
-        } else if (msg.type === "voice" || msg.type === "audio") {
-          audios.push(msg);
-        } else {
-          docs.push(msg);
-        }
-      }
-    });
-
-    return {
-      mediaList: media,
-      docList: docs,
-      audioList: audios,
-      totalStorageBytes: bytes
-    };
-  }, [messages]);
-
-  const formattedStorage = useMemo(() => {
-    if (totalStorageBytes > 1024 * 1024) {
-      return (totalStorageBytes / (1024 * 1024)).toFixed(1) + " MB";
-    }
-    return (totalStorageBytes / 1024).toFixed(0) + " KB";
-  }, [totalStorageBytes]);
-
-  // -------------------------------------------------------------
-  // ACTION HANDLERS
-  // -------------------------------------------------------------
-  const handleToggleFavorite = () => {
-    try {
-      const favs = JSON.parse(localStorage.getItem("infinity_favorite_contacts") || "[]");
-      let nextFavs;
-      if (isFavorite) {
-        nextFavs = favs.filter((id) => id !== peerUserId);
-      } else {
-        nextFavs = [...favs, peerUserId];
-      }
-      localStorage.setItem("infinity_favorite_contacts", JSON.stringify(nextFavs));
-      setIsFavorite(!isFavorite);
-      if (showToast) {
-        showToast(!isFavorite ? "Added to Favorites ⭐" : "Removed from Favorites");
-      }
-    } catch (e) {
-      console.error(e);
+  const handleToggleLockClick = () => {
+    if (isChatLocked) {
+      // Remove chat lock
+      localStorage.removeItem(`infinity_chatlock_pin_${peerUserId}`);
+      setIsChatLocked(false);
+      if (showToast) showToast("Chat lock removed");
+    } else {
+      // Open PIN setting modal
+      setPinInput("");
+      setPinConfirmInput("");
+      setPinError("");
+      setShowLockPinModal(true);
     }
   };
 
-  const handleToggleMute = () => {
-    try {
-      const muted = JSON.parse(localStorage.getItem("infinity_muted_chats") || "[]");
-      let nextMuted;
-      if (isMuted) {
-        nextMuted = muted.filter((id) => id !== peerUserId);
-      } else {
-        nextMuted = [...muted, peerUserId];
-      }
-      localStorage.setItem("infinity_muted_chats", JSON.stringify(nextMuted));
-      setIsMuted(!isMuted);
-      if (onMuteUser) onMuteUser(peerUserId);
-      if (showToast) {
-        showToast(!isMuted ? "Notifications Muted 🔕" : "Notifications Unmuted 🔔");
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const handleSetDisappearingTimer = async (val) => {
-    setDisappearingTimer(val);
-    try {
-      localStorage.setItem(`infinity_disappearing_${peerUserId}`, val);
-      if (user?.id) {
-        const convRef = doc(db, "conversations", user.id);
-        await updateDoc(convRef, { disappearingTimer: val });
-      }
-    } catch (err) {
-      console.warn("Disappearing timer update:", err);
-    }
-    setShowDisappearingModal(false);
-    if (showToast) {
-      showToast(
-        val === "off"
-          ? "Disappearing messages turned off"
-          : `Disappearing messages set to ${val}`
-      );
-    }
-  };
-
-  const handleSavePinLock = () => {
-    if (pinInput.length !== 4 || !/^\d+$/.test(pinInput)) {
-      setPinError("Please enter a 4-digit numeric PIN");
+  const handleSavePin = () => {
+    if (pinInput.length < 4) {
+      setPinError("PIN must be at least 4 digits");
       return;
     }
     if (pinInput !== pinConfirmInput) {
-      setPinError("PINs do not match");
+      setPinError("PIN codes do not match");
       return;
     }
 
+    localStorage.setItem(`infinity_chatlock_pin_${peerUserId}`, pinInput);
+    setIsChatLocked(true);
+    setShowLockPinModal(false);
+    if (showToast) showToast("Chat successfully locked with PIN 🔒");
+  };
+
+  // -------------------------------------------------------------
+  // 4. FAVORITE CONTACT TOGGLE
+  // -------------------------------------------------------------
+  const [isFavorite, setIsFavorite] = useState(() => {
     try {
-      localStorage.setItem(`infinity_chatlock_pin_${peerUserId}`, pinInput);
-      setIsChatLocked(true);
-      setShowLockPinModal(false);
-      setPinInput("");
-      setPinConfirmInput("");
-      setPinError("");
-      if (showToast) showToast("Chat locked with PIN 🔒");
+      const stored = localStorage.getItem(`infinity_favorite_${peerUserId}`);
+      return stored === "true";
     } catch (e) {
-      console.error(e);
+      return false;
     }
+  });
+
+  const toggleFavorite = () => {
+    const next = !isFavorite;
+    setIsFavorite(next);
+    localStorage.setItem(`infinity_favorite_${peerUserId}`, String(next));
+    if (showToast) showToast(next ? "Added to favorites ⭐" : "Removed from favorites");
   };
 
-  const handleRemovePinLock = () => {
-    try {
-      localStorage.removeItem(`infinity_chatlock_pin_${peerUserId}`);
-      setIsChatLocked(false);
-      setShowLockPinModal(false);
-      setPinInput("");
-      setPinConfirmInput("");
-      setPinError("");
-      if (showToast) showToast("Chat lock disabled 🔓");
-    } catch (e) {
-      console.error(e);
-    }
-  };
+  // -------------------------------------------------------------
+  // 5. SHARED MEDIA & DOCUMENTS GRID (Points 9 & 17)
+  // -------------------------------------------------------------
+  const sharedMedia = useMemo(() => {
+    return messages.filter(
+      (m) => (m.type === "image" || m.type === "video") && m.fileUrl
+    );
+  }, [messages]);
 
-  const handleConfirmClearChat = () => {
-    if (onClearChat) {
-      onClearChat(peerUserId);
-    }
-    setShowClearConfirm(false);
-    if (showToast) showToast("Chat history cleared");
-  };
+  const sharedDocs = useMemo(() => {
+    return messages.filter(
+      (m) => (m.type === "file" || m.type === "audio") && m.fileUrl
+    );
+  }, [messages]);
 
+  // -------------------------------------------------------------
+  // 6. BLOCK & REPORT ACTIONS
+  // -------------------------------------------------------------
   const handleConfirmBlock = () => {
-    try {
-      const blk = JSON.parse(localStorage.getItem("infinity_blocked_contacts") || "[]");
-      let nextBlk;
-      if (isBlocked) {
-        nextBlk = blk.filter((id) => id !== peerUserId);
-      } else {
-        nextBlk = [...blk, peerUserId];
-      }
-      localStorage.setItem("infinity_blocked_contacts", JSON.stringify(nextBlk));
-      setIsBlocked(!isBlocked);
-      if (onBlockUser) onBlockUser(peerUserId, !isBlocked);
-      if (showToast) {
-        showToast(!isBlocked ? `Blocked ${peerName}` : `Unblocked ${peerName}`);
-      }
-    } catch (e) {
-      console.error(e);
-    }
+    if (onBlockUser) onBlockUser(peerUserId);
     setShowBlockConfirm(false);
+    if (showToast) showToast(`Blocked ${peerName}`);
+    onClose?.();
   };
 
-  const handleConfirmReport = async () => {
+  const handleSubmitReport = async () => {
     try {
-      await addDoc(collection(db, "reports"), {
-        reporterId: currentUserId,
-        reportedUserId: peerUserId,
-        reason: reportReason,
-        createdAt: new Date().toISOString()
-      });
-      if (blockOnReport) {
-        const blk = JSON.parse(localStorage.getItem("infinity_blocked_contacts") || "[]");
-        if (!blk.includes(peerUserId)) {
-          blk.push(peerUserId);
-          localStorage.setItem("infinity_blocked_contacts", JSON.stringify(blk));
-          setIsBlocked(true);
-        }
+      if (db) {
+        await addDoc(collection(db, "reports"), {
+          reporterId: currentUserId,
+          reportedUserId: peerUserId,
+          reportedName: peerName,
+          reason: reportReason,
+          createdAt: new Date().toISOString()
+        });
       }
-      if (showToast) {
-        showToast("Report submitted. Thank you for keeping our community safe.");
-      }
-    } catch (err) {
-      console.warn("Report error:", err);
-      if (showToast) showToast("Report submitted.");
+      if (showToast) showToast("Report submitted. Thank you.");
+    } catch (e) {
+      if (showToast) showToast("Report sent");
     }
     setShowReportModal(false);
   };
 
-  const handleDownloadFile = (e, fileUrl, fileName) => {
-    e.stopPropagation();
-    if (!fileUrl) return;
-    try {
-      const a = document.createElement("a");
-      a.href = fileUrl;
-      a.download = fileName || "attachment";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      if (showToast) showToast(`Downloading ${fileName || "file"}`);
-    } catch (err) {
-      window.open(fileUrl, "_blank");
-    }
-  };
-
   return (
-    <div
-      onClick={onClose}
-      style={{
-        ...styles.modalOverlay,
-        zIndex: 4500,
-        backgroundColor: "rgba(0,0,0,0.75)",
-        backdropFilter: "blur(6px)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "16px"
-      }}
-    >
+    <div style={{ ...styles.modalOverlay, zIndex: 5000 }}>
       <div
-        onClick={(e) => e.stopPropagation()}
         style={{
-          width: "100%",
-          maxWidth: "460px",
-          maxHeight: "92vh",
+          ...styles.modalCard,
           backgroundColor: THEME.sidebar,
-          border: `1px solid ${THEME.border}`,
-          borderRadius: "20px",
+          borderColor: THEME.border,
+          maxWidth: "420px",
+          maxHeight: "90vh",
           display: "flex",
           flexDirection: "column",
-          overflow: "hidden",
-          boxShadow: "0 25px 50px -12px rgba(0,0,0,0.85)",
-          color: THEME.text
+          padding: 0,
+          overflow: "hidden"
         }}
       >
-        {/* --- MODAL TOP BAR --- */}
+        {/* --- HEADER --- */}
         <div
           style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "14px 18px",
+            ...styles.modalHeader,
             backgroundColor: THEME.header,
-            borderBottom: `1px solid ${THEME.border}`
+            borderColor: THEME.border,
+            padding: "12px 16px"
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <button
-              onClick={onClose}
-              style={{
-                ...styles.cleanBtn,
-                color: THEME.text,
-                padding: "6px",
-                borderRadius: "50%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center"
-              }}
-              title="Close"
-            >
-              <X size={20} />
-            </button>
-            <span style={{ fontWeight: "700", fontSize: "16px" }}>
-              Contact Info
-            </span>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <button
-              onClick={handleToggleFavorite}
-              style={{
-                ...styles.cleanBtn,
-                padding: "6px",
-                color: isFavorite ? "#FACC15" : THEME.textMuted
-              }}
-              title={isFavorite ? "Favorited" : "Add to Favorites"}
-            >
-              <Star
-                size={20}
-                fill={isFavorite ? "#FACC15" : "none"}
-                color={isFavorite ? "#FACC15" : THEME.textMuted}
-              />
-            </button>
-          </div>
+          <span style={{ fontWeight: "700", fontSize: "15px", color: THEME.text }}>
+            Contact Info
+          </span>
+          <button onClick={onClose} style={styles.cleanBtn}>
+            <X size={18} color={THEME.textMuted} />
+          </button>
         </div>
 
         {/* --- SCROLLABLE BODY --- */}
@@ -424,1406 +284,701 @@ export default function UserProfileModal({
           style={{
             flex: 1,
             overflowY: "auto",
+            padding: "16px 14px",
             display: "flex",
             flexDirection: "column",
-            gap: "12px",
-            paddingBottom: "24px"
+            gap: "16px"
           }}
         >
-          {/* --- 1. HERO PROFILE CARD --- */}
+          {/* PROFILE AVATAR & INFO */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" }}>
+            <img
+              src={peerAvatar}
+              alt=""
+              style={{
+                width: "86px",
+                height: "86px",
+                borderRadius: "50%",
+                objectFit: "cover",
+                border: `3px solid ${THEME.primary}`
+              }}
+            />
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontWeight: "700", fontSize: "17px", color: THEME.text }}>
+                {peerName}
+              </div>
+              <div style={{ fontSize: "12px", color: THEME.textMuted, marginTop: "2px" }}>
+                {peerPhone || "Infinity Chat User"}
+              </div>
+            </div>
+
+            {/* QUICK AUDIO / VIDEO SHORTCUTS */}
+            <div style={{ display: "flex", gap: "12px", marginTop: "4px" }}>
+              <button
+                onClick={() => startCall && startCall(user, "audio")}
+                style={{
+                  ...styles.pillBtn,
+                  backgroundColor: THEME.card,
+                  color: THEME.text,
+                  border: `1px solid ${THEME.border}`,
+                  padding: "8px 16px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px"
+                }}
+              >
+                <Phone size={15} color={THEME.primary} />
+                <span style={{ fontSize: "12px" }}>Audio</span>
+              </button>
+
+              <button
+                onClick={() => startCall && startCall(user, "video")}
+                style={{
+                  ...styles.pillBtn,
+                  backgroundColor: THEME.card,
+                  color: THEME.text,
+                  border: `1px solid ${THEME.border}`,
+                  padding: "8px 16px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px"
+                }}
+              >
+                <Video size={15} color={THEME.primary} />
+                <span style={{ fontSize: "12px" }}>Video</span>
+              </button>
+            </div>
+          </div>
+
+          {/* BIO / ABOUT CARD */}
           <div
             style={{
               backgroundColor: THEME.card,
-              padding: "24px 16px 18px",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              borderBottom: `1px solid ${THEME.border}`
+              borderRadius: "10px",
+              padding: "12px",
+              border: `1px solid ${THEME.border}`
             }}
           >
-            <div style={{ position: "relative", marginBottom: "14px" }}>
-              <img
-                src={peerAvatar}
-                alt={peerName}
-                style={{
-                  width: "100px",
-                  height: "100px",
-                  borderRadius: "50%",
-                  objectFit: "cover",
-                  border: `3px solid ${THEME.border}`,
-                  boxShadow: "0 8px 20px rgba(0,0,0,0.4)"
-                }}
-              />
-              {isBlocked && (
-                <div
-                  style={{
-                    position: "absolute",
-                    bottom: "2px",
-                    right: "2px",
-                    backgroundColor: THEME.danger,
-                    color: "#fff",
-                    borderRadius: "50%",
-                    width: "26px",
-                    height: "26px",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    border: `2px solid ${THEME.card}`
-                  }}
-                  title="Contact is Blocked"
-                >
-                  <ShieldAlert size={14} />
-                </div>
-              )}
+            <div style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: "600", textTransform: "uppercase" }}>
+              About
             </div>
-
-            <h2
-              style={{
-                margin: "0 0 4px",
-                fontSize: "20px",
-                fontWeight: "700",
-                color: THEME.text,
-                textAlign: "center"
-              }}
-            >
-              {peerName}
-            </h2>
-
-            <div
-              style={{
-                fontSize: "14px",
-                color: THEME.accent,
-                fontWeight: "500",
-                marginBottom: "8px"
-              }}
-            >
-              {peerPhone || "No Phone Number"}
-            </div>
-
-            <div
-              style={{
-                fontSize: "12px",
-                color: THEME.textMuted,
-                textAlign: "center",
-                maxWidth: "280px",
-                lineHeight: "1.4",
-                marginBottom: "18px"
-              }}
-            >
+            <div style={{ fontSize: "13px", color: THEME.text, marginTop: "4px" }}>
               {peerAbout}
             </div>
-
-            {/* Quick Action Buttons */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "24px",
-                width: "100%",
-                paddingTop: "6px"
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  if (startCall) startCall(user, "audio");
-                }}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  gap: "6px",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  color: THEME.primary
-                }}
-              >
-                <div
-                  style={{
-                    width: "44px",
-                    height: "44px",
-                    borderRadius: "50%",
-                    backgroundColor: "rgba(34, 197, 94, 0.15)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center"
-                  }}
-                >
-                  <Phone size={20} />
-                </div>
-                <span style={{ fontSize: "11px", fontWeight: "600" }}>Audio</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  if (startCall) startCall(user, "video");
-                }}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  gap: "6px",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  color: THEME.primary
-                }}
-              >
-                <div
-                  style={{
-                    width: "44px",
-                    height: "44px",
-                    borderRadius: "50%",
-                    backgroundColor: "rgba(34, 197, 94, 0.15)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center"
-                  }}
-                >
-                  <Video size={20} />
-                </div>
-                <span style={{ fontSize: "11px", fontWeight: "600" }}>Video</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleToggleFavorite}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  gap: "6px",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  color: isFavorite ? "#FACC15" : THEME.primary
-                }}
-              >
-                <div
-                  style={{
-                    width: "44px",
-                    height: "44px",
-                    borderRadius: "50%",
-                    backgroundColor: isFavorite
-                      ? "rgba(250, 204, 21, 0.15)"
-                      : "rgba(34, 197, 94, 0.15)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center"
-                  }}
-                >
-                  <Star size={20} fill={isFavorite ? "#FACC15" : "none"} />
-                </div>
-                <span style={{ fontSize: "11px", fontWeight: "600" }}>
-                  {isFavorite ? "Favorited" : "Favorite"}
-                </span>
-              </button>
-            </div>
           </div>
 
-          {/* --- 2. SENT MEDIA GALLERY TAB SYSTEM --- */}
+          {/* ------------------------------------------------------------- */}
+          {/* 1. DISAPPEARING MESSAGES & CHAT LOCK TOGGLES (Points 10 & 17) */}
+          {/* ------------------------------------------------------------- */}
           <div
             style={{
               backgroundColor: THEME.card,
-              borderTop: `1px solid ${THEME.border}`,
-              borderBottom: `1px solid ${THEME.border}`,
-              padding: "16px"
+              borderRadius: "10px",
+              border: `1px solid ${THEME.border}`,
+              overflow: "hidden"
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: "12px"
-              }}
-            >
-              <span style={{ fontWeight: "700", fontSize: "14px" }}>
-                Media, Links & Docs
-              </span>
-              <span style={{ fontSize: "12px", color: THEME.textMuted }}>
-                {mediaList.length + docList.length + audioList.length} items ({formattedStorage})
-              </span>
-            </div>
-
-            {/* Gallery Tabs */}
-            <div
-              style={{
-                display: "flex",
-                gap: "8px",
-                borderBottom: `1px solid ${THEME.border}`,
-                paddingBottom: "8px",
-                marginBottom: "12px"
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setActiveTab("media")}
-                style={{
-                  ...styles.cleanBtn,
-                  padding: "4px 12px",
-                  borderRadius: "14px",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  backgroundColor:
-                    activeTab === "media" ? THEME.primary : "transparent",
-                  color: activeTab === "media" ? "#fff" : THEME.textMuted
-                }}
-              >
-                Media ({mediaList.length})
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab("docs")}
-                style={{
-                  ...styles.cleanBtn,
-                  padding: "4px 12px",
-                  borderRadius: "14px",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  backgroundColor:
-                    activeTab === "docs" ? THEME.primary : "transparent",
-                  color: activeTab === "docs" ? "#fff" : THEME.textMuted
-                }}
-              >
-                Docs ({docList.length})
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab("audio")}
-                style={{
-                  ...styles.cleanBtn,
-                  padding: "4px 12px",
-                  borderRadius: "14px",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  backgroundColor:
-                    activeTab === "audio" ? THEME.primary : "transparent",
-                  color: activeTab === "audio" ? "#fff" : THEME.textMuted
-                }}
-              >
-                Voice & Audio ({audioList.length})
-              </button>
-            </div>
-
-            {/* Tab: Photos & Videos Grid */}
-            {activeTab === "media" && (
-              <div>
-                {mediaList.length === 0 ? (
-                  <div
-                    style={{
-                      textAlign: "center",
-                      padding: "24px 0",
-                      color: THEME.textMuted,
-                      fontSize: "12px"
-                    }}
-                  >
-                    No photos or videos shared in this chat yet.
-                  </div>
-                ) : (
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(4, 1fr)",
-                      gap: "6px"
-                    }}
-                  >
-                    {mediaList.map((m, idx) => (
-                      <div
-                        key={m.id || idx}
-                        onClick={() => {
-                          if (onLightbox) {
-                            onLightbox({
-                              url: m.fileUrl,
-                              type: m.type,
-                              name: m.fileName || "Media"
-                            });
-                          }
-                        }}
-                        style={{
-                          position: "relative",
-                          aspectRatio: "1 / 1",
-                          borderRadius: "6px",
-                          overflow: "hidden",
-                          backgroundColor: "#000",
-                          cursor: "pointer"
-                        }}
-                      >
-                        {m.type === "video" ? (
-                          <div style={{ width: "100%", height: "100%", position: "relative" }}>
-                            <video
-                              src={m.fileUrl}
-                              style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                            />
-                            <div
-                              style={{
-                                position: "absolute",
-                                inset: 0,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                backgroundColor: "rgba(0,0,0,0.35)"
-                              }}
-                            >
-                              <Film size={18} color="#fff" />
-                            </div>
-                          </div>
-                        ) : (
-                          <img
-                            src={m.fileUrl}
-                            alt=""
-                            style={{
-                              width: "100%",
-                              height: "100%",
-                              objectFit: "cover"
-                            }}
-                          />
-                        )}
-
-                        <button
-                          type="button"
-                          onClick={(e) =>
-                            handleDownloadFile(
-                              e,
-                              m.fileUrl,
-                              m.fileName || `media_${idx}.${m.type === "video" ? "mp4" : "jpg"}`
-                            )
-                          }
-                          style={{
-                            position: "absolute",
-                            bottom: "3px",
-                            right: "3px",
-                            backgroundColor: "rgba(0,0,0,0.65)",
-                            border: "none",
-                            borderRadius: "50%",
-                            width: "22px",
-                            height: "22px",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: "#fff",
-                            cursor: "pointer"
-                          }}
-                          title="Download"
-                        >
-                          <Download size={11} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Tab: Documents List */}
-            {activeTab === "docs" && (
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                {docList.length === 0 ? (
-                  <div
-                    style={{
-                      textAlign: "center",
-                      padding: "24px 0",
-                      color: THEME.textMuted,
-                      fontSize: "12px"
-                    }}
-                  >
-                    No documents shared yet.
-                  </div>
-                ) : (
-                  docList.map((d, idx) => (
-                    <div
-                      key={d.id || idx}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "8px 10px",
-                        backgroundColor: THEME.header,
-                        borderRadius: "8px",
-                        border: `1px solid ${THEME.border}`
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "10px",
-                          overflow: "hidden"
-                        }}
-                      >
-                        <FileText size={22} color={THEME.accent} />
-                        <div style={{ minWidth: 0 }}>
-                          <div
-                            style={{
-                              fontSize: "13px",
-                              fontWeight: "600",
-                              whiteSpace: "nowrap",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis"
-                            }}
-                          >
-                            {d.fileName || "Document"}
-                          </div>
-                          <div style={{ fontSize: "11px", color: THEME.textMuted }}>
-                            {d.fileSize || "File"}
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={(e) =>
-                          handleDownloadFile(e, d.fileUrl, d.fileName || "document.pdf")
-                        }
-                        style={{
-                          ...styles.cleanBtn,
-                          color: THEME.primary,
-                          padding: "6px"
-                        }}
-                        title="Download Document"
-                      >
-                        <Download size={16} />
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-
-            {/* Tab: Voice Notes & Audio */}
-            {activeTab === "audio" && (
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                {audioList.length === 0 ? (
-                  <div
-                    style={{
-                      textAlign: "center",
-                      padding: "24px 0",
-                      color: THEME.textMuted,
-                      fontSize: "12px"
-                    }}
-                  >
-                    No voice notes recorded in this thread yet.
-                  </div>
-                ) : (
-                  audioList.map((a, idx) => (
-                    <div
-                      key={a.id || idx}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "8px 10px",
-                        backgroundColor: THEME.header,
-                        borderRadius: "8px",
-                        border: `1px solid ${THEME.border}`
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "10px",
-                          overflow: "hidden"
-                        }}
-                      >
-                        <Music size={20} color={THEME.primary} />
-                        <div>
-                          <div style={{ fontSize: "13px", fontWeight: "600" }}>
-                            Voice Note #{idx + 1}
-                          </div>
-                          <div style={{ fontSize: "11px", color: THEME.textMuted }}>
-                            {a.createdAt ? new Date(a.createdAt).toLocaleDateString() : "Audio"}
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={(e) =>
-                          handleDownloadFile(e, a.fileUrl, a.fileName || `voice_${idx + 1}.webm`)
-                        }
-                        style={{
-                          ...styles.cleanBtn,
-                          color: THEME.primary,
-                          padding: "6px"
-                        }}
-                        title="Download Audio"
-                      >
-                        <Download size={16} />
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* --- 3. PRIVACY & CHAT SETTINGS --- */}
-          <div
-            style={{
-              backgroundColor: THEME.card,
-              borderTop: `1px solid ${THEME.border}`,
-              borderBottom: `1px solid ${THEME.border}`
-            }}
-          >
-            {/* Disappearing Messages */}
+            {/* Disappearing Messages Trigger */}
             <div
               onClick={() => setShowDisappearingModal(true)}
               style={{
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
-                padding: "14px 16px",
-                borderBottom: `1px solid ${THEME.border}`,
-                cursor: "pointer"
+                padding: "12px 14px",
+                cursor: "pointer",
+                borderBottom: `1px solid ${THEME.border}`
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <Clock size={18} color={THEME.accent} />
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <Clock size={17} color={THEME.accent} />
                 <div>
-                  <div style={{ fontSize: "14px", fontWeight: "600" }}>
+                  <div style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
                     Disappearing Messages
                   </div>
-                  <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                    {disappearingTimer === "off" ? "Off" : disappearingTimer}
+                  <div style={{ fontSize: "11px", color: THEME.textMuted }}>
+                    {DISAPPEARING_OPTIONS.find((o) => o.value === disappearingTimer)?.label || "Off"}
                   </div>
                 </div>
               </div>
               <ChevronRight size={16} color={THEME.textMuted} />
             </div>
 
-            {/* Mute Notifications */}
+            {/* Lock Chat Toggle */}
             <div
-              onClick={handleToggleMute}
+              onClick={handleToggleLockClick}
               style={{
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
-                padding: "14px 16px",
-                borderBottom: `1px solid ${THEME.border}`,
+                padding: "12px 14px",
+                cursor: "pointer",
+                borderBottom: `1px solid ${THEME.border}`
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                {isChatLocked ? <Lock size={17} color={THEME.accent} /> : <Unlock size={17} color={THEME.textMuted} />}
+                <div>
+                  <div style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
+                    Lock Chat (PIN Protected)
+                  </div>
+                  <div style={{ fontSize: "11px", color: THEME.textMuted }}>
+                    {isChatLocked ? "Protected with PIN" : "Lock this chat with a passcode"}
+                  </div>
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={isChatLocked}
+                readOnly
+                style={{ accentColor: THEME.accent }}
+              />
+            </div>
+
+            {/* Mute Notifications Toggle */}
+            <div
+              onClick={toggleMute}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "12px 14px",
                 cursor: "pointer"
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                {isMuted ? (
-                  <BellOff size={18} color={THEME.danger} />
-                ) : (
-                  <Bell size={18} color={THEME.primary} />
-                )}
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                {isMuted ? <BellOff size={17} color={THEME.danger} /> : <Bell size={17} color={THEME.textMuted} />}
                 <div>
-                  <div style={{ fontSize: "14px", fontWeight: "600" }}>
+                  <div style={{ fontSize: "13px", fontWeight: "600", color: THEME.text }}>
                     Mute Notifications
                   </div>
-                  <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                    {isMuted ? "Muted" : "Active"}
+                  <div style={{ fontSize: "11px", color: THEME.textMuted }}>
+                    {isMuted ? "Muted" : "Unmuted"}
                   </div>
                 </div>
               </div>
-
-              {/* Toggle switch visual */}
-              <div
-                style={{
-                  width: "38px",
-                  height: "20px",
-                  borderRadius: "12px",
-                  backgroundColor: isMuted ? THEME.danger : THEME.header,
-                  position: "relative",
-                  transition: "background-color 0.2s ease"
-                }}
-              >
-                <div
-                  style={{
-                    width: "16px",
-                    height: "16px",
-                    borderRadius: "50%",
-                    backgroundColor: "#fff",
-                    position: "absolute",
-                    top: "2px",
-                    left: isMuted ? "20px" : "2px",
-                    transition: "left 0.2s ease"
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Lock Chat with PIN */}
-            <div
-              onClick={() => setShowLockPinModal(true)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "14px 16px",
-                borderBottom: `1px solid ${THEME.border}`,
-                cursor: "pointer"
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <Lock
-                  size={18}
-                  color={isChatLocked ? THEME.primary : THEME.textMuted}
-                />
-                <div>
-                  <div style={{ fontSize: "14px", fontWeight: "600" }}>
-                    Lock Chat with PIN
-                  </div>
-                  <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                    {isChatLocked ? "Protected by 4-digit PIN" : "Unlocked"}
-                  </div>
-                </div>
-              </div>
-
-              <ChevronRight size={16} color={THEME.textMuted} />
-            </div>
-
-            {/* Manage Storage */}
-            <div
-              onClick={() => setShowStorageModal(true)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "14px 16px",
-                cursor: "pointer"
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <Database size={18} color="#38BDF8" />
-                <div>
-                  <div style={{ fontSize: "14px", fontWeight: "600" }}>
-                    Manage Storage
-                  </div>
-                  <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                    {formattedStorage} used
-                  </div>
-                </div>
-              </div>
-
-              <ChevronRight size={16} color={THEME.textMuted} />
+              <input
+                type="checkbox"
+                checked={isMuted}
+                readOnly
+                style={{ accentColor: THEME.danger }}
+              />
             </div>
           </div>
 
-          {/* --- 4. ENCRYPTION NOTICE --- */}
-          <div
-            style={{
-              padding: "12px 16px",
-              display: "flex",
-              alignItems: "center",
-              gap: "12px",
-              backgroundColor: "rgba(34, 197, 94, 0.08)",
-              borderRadius: "12px",
-              margin: "0 16px"
-            }}
-          >
-            <ShieldCheck size={22} color={THEME.primary} style={{ flexShrink: 0 }} />
-            <div style={{ fontSize: "11px", color: THEME.textMuted, lineHeight: "1.4" }}>
-              Messages and calls are end-to-end encrypted. No one outside of this chat,
-              not even Infinity Chat, can read or listen to them.
-            </div>
-          </div>
-
-          {/* --- 5. DANGER ACTIONS (Clear Chat, Block, Report) --- */}
+          {/* ------------------------------------------------------------- */}
+          {/* 2. SHARED MEDIA & DOCUMENTS GRID (Points 9 & 17) */}
+          {/* ------------------------------------------------------------- */}
           <div
             style={{
               backgroundColor: THEME.card,
-              borderTop: `1px solid ${THEME.border}`,
-              borderBottom: `1px solid ${THEME.border}`
+              borderRadius: "10px",
+              border: `1px solid ${THEME.border}`,
+              padding: "12px"
             }}
           >
-            {/* Clear Chat History */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+              <div style={{ display: "flex", gap: "10px" }}>
+                <button
+                  onClick={() => setActiveMediaTab("media")}
+                  style={{
+                    ...styles.cleanBtn,
+                    fontSize: "12px",
+                    fontWeight: activeMediaTab === "media" ? "700" : "500",
+                    color: activeMediaTab === "media" ? THEME.primary : THEME.textMuted,
+                    borderBottom: activeMediaTab === "media" ? `2px solid ${THEME.primary}` : "none",
+                    paddingBottom: "4px"
+                  }}
+                >
+                  Media ({sharedMedia.length})
+                </button>
+                <button
+                  onClick={() => setActiveMediaTab("docs")}
+                  style={{
+                    ...styles.cleanBtn,
+                    fontSize: "12px",
+                    fontWeight: activeMediaTab === "docs" ? "700" : "500",
+                    color: activeMediaTab === "docs" ? THEME.primary : THEME.textMuted,
+                    borderBottom: activeMediaTab === "docs" ? `2px solid ${THEME.primary}` : "none",
+                    paddingBottom: "4px"
+                  }}
+                >
+                  Docs ({sharedDocs.length})
+                </button>
+              </div>
+            </div>
+
+            {/* Media Grid */}
+            {activeMediaTab === "media" ? (
+              sharedMedia.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "18px 0", color: THEME.textMuted, fontSize: "12px" }}>
+                  No photos or videos shared yet
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(3, 1fr)",
+                    gap: "6px",
+                    maxHeight: "180px",
+                    overflowY: "auto"
+                  }}
+                >
+                  {sharedMedia.map((m) => (
+                    <div
+                      key={m.id}
+                      onClick={() =>
+                        onLightbox &&
+                        onLightbox({ url: m.fileUrl, type: m.type, name: m.fileName })
+                      }
+                      style={{
+                        position: "relative",
+                        aspectRatio: "1/1",
+                        borderRadius: "6px",
+                        overflow: "hidden",
+                        backgroundColor: "#000",
+                        cursor: "pointer"
+                      }}
+                    >
+                      {m.type === "video" ? (
+                        <video
+                          src={m.fileUrl}
+                          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                        />
+                      ) : (
+                        <img
+                          src={m.fileUrl}
+                          alt=""
+                          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                        />
+                      )}
+                      {m.type === "video" && (
+                        <div
+                          style={{
+                            position: "absolute",
+                            bottom: "4px",
+                            right: "4px",
+                            backgroundColor: "rgba(0,0,0,0.6)",
+                            borderRadius: "4px",
+                            padding: "2px"
+                          }}
+                        >
+                          <Film size={12} color="#fff" />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : sharedDocs.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "18px 0", color: THEME.textMuted, fontSize: "12px" }}>
+                No documents or audio shared yet
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "180px", overflowY: "auto" }}>
+                {sharedDocs.map((docItem) => (
+                  <div
+                    key={docItem.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "6px 8px",
+                      backgroundColor: THEME.sidebar,
+                      borderRadius: "6px"
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+                      <FileText size={16} color={THEME.primary} />
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: THEME.text,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis"
+                        }}
+                      >
+                        {docItem.fileName || "Shared File"}
+                      </div>
+                    </div>
+                    <a
+                      href={docItem.fileUrl}
+                      download={docItem.fileName || "file"}
+                      style={{ color: THEME.accent }}
+                    >
+                      <Download size={14} />
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ------------------------------------------------------------- */}
+          {/* 3. USER MANAGEMENT ACTIONS (Point 17) */}
+          {/* ------------------------------------------------------------- */}
+          <div
+            style={{
+              backgroundColor: THEME.card,
+              borderRadius: "10px",
+              border: `1px solid ${THEME.border}`,
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column"
+            }}
+          >
+            {/* Add to Favorites */}
             <button
-              type="button"
-              onClick={() => setShowClearConfirm(true)}
+              onClick={toggleFavorite}
               style={{
-                width: "100%",
-                padding: "14px 16px",
-                display: "flex",
-                alignItems: "center",
-                gap: "12px",
-                border: "none",
-                background: "none",
-                color: THEME.danger,
-                fontSize: "14px",
-                fontWeight: "600",
-                cursor: "pointer",
-                textAlign: "left",
-                borderBottom: `1px solid ${THEME.border}`
+                ...styles.settingsItem,
+                backgroundColor: "transparent",
+                padding: "12px 14px",
+                borderBottom: `1px solid ${THEME.border}`,
+                cursor: "pointer"
               }}
             >
-              <Trash2 size={18} color={THEME.danger} />
-              <span>Clear Chat History</span>
+              <Star size={16} fill={isFavorite ? "#f59e0b" : "none"} color="#f59e0b" />
+              <span style={{ fontSize: "13px", color: THEME.text }}>
+                {isFavorite ? "Remove from Favorites" : "Add to Favorites"}
+              </span>
             </button>
 
-            {/* Block / Unblock Contact */}
+            {/* Create Group with this contact */}
             <button
-              type="button"
-              onClick={() => setShowBlockConfirm(true)}
+              onClick={() => {
+                if (onCreateGroupWithUser) {
+                  onCreateGroupWithUser(user);
+                  onClose?.();
+                }
+              }}
               style={{
-                width: "100%",
-                padding: "14px 16px",
-                display: "flex",
-                alignItems: "center",
-                gap: "12px",
-                border: "none",
-                background: "none",
-                color: THEME.danger,
-                fontSize: "14px",
-                fontWeight: "600",
-                cursor: "pointer",
-                textAlign: "left",
-                borderBottom: `1px solid ${THEME.border}`
+                ...styles.settingsItem,
+                backgroundColor: "transparent",
+                padding: "12px 14px",
+                borderBottom: `1px solid ${THEME.border}`,
+                cursor: "pointer"
               }}
             >
-              <ShieldAlert size={18} color={THEME.danger} />
-              <span>{isBlocked ? `Unblock ${peerName}` : `Block ${peerName}`}</span>
+              <Users size={16} color={THEME.primary} />
+              <span style={{ fontSize: "13px", color: THEME.text }}>
+                Create Group with {peerName}
+              </span>
+            </button>
+
+            {/* Clear Chat Messages */}
+            <button
+              onClick={() => setShowClearConfirm(true)}
+              style={{
+                ...styles.settingsItem,
+                backgroundColor: "transparent",
+                padding: "12px 14px",
+                borderBottom: `1px solid ${THEME.border}`,
+                cursor: "pointer"
+              }}
+            >
+              <Trash2 size={16} color={THEME.danger} />
+              <span style={{ fontSize: "13px", color: THEME.danger }}>Clear Chat</span>
             </button>
 
             {/* Report Contact */}
             <button
-              type="button"
               onClick={() => setShowReportModal(true)}
               style={{
-                width: "100%",
-                padding: "14px 16px",
-                display: "flex",
-                alignItems: "center",
-                gap: "12px",
-                border: "none",
-                background: "none",
-                color: THEME.danger,
-                fontSize: "14px",
-                fontWeight: "600",
-                cursor: "pointer",
-                textAlign: "left"
+                ...styles.settingsItem,
+                backgroundColor: "transparent",
+                padding: "12px 14px",
+                borderBottom: `1px solid ${THEME.border}`,
+                cursor: "pointer"
               }}
             >
-              <AlertTriangle size={18} color={THEME.danger} />
-              <span>Report {peerName}</span>
+              <ShieldAlert size={16} color="#f59e0b" />
+              <span style={{ fontSize: "13px", color: "#f59e0b" }}>Report Contact</span>
+            </button>
+
+            {/* Block Contact */}
+            <button
+              onClick={() => setShowBlockConfirm(true)}
+              style={{
+                ...styles.settingsItem,
+                backgroundColor: "transparent",
+                padding: "12px 14px",
+                cursor: "pointer"
+              }}
+            >
+              <AlertTriangle size={16} color={THEME.danger} />
+              <span style={{ fontSize: "13px", color: THEME.danger, fontWeight: "700" }}>
+                Block {peerName}
+              </span>
             </button>
           </div>
         </div>
       </div>
 
-      {/* ============================================================= */}
-      {/* DIALOG: DISAPPEARING MESSAGES TIMER PICKER */}
-      {/* ============================================================= */}
+      {/* --- SUB-MODAL: DISAPPEARING MESSAGES OPTIONS (Point 17) --- */}
       {showDisappearingModal && (
-        <div
-          onClick={() => setShowDisappearingModal(false)}
-          style={{
-            ...styles.modalOverlay,
-            zIndex: 5000,
-            backgroundColor: "rgba(0,0,0,0.75)"
-          }}
-        >
+        <div style={{ ...styles.modalOverlay, zIndex: 6000 }}>
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
               ...styles.modalCard,
               backgroundColor: THEME.sidebar,
               borderColor: THEME.border,
-              width: "90%",
-              maxWidth: "360px"
+              maxWidth: "320px",
+              padding: "14px"
             }}
           >
-            <div
-              style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
-              }}
-            >
-              <div style={{ fontWeight: "700", color: THEME.text }}>
-                Disappearing Messages
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <Clock size={16} color={THEME.accent} />
+                <span style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                  Disappearing Messages
+                </span>
               </div>
-              <button
-                onClick={() => setShowDisappearingModal(false)}
-                style={styles.cleanBtn}
-              >
-                <X size={18} color={THEME.textMuted} />
+              <button onClick={() => setShowDisappearingModal(false)} style={styles.cleanBtn}>
+                <X size={16} color={THEME.textMuted} />
               </button>
             </div>
 
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "10px" }}>
-              <div style={{ fontSize: "12px", color: THEME.textMuted, marginBottom: "4px" }}>
-                When turned on, new messages sent in this chat will disappear after the selected duration.
-              </div>
-
-              {[
-                { label: "24 Hours", value: "24h" },
-                { label: "7 Days", value: "7d" },
-                { label: "90 Days", value: "90d" },
-                { label: "Off", value: "off" }
-              ].map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => handleSetDisappearingTimer(opt.value)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    padding: "12px 14px",
-                    borderRadius: "10px",
-                    backgroundColor:
-                      disappearingTimer === opt.value
-                        ? "rgba(34, 197, 94, 0.15)"
-                        : THEME.card,
-                    border: `1px solid ${
-                      disappearingTimer === opt.value ? THEME.primary : THEME.border
-                    }`,
-                    color: THEME.text,
-                    cursor: "pointer"
-                  }}
-                >
-                  <span style={{ fontWeight: "600", fontSize: "13px" }}>{opt.label}</span>
-                  {disappearingTimer === opt.value && (
-                    <Check size={16} color={THEME.primary} />
-                  )}
-                </button>
-              ))}
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              {DISAPPEARING_OPTIONS.map((opt) => {
+                const isSelected = disappearingTimer === opt.value;
+                return (
+                  <div
+                    key={opt.value}
+                    onClick={() => handleSelectDisappearingOption(opt)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "10px 12px",
+                      borderRadius: "6px",
+                      backgroundColor: isSelected ? THEME.cardHover : "transparent",
+                      cursor: "pointer"
+                    }}
+                  >
+                    <span style={{ fontSize: "13px", color: THEME.text }}>{opt.label}</span>
+                    {isSelected && <Check size={16} color={THEME.primary} />}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
       )}
 
-      {/* ============================================================= */}
-      {/* DIALOG: LOCK CHAT WITH PIN */}
-      {/* ============================================================= */}
+      {/* --- SUB-MODAL: CHAT LOCK 4-DIGIT PIN SETUP (Point 10) --- */}
       {showLockPinModal && (
-        <div
-          onClick={() => setShowLockPinModal(false)}
-          style={{
-            ...styles.modalOverlay,
-            zIndex: 5000,
-            backgroundColor: "rgba(0,0,0,0.75)"
-          }}
-        >
+        <div style={{ ...styles.modalOverlay, zIndex: 6000 }}>
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
               ...styles.modalCard,
               backgroundColor: THEME.sidebar,
               borderColor: THEME.border,
-              width: "90%",
-              maxWidth: "360px"
+              maxWidth: "320px",
+              padding: "16px"
             }}
           >
-            <div
-              style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
-              }}
-            >
-              <div style={{ fontWeight: "700", color: THEME.text, display: "flex", alignItems: "center", gap: "8px" }}>
-                <KeyRound size={18} color={THEME.primary} />
-                <span>{isChatLocked ? "Chat Lock Active" : "Lock Chat with PIN"}</span>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <KeyRound size={16} color={THEME.accent} />
+                <span style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                  Set 4-Digit Chat PIN
+                </span>
               </div>
-              <button
-                onClick={() => setShowLockPinModal(false)}
-                style={styles.cleanBtn}
-              >
-                <X size={18} color={THEME.textMuted} />
+              <button onClick={() => setShowLockPinModal(false)} style={styles.cleanBtn}>
+                <X size={16} color={THEME.textMuted} />
               </button>
             </div>
 
-            <div style={{ padding: "18px", display: "flex", flexDirection: "column", gap: "12px" }}>
-              {isChatLocked ? (
-                <>
-                  <div style={{ fontSize: "13px", color: THEME.text, textAlign: "center" }}>
-                    This chat thread is currently protected with a 4-digit passcode.
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleRemovePinLock}
-                    style={{
-                      ...styles.pillBtn,
-                      backgroundColor: THEME.danger,
-                      color: "#fff",
-                      padding: "10px",
-                      fontWeight: "700"
-                    }}
-                  >
-                    Remove PIN Lock
-                  </button>
-                </>
-              ) : (
-                <>
-                  <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                    Set a 4-digit PIN to lock and protect this specific chat thread from unauthorized access.
-                  </div>
-
-                  {pinError && (
-                    <div style={{ color: THEME.danger, fontSize: "12px", fontWeight: "600" }}>
-                      {pinError}
-                    </div>
-                  )}
-
-                  <input
-                    type="password"
-                    maxLength={4}
-                    placeholder="Enter 4-digit PIN"
-                    value={pinInput}
-                    onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ""))}
-                    style={{
-                      ...styles.bareInput,
-                      backgroundColor: THEME.card,
-                      color: THEME.text,
-                      padding: "10px 14px",
-                      borderRadius: "8px",
-                      border: `1px solid ${THEME.border}`,
-                      fontSize: "18px",
-                      textAlign: "center",
-                      letterSpacing: "8px"
-                    }}
-                  />
-
-                  <input
-                    type="password"
-                    maxLength={4}
-                    placeholder="Confirm 4-digit PIN"
-                    value={pinConfirmInput}
-                    onChange={(e) => setPinConfirmInput(e.target.value.replace(/\D/g, ""))}
-                    style={{
-                      ...styles.bareInput,
-                      backgroundColor: THEME.card,
-                      color: THEME.text,
-                      padding: "10px 14px",
-                      borderRadius: "8px",
-                      border: `1px solid ${THEME.border}`,
-                      fontSize: "18px",
-                      textAlign: "center",
-                      letterSpacing: "8px"
-                    }}
-                  />
-
-                  <button
-                    type="button"
-                    onClick={handleSavePinLock}
-                    style={{
-                      ...styles.primaryBtn,
-                      backgroundColor: THEME.primary,
-                      marginTop: "6px"
-                    }}
-                  >
-                    Lock Chat Now
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ============================================================= */}
-      {/* DIALOG: MANAGE STORAGE BREAKDOWN */}
-      {/* ============================================================= */}
-      {showStorageModal && (
-        <div
-          onClick={() => setShowStorageModal(false)}
-          style={{
-            ...styles.modalOverlay,
-            zIndex: 5000,
-            backgroundColor: "rgba(0,0,0,0.75)"
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              ...styles.modalCard,
-              backgroundColor: THEME.sidebar,
-              borderColor: THEME.border,
-              width: "90%",
-              maxWidth: "380px"
-            }}
-          >
-            <div
-              style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
-              }}
-            >
-              <div style={{ fontWeight: "700", color: THEME.text }}>
-                Manage Storage Breakdown
-              </div>
-              <button
-                onClick={() => setShowStorageModal(false)}
-                style={styles.cleanBtn}
-              >
-                <X size={18} color={THEME.textMuted} />
-              </button>
-            </div>
-
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <input
+                type="password"
+                maxLength={6}
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value)}
+                placeholder="Enter PIN (e.g. 1234)"
                 style={{
-                  backgroundColor: THEME.card,
-                  padding: "14px",
-                  borderRadius: "12px",
-                  border: `1px solid ${THEME.border}`,
-                  textAlign: "center"
-                }}
-              >
-                <div style={{ fontSize: "11px", color: THEME.textMuted }}>TOTAL STORAGE USED</div>
-                <div style={{ fontSize: "24px", fontWeight: "800", color: THEME.primary, margin: "4px 0" }}>
-                  {formattedStorage}
-                </div>
-                <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                  in thread with {peerName}
-                </div>
-              </div>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    padding: "8px 12px",
-                    backgroundColor: THEME.card,
-                    borderRadius: "8px"
-                  }}
-                >
-                  <span style={{ fontSize: "13px" }}>Photos & Videos</span>
-                  <span style={{ fontWeight: "700", color: THEME.accent }}>{mediaList.length} files</span>
-                </div>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    padding: "8px 12px",
-                    backgroundColor: THEME.card,
-                    borderRadius: "8px"
-                  }}
-                >
-                  <span style={{ fontSize: "13px" }}>Documents</span>
-                  <span style={{ fontWeight: "700", color: THEME.accent }}>{docList.length} files</span>
-                </div>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    padding: "8px 12px",
-                    backgroundColor: THEME.card,
-                    borderRadius: "8px"
-                  }}
-                >
-                  <span style={{ fontSize: "13px" }}>Voice Notes</span>
-                  <span style={{ fontWeight: "700", color: THEME.accent }}>{audioList.length} files</span>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setShowStorageModal(false);
-                  if (showToast) showToast("Cache freed for this conversation!");
-                }}
-                style={{
-                  ...styles.pillBtn,
+                  ...styles.bareInput,
                   backgroundColor: THEME.card,
                   border: `1px solid ${THEME.border}`,
-                  color: THEME.text,
+                  borderRadius: "8px",
                   padding: "10px",
-                  marginTop: "6px"
+                  textAlign: "center",
+                  fontSize: "18px",
+                  color: THEME.text,
+                  letterSpacing: "4px"
+                }}
+              />
+
+              <input
+                type="password"
+                maxLength={6}
+                value={pinConfirmInput}
+                onChange={(e) => setPinConfirmInput(e.target.value)}
+                placeholder="Confirm PIN"
+                style={{
+                  ...styles.bareInput,
+                  backgroundColor: THEME.card,
+                  border: `1px solid ${THEME.border}`,
+                  borderRadius: "8px",
+                  padding: "10px",
+                  textAlign: "center",
+                  fontSize: "18px",
+                  color: THEME.text,
+                  letterSpacing: "4px"
+                }}
+              />
+
+              {pinError && (
+                <div style={{ fontSize: "12px", color: THEME.danger, textAlign: "center" }}>
+                  {pinError}
+                </div>
+              )}
+
+              <button
+                onClick={handleSavePin}
+                style={{
+                  ...styles.primaryBtn,
+                  backgroundColor: THEME.accent,
+                  padding: "10px",
+                  marginTop: "4px"
                 }}
               >
-                Clear Cached Media
+                Lock Chat Now
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ============================================================= */}
-      {/* DIALOG: CLEAR CHAT CONFIRMATION */}
-      {/* ============================================================= */}
+      {/* --- SUB-MODAL: CLEAR CHAT CONFIRMATION --- */}
       {showClearConfirm && (
-        <div
-          onClick={() => setShowClearConfirm(false)}
-          style={{
-            ...styles.modalOverlay,
-            zIndex: 5000,
-            backgroundColor: "rgba(0,0,0,0.75)"
-          }}
-        >
+        <div style={{ ...styles.modalOverlay, zIndex: 6000 }}>
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
               ...styles.modalCard,
               backgroundColor: THEME.sidebar,
               borderColor: THEME.border,
-              width: "90%",
-              maxWidth: "360px"
+              maxWidth: "300px",
+              padding: "16px",
+              textAlign: "center"
             }}
           >
-            <div
-              style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
-              }}
-            >
-              <div style={{ fontWeight: "700", color: THEME.text }}>
-                Clear this chat?
-              </div>
+            <Trash2 size={32} color={THEME.danger} style={{ margin: "0 auto 8px" }} />
+            <div style={{ fontSize: "14px", fontWeight: "700", color: THEME.text }}>
+              Clear this chat?
+            </div>
+            <div style={{ fontSize: "12px", color: THEME.textMuted, margin: "6px 0 16px" }}>
+              Messages will be cleared from this conversation thread.
+            </div>
+            <div style={{ display: "flex", gap: "8px" }}>
               <button
                 onClick={() => setShowClearConfirm(false)}
-                style={styles.cleanBtn}
+                style={{ ...styles.pillBtn, flex: 1, backgroundColor: THEME.card, color: THEME.textMuted }}
               >
-                <X size={18} color={THEME.textMuted} />
+                Cancel
               </button>
-            </div>
-
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div style={{ fontSize: "13px", color: THEME.textMuted }}>
-                Messages will be permanently removed from your device. This action cannot be undone.
-              </div>
-
-              <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowClearConfirm(false)}
-                  style={{
-                    flex: 1,
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.card,
-                    color: THEME.text,
-                    padding: "10px"
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmClearChat}
-                  style={{
-                    flex: 1,
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.danger,
-                    color: "#fff",
-                    padding: "10px",
-                    fontWeight: "700"
-                  }}
-                >
-                  Clear Chat
-                </button>
-              </div>
+              <button
+                onClick={() => {
+                  if (onClearChat) onClearChat();
+                  setShowClearConfirm(false);
+                }}
+                style={{ ...styles.primaryBtn, flex: 1, backgroundColor: THEME.danger }}
+              >
+                Clear
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ============================================================= */}
-      {/* DIALOG: BLOCK / UNBLOCK CONFIRMATION */}
-      {/* ============================================================= */}
+      {/* --- SUB-MODAL: BLOCK USER CONFIRMATION --- */}
       {showBlockConfirm && (
-        <div
-          onClick={() => setShowBlockConfirm(false)}
-          style={{
-            ...styles.modalOverlay,
-            zIndex: 5000,
-            backgroundColor: "rgba(0,0,0,0.75)"
-          }}
-        >
+        <div style={{ ...styles.modalOverlay, zIndex: 6000 }}>
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
               ...styles.modalCard,
               backgroundColor: THEME.sidebar,
               borderColor: THEME.border,
-              width: "90%",
-              maxWidth: "360px"
+              maxWidth: "300px",
+              padding: "16px",
+              textAlign: "center"
             }}
           >
-            <div
-              style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
-              }}
-            >
-              <div style={{ fontWeight: "700", color: THEME.text }}>
-                {isBlocked ? `Unblock ${peerName}?` : `Block ${peerName}?`}
-              </div>
+            <AlertTriangle size={32} color={THEME.danger} style={{ margin: "0 auto 8px" }} />
+            <div style={{ fontSize: "14px", fontWeight: "700", color: THEME.text }}>
+              Block {peerName}?
+            </div>
+            <div style={{ fontSize: "12px", color: THEME.textMuted, margin: "6px 0 16px" }}>
+              Blocked contacts will no longer be able to call you or send you messages.
+            </div>
+            <div style={{ display: "flex", gap: "8px" }}>
               <button
                 onClick={() => setShowBlockConfirm(false)}
-                style={styles.cleanBtn}
+                style={{ ...styles.pillBtn, flex: 1, backgroundColor: THEME.card, color: THEME.textMuted }}
               >
-                <X size={18} color={THEME.textMuted} />
+                Cancel
               </button>
-            </div>
-
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div style={{ fontSize: "13px", color: THEME.textMuted }}>
-                {isBlocked
-                  ? `Unblocked contacts will be able to call you and send you messages.`
-                  : `Blocked contacts will no longer be able to call you or send you messages.`}
-              </div>
-
-              <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowBlockConfirm(false)}
-                  style={{
-                    flex: 1,
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.card,
-                    color: THEME.text,
-                    padding: "10px"
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmBlock}
-                  style={{
-                    flex: 1,
-                    ...styles.pillBtn,
-                    backgroundColor: isBlocked ? THEME.primary : THEME.danger,
-                    color: "#fff",
-                    padding: "10px",
-                    fontWeight: "700"
-                  }}
-                >
-                  {isBlocked ? "Unblock" : "Block"}
-                </button>
-              </div>
+              <button
+                onClick={handleConfirmBlock}
+                style={{ ...styles.primaryBtn, flex: 1, backgroundColor: THEME.danger }}
+              >
+                Block
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ============================================================= */}
-      {/* DIALOG: REPORT CONTACT MODAL */}
-      {/* ============================================================= */}
+      {/* --- SUB-MODAL: REPORT USER --- */}
       {showReportModal && (
-        <div
-          onClick={() => setShowReportModal(false)}
-          style={{
-            ...styles.modalOverlay,
-            zIndex: 5000,
-            backgroundColor: "rgba(0,0,0,0.75)"
-          }}
-        >
+        <div style={{ ...styles.modalOverlay, zIndex: 6000 }}>
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
               ...styles.modalCard,
               backgroundColor: THEME.sidebar,
               borderColor: THEME.border,
-              width: "90%",
-              maxWidth: "380px"
+              maxWidth: "320px",
+              padding: "16px"
             }}
           >
-            <div
-              style={{
-                ...styles.modalHeader,
-                backgroundColor: THEME.header,
-                borderColor: THEME.border
-              }}
-            >
-              <div style={{ fontWeight: "700", color: THEME.text }}>
-                Report {peerName}?
-              </div>
-              <button
-                onClick={() => setShowReportModal(false)}
-                style={styles.cleanBtn}
-              >
-                <X size={18} color={THEME.textMuted} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+              <span style={{ fontWeight: "700", fontSize: "14px", color: THEME.text }}>
+                Report {peerName}
+              </span>
+              <button onClick={() => setShowReportModal(false)} style={styles.cleanBtn}>
+                <X size={16} color={THEME.textMuted} />
               </button>
             </div>
 
-            <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div style={{ fontSize: "12px", color: THEME.textMuted }}>
-                The last 5 messages from this contact will be forwarded to Infinity Chat security.
-              </div>
-
-              {/* Reasons list */}
-              {[
-                { id: "spam", label: "Spam or unwanted advertising" },
-                { id: "fraud", label: "Scam or fraud attempt" },
-                { id: "harassment", label: "Harassment or offensive behavior" },
-                { id: "inappropriate", label: "Inappropriate or illegal content" }
-              ].map((r) => (
-                <label
-                  key={r.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "10px",
-                    fontSize: "13px",
-                    color: THEME.text,
-                    cursor: "pointer"
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="report_reason"
-                    checked={reportReason === r.id}
-                    onChange={() => setReportReason(r.id)}
-                  />
-                  <span>{r.label}</span>
-                </label>
-              ))}
-
-              <label
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <select
+                value={reportReason}
+                onChange={(e) => setReportReason(e.target.value)}
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  fontSize: "13px",
+                  ...styles.bareInput,
+                  backgroundColor: THEME.card,
+                  border: `1px solid ${THEME.border}`,
+                  borderRadius: "8px",
+                  padding: "8px",
                   color: THEME.text,
-                  marginTop: "6px",
-                  cursor: "pointer"
+                  fontSize: "13px"
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={blockOnReport}
-                  onChange={(e) => setBlockOnReport(e.target.checked)}
-                />
-                <span>Block contact and delete chat messages</span>
-              </label>
+                <option value="spam">Spam / Scam</option>
+                <option value="harassment">Harassment or Bullying</option>
+                <option value="inappropriate">Inappropriate Content</option>
+                <option value="impersonation">Impersonation</option>
+                <option value="other">Other</option>
+              </select>
 
-              <div style={{ display: "flex", gap: "10px", marginTop: "10px" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowReportModal(false)}
-                  style={{
-                    flex: 1,
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.card,
-                    color: THEME.text,
-                    padding: "10px"
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmReport}
-                  style={{
-                    flex: 1,
-                    ...styles.pillBtn,
-                    backgroundColor: THEME.danger,
-                    color: "#fff",
-                    padding: "10px",
-                    fontWeight: "700"
-                  }}
-                >
-                  Report
-                </button>
-              </div>
+              <button
+                onClick={handleSubmitReport}
+                style={{ ...styles.primaryBtn, backgroundColor: THEME.danger, padding: "10px" }}
+              >
+                Submit Report
+              </button>
             </div>
           </div>
         </div>
