@@ -1,12 +1,10 @@
 import React, { useState } from "react";
 import {
   Users,
-  Plus,
   MessageSquare,
   Radio,
   Share2,
-  Settings as SettingsIcon,
-  ArrowLeft
+  Settings as SettingsIcon
 } from "lucide-react";
 import ChatList from "./Chat/ChatList";
 import GroupModal from "./Chat/GroupModal";
@@ -45,10 +43,13 @@ export default function ChatView(props) {
     showToast
   } = props;
 
-  // Group Creation Modal State
+  // Group Creation Overlay Modal State
   const [showGroupModal, setShowGroupModal] = useState(false);
 
-  // If an active conversation is open, delegate cleanly to ChatBox while supporting back navigation
+  // -------------------------------------------------------------
+  // 1. CONVERSATION VIEW ROUTING:
+  // When activeChat is selected, route smoothly to ChatBox
+  // -------------------------------------------------------------
   if (activeChat) {
     return (
       <ChatBox
@@ -60,6 +61,10 @@ export default function ChatView(props) {
     );
   }
 
+  // -------------------------------------------------------------
+  // 2. PRIMARY INDEX VIEW:
+  // Render ChatList, Floating "New Group" Action Button, & GroupModal
+  // -------------------------------------------------------------
   return (
     <div
       style={{
@@ -98,12 +103,20 @@ export default function ChatView(props) {
               gap: "4px",
               padding: "6px 0",
               color: mainTab === "chats" ? THEME.primary : THEME.textMuted,
-              borderBottom: mainTab === "chats" ? `2px solid ${THEME.primary}` : "2px solid transparent",
+              borderBottom:
+                mainTab === "chats"
+                  ? `2px solid ${THEME.primary}`
+                  : "2px solid transparent",
               cursor: "pointer"
             }}
           >
             <MessageSquare size={18} />
-            <span style={{ fontSize: "11px", fontWeight: mainTab === "chats" ? "700" : "500" }}>
+            <span
+              style={{
+                fontSize: "11px",
+                fontWeight: mainTab === "chats" ? "700" : "500"
+              }}
+            >
               {t?.chats || "Chats"}
             </span>
           </button>
@@ -120,12 +133,20 @@ export default function ChatView(props) {
               gap: "4px",
               padding: "6px 0",
               color: mainTab === "feed" ? THEME.primary : THEME.textMuted,
-              borderBottom: mainTab === "feed" ? `2px solid ${THEME.primary}` : "2px solid transparent",
+              borderBottom:
+                mainTab === "feed"
+                  ? `2px solid ${THEME.primary}`
+                  : "2px solid transparent",
               cursor: "pointer"
             }}
           >
             <Share2 size={18} />
-            <span style={{ fontSize: "11px", fontWeight: mainTab === "feed" ? "700" : "500" }}>
+            <span
+              style={{
+                fontSize: "11px",
+                fontWeight: mainTab === "feed" ? "700" : "500"
+              }}
+            >
               {t?.feed || "Feeds"}
             </span>
           </button>
@@ -142,12 +163,20 @@ export default function ChatView(props) {
               gap: "4px",
               padding: "6px 0",
               color: mainTab === "channels" ? THEME.primary : THEME.textMuted,
-              borderBottom: mainTab === "channels" ? `2px solid ${THEME.primary}` : "2px solid transparent",
+              borderBottom:
+                mainTab === "channels"
+                  ? `2px solid ${THEME.primary}`
+                  : "2px solid transparent",
               cursor: "pointer"
             }}
           >
             <Radio size={18} />
-            <span style={{ fontSize: "11px", fontWeight: mainTab === "channels" ? "700" : "500" }}>
+            <span
+              style={{
+                fontSize: "11px",
+                fontWeight: mainTab === "channels" ? "700" : "500"
+              }}
+            >
               {t?.channels || "Channels"}
             </span>
           </button>
@@ -164,19 +193,27 @@ export default function ChatView(props) {
               gap: "4px",
               padding: "6px 0",
               color: mainTab === "settings" ? THEME.primary : THEME.textMuted,
-              borderBottom: mainTab === "settings" ? `2px solid ${THEME.primary}` : "2px solid transparent",
+              borderBottom:
+                mainTab === "settings"
+                  ? `2px solid ${THEME.primary}`
+                  : "2px solid transparent",
               cursor: "pointer"
             }}
           >
             <SettingsIcon size={18} />
-            <span style={{ fontSize: "11px", fontWeight: mainTab === "settings" ? "700" : "500" }}>
+            <span
+              style={{
+                fontSize: "11px",
+                fontWeight: mainTab === "settings" ? "700" : "500"
+              }}
+            >
               {t?.settings || "Settings"}
             </span>
           </button>
         </div>
       )}
 
-      {/* --- PRIMARY VIEW: CHATLIST (Strict User Isolation, Long-Press Actions & Locked Chats) --- */}
+      {/* --- PRIMARY VIEW: CHATLIST INDEX --- */}
       <div style={{ flex: 1, width: "100%", height: "100%", overflow: "hidden" }}>
         <ChatList
           currentUser={currentUser}
@@ -193,7 +230,7 @@ export default function ChatView(props) {
         />
       </div>
 
-      {/* --- FLOATING "CREATE GROUP" ACTION BUTTON --- */}
+      {/* --- FLOATING "NEW GROUP" ACTION BUTTON --- */}
       <button
         onClick={() => setShowGroupModal(true)}
         style={{
@@ -220,7 +257,7 @@ export default function ChatView(props) {
         <Users size={22} />
       </button>
 
-      {/* --- GROUP CREATION MODAL --- */}
+      {/* --- GROUP CREATION OVERLAY MODAL --- */}
       {showGroupModal && (
         <GroupModal
           currentUser={currentUser}
