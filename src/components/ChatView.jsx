@@ -2,9 +2,8 @@ import React, { useState } from "react";
 import {
   Users,
   MessageSquare,
-  Radio,
-  Share2,
-  Settings as SettingsIcon
+  MessageSquarePlus,
+  Plus
 } from "lucide-react";
 import ChatList from "./Chat/ChatList";
 import GroupModal from "./Chat/GroupModal";
@@ -43,13 +42,11 @@ export default function ChatView(props) {
     showToast
   } = props;
 
-  // Group Creation Overlay Modal State
   const [showGroupModal, setShowGroupModal] = useState(false);
+  const [conversationsCount, setConversationsCount] = useState(null);
 
-  // -------------------------------------------------------------
-  // 1. CONVERSATION VIEW ROUTING:
-  // When activeChat is selected, route smoothly to ChatBox
-  // -------------------------------------------------------------
+  // 1. ACTIVE CONVERSATION VIEW ROUTING:
+  // When activeChat is selected, route cleanly to ChatBox
   if (activeChat) {
     return (
       <ChatBox
@@ -61,10 +58,7 @@ export default function ChatView(props) {
     );
   }
 
-  // -------------------------------------------------------------
-  // 2. PRIMARY INDEX VIEW:
-  // Render ChatList, Floating "New Group" Action Button, & GroupModal
-  // -------------------------------------------------------------
+  // 2. PRIMARY CHAT LIST & EMPTY STATE CONTAINER:
   return (
     <div
       style={{
@@ -78,142 +72,7 @@ export default function ChatView(props) {
         overflow: "hidden"
       }}
     >
-      {/* --- TOP TAB BAR (Chats, Feeds, Channels, Settings) --- */}
-      {setMainTab && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-around",
-            backgroundColor: THEME.header,
-            borderBottom: `1px solid ${THEME.border}`,
-            padding: "8px 4px",
-            zIndex: 10
-          }}
-        >
-          {/* Chats Tab */}
-          <button
-            onClick={() => setMainTab("chats")}
-            style={{
-              ...styles.cleanBtn,
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: "4px",
-              padding: "6px 0",
-              color: mainTab === "chats" ? THEME.primary : THEME.textMuted,
-              borderBottom:
-                mainTab === "chats"
-                  ? `2px solid ${THEME.primary}`
-                  : "2px solid transparent",
-              cursor: "pointer"
-            }}
-          >
-            <MessageSquare size={18} />
-            <span
-              style={{
-                fontSize: "11px",
-                fontWeight: mainTab === "chats" ? "700" : "500"
-              }}
-            >
-              {t?.chats || "Chats"}
-            </span>
-          </button>
-
-          {/* Feeds Tab */}
-          <button
-            onClick={() => setMainTab("feed")}
-            style={{
-              ...styles.cleanBtn,
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: "4px",
-              padding: "6px 0",
-              color: mainTab === "feed" ? THEME.primary : THEME.textMuted,
-              borderBottom:
-                mainTab === "feed"
-                  ? `2px solid ${THEME.primary}`
-                  : "2px solid transparent",
-              cursor: "pointer"
-            }}
-          >
-            <Share2 size={18} />
-            <span
-              style={{
-                fontSize: "11px",
-                fontWeight: mainTab === "feed" ? "700" : "500"
-              }}
-            >
-              {t?.feed || "Feeds"}
-            </span>
-          </button>
-
-          {/* Channels Tab */}
-          <button
-            onClick={() => setMainTab("channels")}
-            style={{
-              ...styles.cleanBtn,
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: "4px",
-              padding: "6px 0",
-              color: mainTab === "channels" ? THEME.primary : THEME.textMuted,
-              borderBottom:
-                mainTab === "channels"
-                  ? `2px solid ${THEME.primary}`
-                  : "2px solid transparent",
-              cursor: "pointer"
-            }}
-          >
-            <Radio size={18} />
-            <span
-              style={{
-                fontSize: "11px",
-                fontWeight: mainTab === "channels" ? "700" : "500"
-              }}
-            >
-              {t?.channels || "Channels"}
-            </span>
-          </button>
-
-          {/* Settings Tab */}
-          <button
-            onClick={() => setMainTab("settings")}
-            style={{
-              ...styles.cleanBtn,
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: "4px",
-              padding: "6px 0",
-              color: mainTab === "settings" ? THEME.primary : THEME.textMuted,
-              borderBottom:
-                mainTab === "settings"
-                  ? `2px solid ${THEME.primary}`
-                  : "2px solid transparent",
-              cursor: "pointer"
-            }}
-          >
-            <SettingsIcon size={18} />
-            <span
-              style={{
-                fontSize: "11px",
-                fontWeight: mainTab === "settings" ? "700" : "500"
-              }}
-            >
-              {t?.settings || "Settings"}
-            </span>
-          </button>
-        </div>
-      )}
-
-      {/* --- PRIMARY VIEW: CHATLIST INDEX --- */}
+      {/* Primary Sub-Component: ChatList */}
       <div style={{ flex: 1, width: "100%", height: "100%", overflow: "hidden" }}>
         <ChatList
           currentUser={currentUser}
@@ -226,11 +85,92 @@ export default function ChatView(props) {
           onTogglePin={onTogglePin}
           mutedChats={mutedChats}
           onToggleMute={onToggleMute}
+          onConversationsCountChange={(count) => setConversationsCount(count)}
+          onCreateGroup={() => setShowGroupModal(true)}
           showToast={showToast}
         />
       </div>
 
-      {/* --- FLOATING "NEW GROUP" ACTION BUTTON --- */}
+      {/* Interactive Empty State (Point 1: Isolation) when 0 conversations exist */}
+      {conversationsCount === 0 && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            top: "60px", // leave search bar accessible
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "24px",
+            textAlign: "center",
+            backgroundColor: THEME.sidebar,
+            zIndex: 10,
+            pointerEvents: "auto"
+          }}
+        >
+          <div
+            style={{
+              width: "64px",
+              height: "64px",
+              borderRadius: "50%",
+              backgroundColor: "rgba(34, 197, 94, 0.12)",
+              color: THEME.primary,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              marginBottom: "16px"
+            }}
+          >
+            <MessageSquarePlus size={32} />
+          </div>
+
+          <h3
+            style={{
+              fontSize: "16px",
+              fontWeight: "700",
+              color: THEME.text,
+              marginBottom: "8px"
+            }}
+          >
+            No conversations yet
+          </h3>
+
+          <p
+            style={{
+              fontSize: "13px",
+              color: THEME.textMuted,
+              maxWidth: "280px",
+              lineHeight: "1.5",
+              marginBottom: "20px"
+            }}
+          >
+            No conversations yet. Start a new chat or create a group!
+          </p>
+
+          <button
+            onClick={() => setShowGroupModal(true)}
+            style={{
+              ...styles.primaryBtn,
+              backgroundColor: THEME.primary,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "10px 20px",
+              borderRadius: "24px",
+              fontSize: "13px",
+              fontWeight: "600",
+              cursor: "pointer",
+              boxShadow: "0 4px 14px rgba(34, 197, 94, 0.3)"
+            }}
+          >
+            <Users size={16} />
+            <span>Create Group</span>
+          </button>
+        </div>
+      )}
+
+      {/* Floating Action Button (+) to Trigger GroupModal */}
       <button
         onClick={() => setShowGroupModal(true)}
         style={{
@@ -241,7 +181,7 @@ export default function ChatView(props) {
           height: "52px",
           borderRadius: "50%",
           backgroundColor: THEME.primary,
-          color: "#fff",
+          color: "#ffffff",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -252,12 +192,12 @@ export default function ChatView(props) {
           transition: "transform 0.15s ease",
           WebkitTapHighlightColor: "transparent"
         }}
-        title="Create New Group"
+        title="Create Group"
       >
-        <Users size={22} />
+        <Plus size={24} />
       </button>
 
-      {/* --- GROUP CREATION OVERLAY MODAL --- */}
+      {/* Group Creation Overlay Modal */}
       {showGroupModal && (
         <GroupModal
           currentUser={currentUser}
