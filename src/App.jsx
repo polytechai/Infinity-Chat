@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, Component } from "react";
 import {
   collection,
   doc,
@@ -10,53 +10,137 @@ import {
   query,
   where,
   orderBy,
-  limit,
-  serverTimestamp
+  limit
 } from "firebase/firestore";
 import {
   MessageSquare,
   Radio,
   Share2,
-  Download,
   Settings as SettingsIcon,
-  Plus,
-  Search,
-  Users,
-  Check,
-  CheckCheck,
+  Download,
   X,
-  Send,
-  Pin,
-  BellOff,
   Lock,
   Fingerprint,
-  KeyRound
+  AlertTriangle,
+  RefreshCw
 } from "lucide-react";
 
-// Independent Modular Imports
+// Independent Modular Imports from requested locations
 import {
   db,
-  RTC_CONFIG,
   normalizePhone,
-  isValidBDPhone,
   getRoomId,
   soundEngine,
   TRANSLATIONS,
   getTheme,
   styles
 } from "./firebase";
-import Feed from "./components/Feed";
-import Channels from "./components/Channels";
 import ChatView from "./components/ChatView";
 import ChatBox from "./components/Chat/ChatBox";
-import UserProfileModal from "./components/Chat/UserProfileModal";
 import CallModal from "./components/Calls/CallModal";
-import Settings from "./components/Settings";
 import PrivacySettings from "./components/Settings/PrivacySettings";
+
+// Direct Secondary Component Imports
+import Feed from "./components/Feed";
+import Channels from "./components/Channels";
+import Settings from "./components/Settings";
+import UserProfileModal from "./components/Chat/UserProfileModal";
 import OtpInput from "./components/OtpInput";
 
+// -------------------------------------------------------------
+// ERROR BOUNDARY FALLBACK WRAPPER
+// Prevents blank screen crashes on unexpected runtime exceptions
+// -------------------------------------------------------------
+class SafeErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.warn("Caught in SafeErrorBoundary:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "24px",
+            textAlign: "center",
+            backgroundColor: "#111B21",
+            color: "#E9EDEF"
+          }}
+        >
+          <div
+            style={{
+              width: "56px",
+              height: "56px",
+              borderRadius: "50%",
+              backgroundColor: "rgba(239, 68, 68, 0.15)",
+              color: "#EF4444",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              marginBottom: "16px"
+            }}
+          >
+            <AlertTriangle size={28} />
+          </div>
+          <h3 style={{ fontSize: "17px", fontWeight: "700", marginBottom: "8px" }}>
+            Something went wrong
+          </h3>
+          <p
+            style={{
+              fontSize: "12px",
+              color: "#8696A0",
+              maxWidth: "320px",
+              marginBottom: "20px",
+              lineHeight: "1.5"
+            }}
+          >
+            An unexpected display error occurred. You can safely return to your chats or reload.
+          </p>
+          <button
+            onClick={() => {
+              this.setState({ hasError: false, error: null });
+              if (this.props.onReset) this.props.onReset();
+            }}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              backgroundColor: "#22c55e",
+              color: "#ffffff",
+              padding: "10px 20px",
+              borderRadius: "20px",
+              border: "none",
+              fontWeight: "600",
+              fontSize: "13px",
+              cursor: "pointer"
+            }}
+          >
+            <RefreshCw size={15} />
+            <span>Restore Chat View</span>
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
-  // --- USER AUTH & PERSISTENCE ---
+  // --- USER AUTH & LOCAL PERSISTENCE ---
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const s = localStorage.getItem("infinity_chat_user");
@@ -77,19 +161,19 @@ export default function App() {
   const THEME = useMemo(() => getTheme(darkMode), [darkMode]);
   const t = TRANSLATIONS[lang] || TRANSLATIONS.en;
 
-  // Navigation & Modals
+  // Active Tab & View Navigation State
+  // Supports: 'chats', 'feeds' (or 'feed'), 'channels', 'settings'
+  const [mainTab, setMainTab] = useState("chats");
   const [mobileView, setMobileView] = useState("list"); // "list" | "chat"
-  const [mainTab, setMainTab] = useState("chats"); // "chats" | "feed" | "channels" | "settings"
-  const [activeModal, setActiveModal] = useState(null); // null | "settings" | "privacy_settings" | "profile_view" | "add_contact" | "invite"
+  const [activeModal, setActiveModal] = useState(null); // null | "privacy_settings" | "profile_view"
   const [viewedProfile, setViewedProfile] = useState(null);
 
-  // Active Chats, Channels & Feed Data
-  const [contacts, setContacts] = useState([]);
-  const [contactSearchInput, setContactSearchInput] = useState("");
+  // Active Chat & Messaging State
   const [activeChat, setActiveChat] = useState(null);
   const [messagesMap, setMessagesMap] = useState({});
   const [peerPresence, setPeerPresence] = useState({ isOnline: false, lastSeen: "" });
 
+  // Channels & Feed Data
   const [channels, setChannels] = useState([]);
   const [activeChannel, setActiveChannel] = useState(null);
   const [channelPosts, setChannelPosts] = useState([]);
@@ -111,22 +195,16 @@ export default function App() {
     }
   });
 
-  // Chat State Modes
-  const [vanishMode, setVanishMode] = useState(false);
-  const [viewOnceMode, setViewOnceMode] = useState(false);
-  const [replyingTo, setReplyingTo] = useState(null);
-  const [forwardModalMsg, setForwardModalMsg] = useState(null);
-  const [selectedForwardTargets, setSelectedForwardTargets] = useState([]);
-  const [lightboxMedia, setLightboxMedia] = useState(null);
-
   // Global Call States
   const [activeCall, setActiveCall] = useState(null);
   const [incomingCall, setIncomingCall] = useState(null);
   const [callStatus, setCallStatus] = useState("Calling...");
   const [callDuration, setCallDuration] = useState(0);
 
+  // Media Lightbox State
+  const [lightboxMedia, setLightboxMedia] = useState(null);
+
   // WebRTC Refs
-  const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -143,7 +221,7 @@ export default function App() {
   };
 
   // -------------------------------------------------------------
-  // APP LOCK: PIN & BIOMETRIC AUTHENTICATION ON LAUNCH
+  // APP LOCK: PIN & BIOMETRICS (ON APP LAUNCH)
   // -------------------------------------------------------------
   const myUserId = currentUser?.uid || currentUser?.id || normalizePhone(currentUser?.phone) || "";
   const storedAppLockPin = myUserId ? localStorage.getItem(`infinity_applock_pin_${myUserId}`) : null;
@@ -153,11 +231,9 @@ export default function App() {
   const [unlockPinInput, setUnlockPinInput] = useState("");
   const [unlockError, setUnlockError] = useState("");
 
-  // Attempt Web Biometrics automatically if enabled
   useEffect(() => {
     if (storedAppLockPin && isBiometricEnabled && !isAppUnlocked) {
       if (window.PublicKeyCredential) {
-        // Biometrics trigger
         navigator.credentials?.get({
           publicKey: {
             challenge: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
@@ -167,9 +243,7 @@ export default function App() {
         }).then(() => {
           setIsAppUnlocked(true);
           showToast("App unlocked with biometrics");
-        }).catch(() => {
-          // Fall back gracefully to manual PIN entry
-        });
+        }).catch(() => {});
       }
     }
   }, [storedAppLockPin, isBiometricEnabled, isAppUnlocked]);
@@ -187,7 +261,7 @@ export default function App() {
     }
   };
 
-  // Browser Navigation History (Hardware Back Button Handling)
+  // Browser Navigation History (Back Button)
   useEffect(() => {
     window.history.pushState({ page: "root" }, "");
     const handlePopState = () => {
@@ -198,16 +272,12 @@ export default function App() {
       } else if (lightboxMedia) {
         setLightboxMedia(null);
         window.history.pushState({ page: "root" }, "");
-      } else if (forwardModalMsg) {
-        setForwardModalMsg(null);
-        window.history.pushState({ page: "root" }, "");
       } else if (activeModal) {
         setActiveModal(null);
         window.history.pushState({ page: "root" }, "");
       } else if (mobileView === "chat") {
         setMobileView("list");
         setActiveChat(null);
-        setActiveChannel(null);
         window.history.pushState({ page: "root" }, "");
       } else {
         window.history.pushState({ page: "root" }, "");
@@ -215,11 +285,11 @@ export default function App() {
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [incomingCall, activeCall, lightboxMedia, forwardModalMsg, activeModal, mobileView]);
+  }, [incomingCall, activeCall, lightboxMedia, activeModal, mobileView]);
 
-  // Firestore User Presence & Heartbeat
+  // Firestore Heartbeat & Presence
   useEffect(() => {
-    if (!currentUser?.phone || ghostMode) return;
+    if (!currentUser?.phone || ghostMode || !db) return;
     const myNorm = normalizePhone(currentUser.phone);
     const userDocRef = doc(db, "users", myNorm);
 
@@ -241,37 +311,9 @@ export default function App() {
     };
   }, [currentUser?.phone, ghostMode]);
 
-  // Real-Time Contacts Listener
-  useEffect(() => {
-    if (!currentUser?.phone) return;
-    const myNorm = normalizePhone(currentUser.phone);
-    const usersCol = collection(db, "users");
-
-    const unsub = onSnapshot(usersCol, (snap) => {
-      const list = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        const norm = normalizePhone(data.phone || d.id);
-        if (norm && norm !== myNorm) {
-          list.push({
-            id: norm,
-            name: data.name || norm,
-            phone: norm,
-            avatar: data.avatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160",
-            isOnline: data.isOnline || false,
-            lastSeen: data.lastSeen ? new Date(data.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""
-          });
-        }
-      });
-      setContacts(list);
-    });
-
-    return () => unsub();
-  }, [currentUser?.phone]);
-
   // Real-Time Active Messages Listener
   useEffect(() => {
-    if (!currentUser?.phone || !activeChat?.id) return;
+    if (!currentUser?.phone || !activeChat?.id || !db) return;
     const myNorm = normalizePhone(currentUser.phone);
     const peerNorm = normalizePhone(activeChat.id);
     const roomId = getRoomId(myNorm, peerNorm);
@@ -283,26 +325,25 @@ export default function App() {
       snap.forEach((d) => {
         const m = { id: d.id, ...d.data() };
         msgs.push(m);
-
-        // Mark incoming messages as read
         if (normalizePhone(m.senderPhone || m.senderId) !== myNorm && m.status !== "read") {
           updateDoc(doc(db, "rooms", roomId, "messages", d.id), { status: "read" }).catch(() => {});
         }
       });
       setMessagesMap((prev) => ({ ...prev, [roomId]: msgs }));
-    });
+    }, (err) => console.warn("Messages snapshot error:", err));
 
-    // Also listen to peer presence
     const peerDocRef = doc(db, "users", peerNorm);
     const unsubPeer = onSnapshot(peerDocRef, (d) => {
       if (d.exists()) {
         const data = d.data();
         setPeerPresence({
           isOnline: !!data.isOnline,
-          lastSeen: data.lastSeen ? new Date(data.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""
+          lastSeen: data.lastSeen
+            ? new Date(data.lastSeen).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+            : ""
         });
       }
-    });
+    }, (err) => console.warn("Peer snapshot error:", err));
 
     return () => {
       unsub();
@@ -310,47 +351,9 @@ export default function App() {
     };
   }, [currentUser?.phone, activeChat?.id]);
 
-  // Real-Time Channels & Posts
+  // Incoming Call Listener
   useEffect(() => {
-    if (!currentUser?.phone) return;
-    const channelsCol = collection(db, "channels");
-    const unsub = onSnapshot(channelsCol, (snap) => {
-      const chs = [];
-      snap.forEach((d) => chs.push({ id: d.id, ...d.data() }));
-      setChannels(chs);
-    });
-    return () => unsub();
-  }, [currentUser?.phone]);
-
-  useEffect(() => {
-    if (!activeChannel?.id) return;
-    const postsCol = collection(db, "channels", activeChannel.id, "posts");
-    const q = query(postsCol, orderBy("createdAt", "asc"), limit(100));
-    const unsub = onSnapshot(q, (snap) => {
-      const posts = [];
-      snap.forEach((d) => posts.push({ id: d.id, ...d.data() }));
-      setChannelPosts(posts);
-    });
-    return () => unsub();
-  }, [activeChannel?.id]);
-
-  useEffect(() => {
-    if (!currentUser?.phone) return;
-    const feedCol = collection(db, "channel_posts");
-    const q = query(feedCol, orderBy("createdAt", "desc"), limit(60));
-    const unsub = onSnapshot(q, (snap) => {
-      const posts = [];
-      snap.forEach((d) => posts.push({ id: d.id, ...d.data() }));
-      setFeedPosts(posts);
-    });
-    return () => unsub();
-  }, [currentUser?.phone]);
-
-  // -------------------------------------------------------------
-  // GLOBAL INCOMING CALL LISTENER & WEBRTC SIGNALING
-  // -------------------------------------------------------------
-  useEffect(() => {
-    if (!currentUser?.phone) return;
+    if (!currentUser?.phone || !db) return;
     const myNorm = normalizePhone(currentUser.phone);
     const callsCol = collection(db, "calls");
     const unsub = onSnapshot(callsCol, (snap) => {
@@ -363,17 +366,19 @@ export default function App() {
             !activeCall
           ) {
             setIncomingCall(callData);
-            if (soundEnabled) soundEngine.startRing(selectedRingtone);
+            if (soundEnabled && soundEngine?.startRing) {
+              soundEngine.startRing(selectedRingtone);
+            }
           }
         }
       });
-    });
+    }, (err) => console.warn("Calls listener error:", err));
     return () => unsub();
   }, [currentUser?.phone, activeCall, soundEnabled, selectedRingtone]);
 
   // WebRTC Call Initiation
   const startCall = async (targetContact, type = "audio") => {
-    if (!currentUser?.phone || !targetContact?.phone) return;
+    if (!currentUser?.phone || !targetContact?.phone || !db) return;
     const myNorm = normalizePhone(currentUser.phone);
     const targetNorm = normalizePhone(targetContact.phone);
 
@@ -392,8 +397,8 @@ export default function App() {
         callId,
         id: callId,
         callerPhone: myNorm,
-        callerName: currentUser.name,
-        callerAvatar: currentUser.avatar,
+        callerName: currentUser.name || myNorm,
+        callerAvatar: currentUser.avatar || "",
         recipientPhone: targetNorm,
         type,
         status: "ringing",
@@ -404,13 +409,16 @@ export default function App() {
       setActiveCall({ ...callData, ...targetContact });
       setCallStatus("Ringing...");
 
-      // Listen for peer answer
       const unsubCall = onSnapshot(callDocRef, (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
           if (data.status === "accepted") {
             setCallStatus("Connected");
-            startCallTimer();
+            if (callDurationIntervalRef.current) clearInterval(callDurationIntervalRef.current);
+            setCallDuration(0);
+            callDurationIntervalRef.current = setInterval(() => {
+              setCallDuration((prev) => prev + 1);
+            }, 1000);
           } else if (data.status === "ended" || data.status === "rejected") {
             endCall();
             unsubCall();
@@ -418,14 +426,14 @@ export default function App() {
         }
       });
     } catch (err) {
-      console.warn("Could not start call:", err);
+      console.warn("Start call failed:", err);
       showToast("Camera/Microphone permission required for calling");
     }
   };
 
   const acceptIncomingCall = async () => {
-    if (!incomingCall) return;
-    if (soundEnabled) soundEngine.stopRing();
+    if (!incomingCall || !db) return;
+    if (soundEnabled && soundEngine?.stopRing) soundEngine.stopRing();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -436,11 +444,14 @@ export default function App() {
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
       await updateDoc(doc(db, "calls", incomingCall.id), { status: "accepted" });
-
       setActiveCall(incomingCall);
       setIncomingCall(null);
       setCallStatus("Connected");
-      startCallTimer();
+      setCallDuration(0);
+      if (callDurationIntervalRef.current) clearInterval(callDurationIntervalRef.current);
+      callDurationIntervalRef.current = setInterval(() => {
+        setCallDuration((prev) => prev + 1);
+      }, 1000);
     } catch (err) {
       console.warn("Accept call failed:", err);
       rejectIncomingCall();
@@ -448,15 +459,15 @@ export default function App() {
   };
 
   const rejectIncomingCall = async () => {
-    if (soundEnabled) soundEngine.stopRing();
-    if (incomingCall?.id) {
+    if (soundEnabled && soundEngine?.stopRing) soundEngine.stopRing();
+    if (incomingCall?.id && db) {
       await updateDoc(doc(db, "calls", incomingCall.id), { status: "rejected" }).catch(() => {});
     }
     setIncomingCall(null);
   };
 
   const endCall = async () => {
-    if (soundEnabled) soundEngine.stopRing();
+    if (soundEnabled && soundEngine?.stopRing) soundEngine.stopRing();
     if (callDurationIntervalRef.current) {
       clearInterval(callDurationIntervalRef.current);
       callDurationIntervalRef.current = null;
@@ -466,7 +477,7 @@ export default function App() {
       localStreamRef.current = null;
     }
     const currentCallObj = activeCall || incomingCall;
-    if (currentCallObj?.id) {
+    if (currentCallObj?.id && db) {
       await updateDoc(doc(db, "calls", currentCallObj.id), { status: "ended" }).catch(() => {});
     }
     setActiveCall(null);
@@ -475,17 +486,9 @@ export default function App() {
     setCallDuration(0);
   };
 
-  const startCallTimer = () => {
-    if (callDurationIntervalRef.current) clearInterval(callDurationIntervalRef.current);
-    setCallDuration(0);
-    callDurationIntervalRef.current = setInterval(() => {
-      setCallDuration((prev) => prev + 1);
-    }, 1000);
-  };
-
   // Messaging Actions
   const handleSendMessage = async (text) => {
-    if (!currentUser?.phone || !activeChat?.id) return;
+    if (!currentUser?.phone || !activeChat?.id || !db) return;
     const myNorm = normalizePhone(currentUser.phone);
     const peerNorm = normalizePhone(activeChat.id);
     const roomId = getRoomId(myNorm, peerNorm);
@@ -495,16 +498,13 @@ export default function App() {
       id: msgId,
       senderId: myNorm,
       senderPhone: myNorm,
-      senderName: currentUser.name,
+      senderName: currentUser.name || myNorm,
       recipientPhone: peerNorm,
       content: text,
       type: "text",
       status: "sent",
-      replyTo: replyingTo || null,
       createdAt: new Date().toISOString()
     };
-
-    setReplyingTo(null);
 
     await setDoc(doc(db, "rooms", roomId, "messages", msgId), newMsg);
     await setDoc(
@@ -520,7 +520,7 @@ export default function App() {
   };
 
   const handleSendMedia = async (mediaPayload) => {
-    if (!currentUser?.phone || !activeChat?.id) return;
+    if (!currentUser?.phone || !activeChat?.id || !db) return;
     const myNorm = normalizePhone(currentUser.phone);
     const peerNorm = normalizePhone(activeChat.id);
     const roomId = getRoomId(myNorm, peerNorm);
@@ -530,13 +530,12 @@ export default function App() {
       id: msgId,
       senderId: myNorm,
       senderPhone: myNorm,
-      senderName: currentUser.name,
+      senderName: currentUser.name || myNorm,
       recipientPhone: peerNorm,
       content: mediaPayload.caption || "",
       fileUrl: mediaPayload.fileUrl || mediaPayload.rawDataUrl,
       fileName: mediaPayload.fileName || "attachment",
       type: mediaPayload.type || "image",
-      isHD: !!mediaPayload.isHD,
       status: "sent",
       createdAt: new Date().toISOString()
     };
@@ -555,7 +554,7 @@ export default function App() {
   };
 
   const handleReactMessage = async (msgId, emoji) => {
-    if (!activeChat?.id || !currentUser?.phone) return;
+    if (!activeChat?.id || !currentUser?.phone || !db) return;
     const roomId = getRoomId(normalizePhone(currentUser.phone), normalizePhone(activeChat.id));
     const msgRef = doc(db, "rooms", roomId, "messages", msgId);
     try {
@@ -577,13 +576,6 @@ export default function App() {
     }
   };
 
-  const handleClearChat = async () => {
-    if (!activeChat?.id || !currentUser?.phone) return;
-    const roomId = getRoomId(normalizePhone(currentUser.phone), normalizePhone(activeChat.id));
-    setMessagesMap((prev) => ({ ...prev, [roomId]: [] }));
-    showToast("Chat cleared");
-  };
-
   const togglePinChat = (chatId) => {
     const next = pinnedChats.includes(chatId)
       ? pinnedChats.filter((id) => id !== chatId)
@@ -603,7 +595,7 @@ export default function App() {
   };
 
   // -------------------------------------------------------------
-  // LOGIN / OTP SCREEN (IF NOT LOGGED IN)
+  // 1. AUTHENTICATION FALLBACK
   // -------------------------------------------------------------
   if (!currentUser) {
     return (
@@ -618,22 +610,24 @@ export default function App() {
           padding: "16px"
         }}
       >
-        <OtpInput
-          onLoginSuccess={(user) => {
-            setCurrentUser(user);
-            localStorage.setItem("infinity_chat_user", JSON.stringify(user));
-            showToast("Welcome to Infinity Chat");
-          }}
-          THEME={THEME}
-          t={t}
-          showToast={showToast}
-        />
+        <SafeErrorBoundary>
+          <OtpInput
+            onLoginSuccess={(user) => {
+              setCurrentUser(user);
+              localStorage.setItem("infinity_chat_user", JSON.stringify(user));
+              showToast("Welcome to Infinity Chat");
+            }}
+            THEME={THEME}
+            t={t}
+            showToast={showToast}
+          />
+        </SafeErrorBoundary>
       </div>
     );
   }
 
   // -------------------------------------------------------------
-  // APP LOCK SCREEN OVERLAY (IF PIN CONFIGURED AND LOCKED)
+  // 2. APP LOCK SCREEN OVERLAY (PIN & BIOMETRICS)
   // -------------------------------------------------------------
   if (storedAppLockPin && !isAppUnlocked) {
     return (
@@ -681,7 +675,7 @@ export default function App() {
             Infinity Chat Locked
           </div>
           <div style={{ fontSize: "12px", color: THEME.textMuted, marginBottom: "20px" }}>
-            Enter your 4-digit passcode to access your messages
+            Enter your passcode to access your messages
           </div>
 
           <form onSubmit={handleUnlockWithPin} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
@@ -757,8 +751,14 @@ export default function App() {
     );
   }
 
+  // Active chat message thread
+  const activeRoomId = activeChat?.id
+    ? getRoomId(normalizePhone(currentUser.phone), normalizePhone(activeChat.id))
+    : null;
+  const activeMessages = activeRoomId ? messagesMap[activeRoomId] || [] : [];
+
   // -------------------------------------------------------------
-  // MAIN APP INTERFACE
+  // 3. MAIN APP INTERFACE WITH BOTTOM NAVIGATION BAR
   // -------------------------------------------------------------
   return (
     <div
@@ -766,10 +766,14 @@ export default function App() {
         ...styles.appContainer,
         backgroundColor: THEME.bg,
         color: THEME.text,
-        overflow: "hidden"
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        width: "100vw",
+        height: "100vh"
       }}
     >
-      {/* Toast Popup Notification */}
+      {/* Toast Notification */}
       {toastMessage && (
         <div
           style={{
@@ -783,359 +787,243 @@ export default function App() {
         </div>
       )}
 
-      {/* --- GLOBAL WEBRTC CALL OVERLAY MODAL --- */}
+      {/* --- GLOBAL CALL OVERLAY MODAL --- */}
       {(activeCall || incomingCall) && (
-        <CallModal
-          activeCall={activeCall}
-          incomingCall={incomingCall}
-          acceptIncomingCall={acceptIncomingCall}
-          rejectIncomingCall={rejectIncomingCall}
-          endCall={endCall}
-          localVideoRef={localVideoRef}
-          remoteVideoRef={remoteVideoRef}
-          callStatus={callStatus}
-          callDuration={callDuration}
-          THEME={THEME}
-          t={t}
-          currentUser={currentUser}
-          activeChat={activeChat}
-          showToast={showToast}
-        />
+        <SafeErrorBoundary>
+          <CallModal
+            activeCall={activeCall}
+            incomingCall={incomingCall}
+            acceptIncomingCall={acceptIncomingCall}
+            rejectIncomingCall={rejectIncomingCall}
+            endCall={endCall}
+            localVideoRef={localVideoRef}
+            remoteVideoRef={remoteVideoRef}
+            callStatus={callStatus}
+            callDuration={callDuration}
+            THEME={THEME}
+            t={t}
+            currentUser={currentUser}
+            activeChat={activeChat}
+            showToast={showToast}
+          />
+        </SafeErrorBoundary>
       )}
 
-      {/* --- CHATS TAB --- */}
-      {mainTab === "chats" && (
-        <ChatView
-          activeChat={activeChat}
-          setActiveChat={setActiveChat}
-          currentUser={currentUser}
-          messages={
-            activeChat
-              ? messagesMap[getRoomId(normalizePhone(currentUser.phone), normalizePhone(activeChat.id))] || []
-              : []
-          }
-          peerPresence={peerPresence}
-          THEME={THEME}
-          t={t}
-          mainTab={mainTab}
-          setMainTab={setMainTab}
-          mobileView={mobileView}
-          setMobileView={setMobileView}
-          pinnedChats={pinnedChats}
-          onTogglePin={togglePinChat}
-          mutedChats={mutedChats}
-          onToggleMute={toggleMuteChat}
-          onSendMessage={handleSendMessage}
-          onSendMedia={handleSendMedia}
-          onReactMessage={handleReactMessage}
-          onClearChat={handleClearChat}
-          startCall={startCall}
-          openProfile={(peer) => {
-            setViewedProfile(peer);
-            setActiveModal("profile_view");
-          }}
-          onLightbox={(media) => setLightboxMedia(media)}
-          showToast={showToast}
-        />
-      )}
-
-      {/* --- FEED TAB --- */}
-      {mainTab === "feed" && (
-        <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
-          {/* Top tab switcher */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-around",
-              backgroundColor: THEME.header,
-              borderBottom: `1px solid ${THEME.border}`,
-              padding: "8px 4px",
-              zIndex: 10
-            }}
-          >
-            <button
-              onClick={() => setMainTab("chats")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <MessageSquare size={18} />
-              <span style={{ fontSize: "11px" }}>{t.chats || "Chats"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("feed")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.primary,
-                borderBottom: `2px solid ${THEME.primary}`
-              }}
-            >
-              <Share2 size={18} />
-              <span style={{ fontSize: "11px", fontWeight: "700" }}>{t.feed || "Feeds"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("channels")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <Radio size={18} />
-              <span style={{ fontSize: "11px" }}>{t.channels || "Channels"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("settings")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <SettingsIcon size={18} />
-              <span style={{ fontSize: "11px" }}>{t.settings || "Settings"}</span>
-            </button>
-          </div>
-
-          <div style={{ flex: 1, overflowY: "auto" }}>
-            <Feed
-              posts={feedPosts}
+      {/* --- ACTIVE TAB CONTENT VIEW WITH SAFE ERROR BOUNDARY --- */}
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <SafeErrorBoundary onReset={() => { setMainTab("chats"); setActiveChat(null); }}>
+          {/* TAB 1: CHATS (DEFAULT) */}
+          {(mainTab === "chats" || (!["feeds", "feed", "channels", "settings"].includes(mainTab))) && (
+            <ChatView
+              activeChat={activeChat}
+              setActiveChat={setActiveChat}
               currentUser={currentUser}
+              messages={activeMessages}
+              peerPresence={peerPresence}
               THEME={THEME}
               t={t}
+              mainTab={mainTab}
+              setMainTab={setMainTab}
+              mobileView={mobileView}
+              setMobileView={setMobileView}
+              pinnedChats={pinnedChats}
+              onTogglePin={togglePinChat}
+              mutedChats={mutedChats}
+              onToggleMute={toggleMuteChat}
+              onSendMessage={handleSendMessage}
+              onSendMedia={handleSendMedia}
+              onReactMessage={handleReactMessage}
+              startCall={startCall}
+              openProfile={(peer) => {
+                setViewedProfile(peer);
+                setActiveModal("profile_view");
+              }}
               onLightbox={(media) => setLightboxMedia(media)}
               showToast={showToast}
             />
-          </div>
-        </div>
-      )}
+          )}
 
-      {/* --- CHANNELS TAB --- */}
-      {mainTab === "channels" && (
-        <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
-          {/* Top tab switcher */}
-          <div
+          {/* TAB 2: FEEDS */}
+          {(mainTab === "feeds" || mainTab === "feed") && (
+            <div style={{ width: "100%", height: "100%", overflowY: "auto" }}>
+              <Feed
+                posts={feedPosts}
+                currentUser={currentUser}
+                THEME={THEME}
+                t={t}
+                onLightbox={(media) => setLightboxMedia(media)}
+                showToast={showToast}
+              />
+            </div>
+          )}
+
+          {/* TAB 3: CHANNELS */}
+          {mainTab === "channels" && (
+            <div style={{ width: "100%", height: "100%", overflow: "hidden" }}>
+              <Channels
+                channels={channels}
+                activeChannel={activeChannel}
+                setActiveChannel={setActiveChannel}
+                channelPosts={channelPosts}
+                currentUser={currentUser}
+                THEME={THEME}
+                t={t}
+                setMobileView={setMobileView}
+                showToast={showToast}
+              />
+            </div>
+          )}
+
+          {/* TAB 4: SETTINGS */}
+          {mainTab === "settings" && (
+            <div style={{ width: "100%", height: "100%", overflowY: "auto" }}>
+              <Settings
+                currentUser={currentUser}
+                setCurrentUser={setCurrentUser}
+                lang={lang}
+                setLang={setLang}
+                darkMode={darkMode}
+                setDarkMode={setDarkMode}
+                notificationsEnabled={notificationsEnabled}
+                setNotificationsEnabled={setNotificationsEnabled}
+                soundEnabled={soundEnabled}
+                setSoundEnabled={setSoundEnabled}
+                ghostMode={ghostMode}
+                setGhostMode={setGhostMode}
+                selectedRingtone={selectedRingtone}
+                setSelectedRingtone={setSelectedRingtone}
+                THEME={THEME}
+                t={t}
+                onClose={() => setMainTab("chats")}
+                onOpenPrivacy={() => setActiveModal("privacy_settings")}
+                onOpenChannels={() => setMainTab("channels")}
+                onLogout={() => {
+                  localStorage.removeItem("infinity_chat_user");
+                  setCurrentUser(null);
+                  showToast("Logged out successfully");
+                }}
+                showToast={showToast}
+                db={db}
+              />
+            </div>
+          )}
+        </SafeErrorBoundary>
+      </div>
+
+      {/* --- GLOBAL APP NAVIGATION BAR (ALWAYS AT BOTTOM WHEN NOT IN ACTIVE CHAT) --- */}
+      {(!activeChat || mobileView !== "chat") && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-around",
+            backgroundColor: THEME.header,
+            borderTop: `1px solid ${THEME.border}`,
+            padding: "8px 0 10px",
+            zIndex: 100,
+            flexShrink: 0
+          }}
+        >
+          {/* Chats Tab Button */}
+          <button
+            onClick={() => {
+              setMainTab("chats");
+              setActiveChat(null);
+            }}
             style={{
+              ...styles.cleanBtn,
+              flex: 1,
               display: "flex",
+              flexDirection: "column",
               alignItems: "center",
-              justifyContent: "space-around",
-              backgroundColor: THEME.header,
-              borderBottom: `1px solid ${THEME.border}`,
-              padding: "8px 4px",
-              zIndex: 10
+              gap: "3px",
+              color: mainTab === "chats" ? THEME.primary : THEME.textMuted,
+              cursor: "pointer"
             }}
           >
-            <button
-              onClick={() => setMainTab("chats")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <MessageSquare size={18} />
-              <span style={{ fontSize: "11px" }}>{t.chats || "Chats"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("feed")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <Share2 size={18} />
-              <span style={{ fontSize: "11px" }}>{t.feed || "Feeds"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("channels")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.primary,
-                borderBottom: `2px solid ${THEME.primary}`
-              }}
-            >
-              <Radio size={18} />
-              <span style={{ fontSize: "11px", fontWeight: "700" }}>{t.channels || "Channels"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("settings")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <SettingsIcon size={18} />
-              <span style={{ fontSize: "11px" }}>{t.settings || "Settings"}</span>
-            </button>
-          </div>
+            <MessageSquare size={20} />
+            <span style={{ fontSize: "11px", fontWeight: mainTab === "chats" ? "700" : "500" }}>
+              {t.chats || "Chats"}
+            </span>
+          </button>
 
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <Channels
-              channels={channels}
-              activeChannel={activeChannel}
-              setActiveChannel={setActiveChannel}
-              channelPosts={channelPosts}
-              currentUser={currentUser}
-              THEME={THEME}
-              t={t}
-              setMobileView={setMobileView}
-              showToast={showToast}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* --- SETTINGS TAB (EMBEDDED FULL VIEW) --- */}
-      {mainTab === "settings" && (
-        <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}>
-          {/* Top tab switcher */}
-          <div
+          {/* Feeds Tab Button */}
+          <button
+            onClick={() => {
+              setMainTab("feeds");
+              setActiveChat(null);
+            }}
             style={{
+              ...styles.cleanBtn,
+              flex: 1,
               display: "flex",
+              flexDirection: "column",
               alignItems: "center",
-              justifyContent: "space-around",
-              backgroundColor: THEME.header,
-              borderBottom: `1px solid ${THEME.border}`,
-              padding: "8px 4px",
-              zIndex: 10
+              gap: "3px",
+              color: mainTab === "feeds" || mainTab === "feed" ? THEME.primary : THEME.textMuted,
+              cursor: "pointer"
             }}
           >
-            <button
-              onClick={() => setMainTab("chats")}
+            <Share2 size={20} />
+            <span
               style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
+                fontSize: "11px",
+                fontWeight: mainTab === "feeds" || mainTab === "feed" ? "700" : "500"
               }}
             >
-              <MessageSquare size={18} />
-              <span style={{ fontSize: "11px" }}>{t.chats || "Chats"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("feed")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <Share2 size={18} />
-              <span style={{ fontSize: "11px" }}>{t.feed || "Feeds"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("channels")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.textMuted
-              }}
-            >
-              <Radio size={18} />
-              <span style={{ fontSize: "11px" }}>{t.channels || "Channels"}</span>
-            </button>
-            <button
-              onClick={() => setMainTab("settings")}
-              style={{
-                ...styles.cleanBtn,
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: "4px",
-                color: THEME.primary,
-                borderBottom: `2px solid ${THEME.primary}`
-              }}
-            >
-              <SettingsIcon size={18} />
-              <span style={{ fontSize: "11px", fontWeight: "700" }}>{t.settings || "Settings"}</span>
-            </button>
-          </div>
+              {t.feed || "Feeds"}
+            </span>
+          </button>
 
-          <div style={{ flex: 1, overflowY: "auto", position: "relative" }}>
-            <Settings
-              currentUser={currentUser}
-              setCurrentUser={setCurrentUser}
-              lang={lang}
-              setLang={setLang}
-              darkMode={darkMode}
-              setDarkMode={setDarkMode}
-              notificationsEnabled={notificationsEnabled}
-              setNotificationsEnabled={setNotificationsEnabled}
-              soundEnabled={soundEnabled}
-              setSoundEnabled={setSoundEnabled}
-              ghostMode={ghostMode}
-              setGhostMode={setGhostMode}
-              selectedRingtone={selectedRingtone}
-              setSelectedRingtone={setSelectedRingtone}
-              THEME={THEME}
-              t={t}
-              onClose={() => setMainTab("chats")}
-              onOpenPrivacy={() => setActiveModal("privacy_settings")}
-              onOpenChannels={() => setMainTab("channels")}
-              onLogout={() => {
-                localStorage.removeItem("infinity_chat_user");
-                setCurrentUser(null);
-                showToast("Logged out successfully");
-              }}
-              showToast={showToast}
-              db={db}
-            />
-          </div>
+          {/* Channels Tab Button */}
+          <button
+            onClick={() => {
+              setMainTab("channels");
+              setActiveChat(null);
+            }}
+            style={{
+              ...styles.cleanBtn,
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "3px",
+              color: mainTab === "channels" ? THEME.primary : THEME.textMuted,
+              cursor: "pointer"
+            }}
+          >
+            <Radio size={20} />
+            <span style={{ fontSize: "11px", fontWeight: mainTab === "channels" ? "700" : "500" }}>
+              {t.channels || "Channels"}
+            </span>
+          </button>
+
+          {/* Settings Tab Button */}
+          <button
+            onClick={() => {
+              setMainTab("settings");
+              setActiveChat(null);
+            }}
+            style={{
+              ...styles.cleanBtn,
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "3px",
+              color: mainTab === "settings" ? THEME.primary : THEME.textMuted,
+              cursor: "pointer"
+            }}
+          >
+            <SettingsIcon size={20} />
+            <span style={{ fontSize: "11px", fontWeight: mainTab === "settings" ? "700" : "500" }}>
+              {t.settings || "Settings"}
+            </span>
+          </button>
         </div>
       )}
 
-      {/* --- MODAL: PRIVACY SETTINGS (Point 9 & 10) --- */}
+      {/* --- PRIVACY SETTINGS MODAL --- */}
       {activeModal === "privacy_settings" && (
         <PrivacySettings
           currentUser={currentUser}
@@ -1145,23 +1033,19 @@ export default function App() {
         />
       )}
 
-      {/* --- MODAL: USER PROFILE & MEDIA GRID (Point 9 & 17) --- */}
+      {/* --- USER PROFILE MODAL --- */}
       {activeModal === "profile_view" && viewedProfile && (
         <UserProfileModal
           user={viewedProfile}
           onClose={() => setActiveModal(null)}
           currentUser={currentUser}
-          messages={
-            messagesMap[
-              getRoomId(
-                normalizePhone(currentUser.phone),
-                normalizePhone(viewedProfile.id || viewedProfile.phone)
-              )
-            ] || []
-          }
+          messages={activeMessages}
           THEME={THEME}
-          onClearChat={handleClearChat}
-          onBlockUser={(targetId) => {
+          onClearChat={() => {
+            if (activeRoomId) setMessagesMap((prev) => ({ ...prev, [activeRoomId]: [] }));
+            showToast("Chat cleared");
+          }}
+          onBlockUser={() => {
             showToast("Contact blocked");
             setActiveModal(null);
           }}
@@ -1172,7 +1056,7 @@ export default function App() {
         />
       )}
 
-      {/* --- MODAL: LIGHTBOX FULL VIEW --- */}
+      {/* --- MEDIA LIGHTBOX MODAL --- */}
       {lightboxMedia && (
         <div
           style={{
@@ -1256,10 +1140,6 @@ export default function App() {
         @keyframes pulse {
           0%, 100% { transform: scale(1); opacity: 0.9; }
           50% { transform: scale(1.05); opacity: 0.4; }
-        }
-        @keyframes fadeIn {
-          from { opacity: 0; transform: scale(0.95); }
-          to { opacity: 1; transform: scale(1); }
         }
       `}</style>
     </div>
